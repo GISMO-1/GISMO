@@ -1,11 +1,16 @@
 """Orchestrator tying state, tools, and agents together."""
 from __future__ import annotations
 
+import hashlib
+import json
+import sqlite3
+import time
 from dataclasses import dataclass
-from typing import Any, Dict
+from datetime import datetime, timezone
+from typing import Any, Dict, Optional, Tuple, Type
 
 from gismo.core.agent import Agent
-from gismo.core.models import Task, ToolCall
+from gismo.core.models import FailureType, Task, ToolCall, ToolCallStatus
 from gismo.core.permissions import PermissionPolicy
 from gismo.core.state import StateStore
 from gismo.core.tools import ToolRegistry
@@ -18,39 +23,124 @@ class Orchestrator:
     policy: PermissionPolicy
     agent: Agent
 
-    def run_tool(self, run_id: str, task: Task, tool_name: str, tool_input: Dict[str, Any]) -> Task:
-        task.mark_running()
-        self.state_store.update_task(task)
+    def run_tool(
+        self,
+        run_id: str,
+        task: Task,
+        tool_name: str,
+        tool_input: Dict[str, Any],
+        *,
+        max_attempts: int = 1,
+        backoff_base_seconds: float = 0.25,
+        backoff_multiplier: float = 2.0,
+        retryable_exceptions: Optional[Tuple[Type[BaseException], ...]] = None,
+    ) -> Task:
+        normalized_input = _normalize_input(tool_input)
+        task.input_hash = _stable_hash(normalized_input)
 
-        tool_call = ToolCall(
-            run_id=run_id,
-            task_id=task.id,
-            tool_name=tool_name,
-            input_json=tool_input,
+        prior = self.state_store.find_succeeded_task_by_idempotency(
+            task.idempotency_key,
+            task.input_hash,
         )
-
-        try:
-            self.policy.check_tool_allowed(tool_name)
-        except PermissionError as exc:
-            tool_call.mark_failed(str(exc))
-            self.state_store.record_tool_call(tool_call)
-            task.mark_failed(str(exc))
-            self.state_store.update_task(task)
+        if prior is not None:
+            output = prior.output_json or {}
+            task.mark_succeeded(output)
+            skip_message = (
+                "Idempotent skip: task already succeeded for idempotency_key and input_hash."
+            )
+            tool_call = ToolCall(
+                run_id=run_id,
+                task_id=task.id,
+                tool_name=tool_name,
+                input_json=tool_input,
+                status=ToolCallStatus.SKIPPED,
+                error=skip_message,
+                output_json=output,
+            )
+            tool_call.finished_at = _utc_now()
+            tool_call.failure_type = FailureType.NONE
+            with self.state_store.transaction() as connection:
+                self.state_store.record_tool_call(tool_call, connection=connection)
+                self.state_store.update_task(task, connection=connection)
             return task
 
-        self.state_store.record_tool_call(tool_call)
+        task.mark_running()
+        with self.state_store.transaction() as connection:
+            self.state_store.update_task(task, connection=connection)
 
-        try:
-            output = self.agent.execute(task, tool_name, tool_input)
-        except Exception as exc:  # noqa: BLE001 - fail fast with explicit exception
-            tool_call.mark_failed(str(exc))
-            self.state_store.update_tool_call(tool_call)
-            task.mark_failed(str(exc))
-            self.state_store.update_task(task)
+        retryable = retryable_exceptions or (RuntimeError, sqlite3.OperationalError)
+        max_attempts = max(1, max_attempts)
+
+        for attempt in range(1, max_attempts + 1):
+            tool_call = ToolCall(
+                run_id=run_id,
+                task_id=task.id,
+                tool_name=tool_name,
+                input_json=tool_input,
+                attempt_number=attempt,
+            )
+            with self.state_store.transaction() as connection:
+                self.state_store.record_tool_call(tool_call, connection=connection)
+
+            try:
+                self.policy.check_tool_allowed(tool_name)
+                output = self.agent.execute(task, tool_name, tool_input)
+            except Exception as exc:  # noqa: BLE001 - fail fast with explicit exception
+                failure_type, can_retry = _classify_exception(exc, retryable)
+                error_message = _safe_error_message(exc)
+                tool_call.mark_failed(error_message, failure_type)
+                with self.state_store.transaction() as connection:
+                    self.state_store.update_tool_call(tool_call, connection=connection)
+                    task.error = error_message
+                    task.failure_type = failure_type
+                    task.updated_at = _utc_now()
+                    self.state_store.update_task(task, connection=connection)
+
+                if can_retry and attempt < max_attempts:
+                    backoff = backoff_base_seconds * (backoff_multiplier ** (attempt - 1))
+                    time.sleep(backoff)
+                    continue
+
+                task.mark_failed(error_message, failure_type)
+                with self.state_store.transaction() as connection:
+                    self.state_store.update_task(task, connection=connection)
+                return task
+
+            tool_call.mark_succeeded(output)
+            with self.state_store.transaction() as connection:
+                self.state_store.update_tool_call(tool_call, connection=connection)
+                task.mark_succeeded(output)
+                self.state_store.update_task(task, connection=connection)
             return task
 
-        tool_call.mark_succeeded(output)
-        self.state_store.update_tool_call(tool_call)
-        task.mark_succeeded(output)
-        self.state_store.update_task(task)
         return task
+
+
+def _normalize_input(payload: Dict[str, Any]) -> str:
+    return json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+
+
+def _stable_hash(normalized_payload: str) -> str:
+    return hashlib.sha256(normalized_payload.encode("utf-8")).hexdigest()
+
+
+def _classify_exception(
+    exc: BaseException,
+    retryable: Tuple[Type[BaseException], ...],
+) -> Tuple[FailureType, bool]:
+    if isinstance(exc, PermissionError):
+        return FailureType.PERMISSION_DENIED, False
+    if isinstance(exc, (ValueError, KeyError, TypeError)):
+        return FailureType.INVALID_INPUT, False
+    if isinstance(exc, retryable):
+        return FailureType.TOOL_ERROR, True
+    return FailureType.SYSTEM_ERROR, False
+
+
+def _safe_error_message(exc: BaseException) -> str:
+    message = str(exc)
+    return message or exc.__class__.__name__
+
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)

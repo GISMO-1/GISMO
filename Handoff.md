@@ -14,6 +14,7 @@
 - Added policy loader for CLI workflows and documented policy usage in README.
 - Added toolpack tests covering base directory enforcement and shell allowlist outputs.
 - Restored verification coverage for toolpack tests and made tests importable as a package.
+- Added readonly default policy auto-loading with enforcement tests for denied tools.
 
 ## Next Steps
 - Expand tool catalog and add richer permission policies.
@@ -27,6 +28,7 @@
 - `python -m unittest -v`
 - `python -m unittest discover -s tests -p "test*.py" -v`
 - `python -m unittest -v tests.test_toolpacks`
+- `python -m unittest -v tests.test_policy_defaults`
 - Optional: `make test`
 - Optional: `make demo`
 - Optional: `make demo-graph`

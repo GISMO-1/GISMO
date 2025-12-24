@@ -137,6 +137,8 @@ Run the demo workflow:
 python -m gismo.cli.main demo
 ```
 
+If `policy/readonly.json` exists and `--policy` is not provided, the CLI defaults to that readonly policy.
+
 Run the demo workflow with a policy:
 
 ```bash
@@ -221,6 +223,7 @@ GISMO supports deterministic operator-like commands that map to tasks and tools.
 ## Toolpack Policy & Safety
 
 GISMO ships with a minimal local toolpack (filesystem + restricted shell) that is deny-by-default and policy-gated. Policies are JSON files that explicitly allow tools and define safety boundaries.
+If `policy/readonly.json` exists, the CLI will auto-load it unless you pass `--policy` explicitly. Use `--policy policy/dev.json` to opt into the development policy.
 
 Example policy (`policy/dev.json`):
 

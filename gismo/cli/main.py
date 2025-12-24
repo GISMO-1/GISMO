@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import sys
 from pathlib import Path
 
 from gismo.cli.operator import (
@@ -22,6 +23,9 @@ from gismo.core.toolpacks.shell_tool import ShellConfig, ShellTool
 def run_demo(db_path: str, policy_path: str | None) -> None:
     repo_root = Path(__file__).resolve().parents[2]
     state_store = StateStore(db_path)
+    policy_path, warn = _resolve_default_policy_path(policy_path, repo_root)
+    if warn:
+        _warn_missing_default_policy()
     policy = load_policy(policy_path, repo_root=repo_root, default_allowed_tools={"echo"})
     registry = _build_registry(state_store, policy)
 
@@ -79,6 +83,9 @@ def run_demo(db_path: str, policy_path: str | None) -> None:
 def run_demo_graph(db_path: str, policy_path: str | None) -> None:
     repo_root = Path(__file__).resolve().parents[2]
     state_store = StateStore(db_path)
+    policy_path, warn = _resolve_default_policy_path(policy_path, repo_root)
+    if warn:
+        _warn_missing_default_policy()
     policy = load_policy(
         policy_path,
         repo_root=repo_root,
@@ -141,6 +148,9 @@ def run_operator(db_path: str, command_parts: list[str], policy_path: str | None
     plan = parse_command(command_text)
     normalized = normalize_command(command_text)
     default_tools = required_tools(plan) if policy_path is None else ()
+    policy_path, warn = _resolve_default_policy_path(policy_path, repo_root)
+    if warn:
+        _warn_missing_default_policy()
     policy = load_policy(policy_path, repo_root=repo_root, default_allowed_tools=default_tools)
     registry = _build_registry(state_store, policy)
     agent = SimpleAgent(registry=registry)
@@ -192,6 +202,23 @@ def _print_operator_summary(state_store: StateStore, run_id: str) -> None:
             f"- {task.id} {task.title} [{task.status.value}] "
             f"failure_type={failure_type} tool_calls={len(tool_calls)} skipped={skipped}"
         )
+
+
+def _resolve_default_policy_path(policy_path: str | None, repo_root: Path) -> tuple[str | None, bool]:
+    if policy_path:
+        return policy_path, False
+    readonly_path = repo_root / "policy" / "readonly.json"
+    if readonly_path.exists():
+        return str(readonly_path), False
+    return None, True
+
+
+def _warn_missing_default_policy() -> None:
+    print(
+        "Warning: no policy provided and no policy/readonly.json found; "
+        "continuing with existing default tool allowances.",
+        file=sys.stderr,
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:

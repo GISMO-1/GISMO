@@ -1,0 +1,4 @@
+{
+  "allowed_tools": ["echo", "read_file", "list_dir"],
+  "fs": { "base_dir": "." }
+}

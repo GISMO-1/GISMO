@@ -142,8 +142,10 @@ Expected behavior:
 * Echo succeeds immediately
 * write_note fails on first attempt due to permissions, then succeeds after being allowed
 * Outputs a summary of tasks and tool calls
+* Tool execution records retry attempts and idempotency skips in state
 
 ## Decisions (v0 scope)
 
 * Core state, task lifecycle, agent execution, and permission gating are implemented with standard library tools.
 * Persistence uses SQLite via the `sqlite3` module for auditability and portability.
+* Tool calls are idempotent by key + normalized input hash, with retry semantics and a failure taxonomy stored in state.

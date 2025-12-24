@@ -19,10 +19,19 @@ class TaskStatus(str, Enum):
     FAILED = "FAILED"
 
 
+class FailureType(str, Enum):
+    NONE = "NONE"
+    PERMISSION_DENIED = "PERMISSION_DENIED"
+    INVALID_INPUT = "INVALID_INPUT"
+    TOOL_ERROR = "TOOL_ERROR"
+    SYSTEM_ERROR = "SYSTEM_ERROR"
+
+
 class ToolCallStatus(str, Enum):
     STARTED = "STARTED"
     SUCCEEDED = "SUCCEEDED"
     FAILED = "FAILED"
+    SKIPPED = "SKIPPED"
 
 
 @dataclass
@@ -41,24 +50,30 @@ class Task:
     input_json: Dict[str, Any]
     id: str = field(default_factory=lambda: str(uuid4()))
     status: TaskStatus = TaskStatus.PENDING
+    idempotency_key: str = ""
+    input_hash: str = ""
     created_at: datetime = field(default_factory=_utc_now)
     updated_at: datetime = field(default_factory=_utc_now)
     output_json: Optional[Dict[str, Any]] = None
     error: Optional[str] = None
+    failure_type: FailureType = FailureType.NONE
 
     def mark_running(self) -> None:
         self.status = TaskStatus.RUNNING
+        self.failure_type = FailureType.NONE
         self.updated_at = _utc_now()
 
     def mark_succeeded(self, output: Dict[str, Any]) -> None:
         self.status = TaskStatus.SUCCEEDED
         self.output_json = output
         self.error = None
+        self.failure_type = FailureType.NONE
         self.updated_at = _utc_now()
 
-    def mark_failed(self, error: str) -> None:
+    def mark_failed(self, error: str, failure_type: FailureType = FailureType.SYSTEM_ERROR) -> None:
         self.status = TaskStatus.FAILED
         self.error = error
+        self.failure_type = failure_type
         self.updated_at = _utc_now()
 
 
@@ -74,14 +89,18 @@ class ToolCall:
     output_json: Optional[Dict[str, Any]] = None
     status: ToolCallStatus = ToolCallStatus.STARTED
     error: Optional[str] = None
+    attempt_number: int = 1
+    failure_type: FailureType = FailureType.NONE
 
     def mark_succeeded(self, output: Dict[str, Any]) -> None:
         self.status = ToolCallStatus.SUCCEEDED
         self.output_json = output
         self.error = None
+        self.failure_type = FailureType.NONE
         self.finished_at = _utc_now()
 
-    def mark_failed(self, error: str) -> None:
+    def mark_failed(self, error: str, failure_type: FailureType = FailureType.SYSTEM_ERROR) -> None:
         self.status = ToolCallStatus.FAILED
         self.error = error
+        self.failure_type = failure_type
         self.finished_at = _utc_now()

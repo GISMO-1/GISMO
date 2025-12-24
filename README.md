@@ -143,6 +143,14 @@ Run the dependency graph demo:
 python -m gismo.cli.main demo-graph
 ```
 
+Run operator commands:
+
+```bash
+python -m gismo.cli.main run "echo: hello"
+python -m gismo.cli.main run "note: remember this"
+python -m gismo.cli.main run "graph: echo A -> note B -> echo C"
+```
+
 Expected behavior:
 * Creates a run and two tasks (echo, write_note)
 * Echo succeeds immediately
@@ -159,6 +167,28 @@ make demo
 make demo-graph
 make test
 ```
+
+## Operator Commands
+
+GISMO supports deterministic operator-like commands that map to tasks and tools. The CLI only allows the tools needed for each command.
+
+* Echo (routes to `echo` tool)
+
+  ```bash
+  python -m gismo.cli.main run "echo: status check"
+  ```
+
+* Note (routes to `write_note` tool)
+
+  ```bash
+  python -m gismo.cli.main run "note: rotating credentials on Friday"
+  ```
+
+* Graph (one-line chain with dependencies)
+
+  ```bash
+  python -m gismo.cli.main run "graph: echo A -> note B -> echo C"
+  ```
 
 ## Decisions (v0 scope)
 

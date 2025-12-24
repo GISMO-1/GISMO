@@ -10,16 +10,20 @@
 - Added repository hygiene files, developer tooling, and architecture/decision docs.
 - Added operator command parsing and CLI run flow with deterministic idempotency keys and summaries.
 - Expanded smoke tests to cover operator run commands, permissions, graph dependencies, and idempotency skips.
-- Updated README with operator command usage.
+- Added policy-driven filesystem and shell toolpack with strict base directory and allowlist enforcement.
+- Added policy loader for CLI workflows and documented policy usage in README.
+- Added toolpack tests covering base directory enforcement and shell allowlist outputs.
 
 ## Next Steps
 - Expand tool catalog and add richer permission policies.
 - Add query/reporting helpers for audit trails.
 - Extend orchestration tests to cover recovery workflows.
 - Consider richer operator command validation and error messaging.
+- Add policy-driven examples for operator tasks using the new toolpack.
 
 ## Tests
 - `python scripts/verify.py`
+- `python -m unittest -v`
 - Optional: `make test`
 - Optional: `make demo`
 - Optional: `make demo-graph`

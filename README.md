@@ -137,6 +137,12 @@ Run the demo workflow:
 python -m gismo.cli.main demo
 ```
 
+Run the demo workflow with a policy:
+
+```bash
+python -m gismo.cli.main demo --policy policy/dev.json
+```
+
 Run the dependency graph demo:
 
 ```bash
@@ -149,6 +155,12 @@ Run operator commands:
 python -m gismo.cli.main run "echo: hello"
 python -m gismo.cli.main run "note: remember this"
 python -m gismo.cli.main run "graph: echo A -> note B -> echo C"
+```
+
+Run operator commands with a policy:
+
+```bash
+python -m gismo.cli.main run --policy policy/dev.json "echo: hello"
 ```
 
 Expected behavior:
@@ -205,6 +217,28 @@ GISMO supports deterministic operator-like commands that map to tasks and tools.
   ```bash
   python -m gismo.cli.main run "graph: echo A -> note B -> echo C"
   ```
+
+## Toolpack Policy & Safety
+
+GISMO ships with a minimal local toolpack (filesystem + restricted shell) that is deny-by-default and policy-gated. Policies are JSON files that explicitly allow tools and define safety boundaries.
+
+Example policy (`policy/dev.json`):
+
+```json
+{
+  "allowed_tools": ["echo", "write_note", "read_file", "write_file", "list_dir", "run_shell"],
+  "fs": { "base_dir": "." },
+  "shell": {
+    "base_dir": ".",
+    "allowlist": [["git", "status"], ["python", "-m", "unittest", "-v"], ["make", "test"]]
+  }
+}
+```
+
+Safety notes:
+* Filesystem tools are restricted to the configured base directory (default is the repo root).
+* Shell commands must be exact allowlist matches and are executed without a shell, with a default timeout.
+* No network calls are added by the built-in toolpack.
 
 ## Decisions (v0 scope)
 

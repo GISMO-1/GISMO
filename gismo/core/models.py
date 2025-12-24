@@ -50,6 +50,7 @@ class Task:
     input_json: Dict[str, Any]
     id: str = field(default_factory=lambda: str(uuid4()))
     status: TaskStatus = TaskStatus.PENDING
+    depends_on: list[str] = field(default_factory=list)
     idempotency_key: str = ""
     input_hash: str = ""
     created_at: datetime = field(default_factory=_utc_now)
@@ -57,10 +58,12 @@ class Task:
     output_json: Optional[Dict[str, Any]] = None
     error: Optional[str] = None
     failure_type: FailureType = FailureType.NONE
+    status_reason: Optional[str] = None
 
     def mark_running(self) -> None:
         self.status = TaskStatus.RUNNING
         self.failure_type = FailureType.NONE
+        self.status_reason = None
         self.updated_at = _utc_now()
 
     def mark_succeeded(self, output: Dict[str, Any]) -> None:
@@ -68,12 +71,19 @@ class Task:
         self.output_json = output
         self.error = None
         self.failure_type = FailureType.NONE
+        self.status_reason = None
         self.updated_at = _utc_now()
 
-    def mark_failed(self, error: str, failure_type: FailureType = FailureType.SYSTEM_ERROR) -> None:
+    def mark_failed(
+        self,
+        error: str,
+        failure_type: FailureType = FailureType.SYSTEM_ERROR,
+        status_reason: Optional[str] = None,
+    ) -> None:
         self.status = TaskStatus.FAILED
         self.error = error
         self.failure_type = failure_type
+        self.status_reason = status_reason
         self.updated_at = _utc_now()
 
 

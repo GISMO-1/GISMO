@@ -69,11 +69,69 @@ def run_demo(db_path: str) -> None:
             print(f"  output: {call.output_json}")
 
 
+def run_demo_graph(db_path: str) -> None:
+    state_store = StateStore(db_path)
+    registry = ToolRegistry()
+    registry.register(EchoTool())
+    registry.register(WriteNoteTool(state_store))
+
+    policy = PermissionPolicy(allowed_tools={"echo", "write_note"})
+    agent = SimpleAgent(registry=registry)
+    orchestrator = Orchestrator(
+        state_store=state_store,
+        registry=registry,
+        policy=policy,
+        agent=agent,
+    )
+
+    run = state_store.create_run(label="demo-graph", metadata={"purpose": "dag-demo"})
+
+    task_a = state_store.create_task(
+        run_id=run.id,
+        title="Echo A",
+        description="Echo A",
+        input_json={"tool": "echo", "payload": {"message": "A"}},
+    )
+    task_b = state_store.create_task(
+        run_id=run.id,
+        title="Note B",
+        description="Write note B",
+        input_json={"tool": "write_note", "payload": {"note": "B"}},
+        depends_on=[task_a.id],
+    )
+    task_c = state_store.create_task(
+        run_id=run.id,
+        title="Echo C",
+        description="Echo C",
+        input_json={"tool": "echo", "payload": {"message": "C"}},
+        depends_on=[task_b.id],
+    )
+
+    orchestrator.run_task_graph(run.id)
+
+    print("=== GISMO Demo Graph Summary ===")
+    print(f"Run: {run.id} ({run.label})")
+    print("Tasks:")
+    for task in state_store.list_tasks(run.id):
+        deps = ", ".join(task.depends_on) if task.depends_on else "none"
+        print(f"- {task.id} {task.title} [{task.status}] depends_on={deps}")
+        if task.error:
+            print(f"  error: {task.error}")
+        if task.output_json:
+            print(f"  output: {task.output_json}")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="GISMO CLI")
     subparsers = parser.add_subparsers(dest="command", required=True)
     demo_parser = subparsers.add_parser("demo", help="Run the demo workflow")
     demo_parser.add_argument(
+        "--db-path",
+        default=str(Path(".gismo") / "state.db"),
+        help="Path to SQLite state database",
+    )
+    demo_graph_parser = subparsers.add_parser("demo-graph", help="Run the task graph demo")
+    demo_graph_parser.add_argument(
         "--db-path",
         default=str(Path(".gismo") / "state.db"),
         help="Path to SQLite state database",
@@ -86,6 +144,8 @@ def main() -> None:
     args = parser.parse_args()
     if args.command == "demo":
         run_demo(args.db_path)
+    elif args.command == "demo-graph":
+        run_demo_graph(args.db_path)
 
 
 if __name__ == "__main__":

@@ -3,7 +3,7 @@ import unittest
 from pathlib import Path
 
 from gismo.core.agent import SimpleAgent
-from gismo.core.models import FailureType, ToolCallStatus
+from gismo.core.models import FailureType, TaskStatus, ToolCallStatus
 from gismo.core.orchestrator import Orchestrator
 from gismo.core.permissions import PermissionPolicy
 from gismo.core.state import StateStore
@@ -30,6 +30,14 @@ class CountingTool(Tool):
     def run(self, tool_input: dict) -> dict:
         self.calls += 1
         return {"count": self.calls}
+
+
+class AlwaysFailTool(Tool):
+    def __init__(self) -> None:
+        super().__init__(name="always_fail", description="Always fails")
+
+    def run(self, tool_input: dict) -> dict:
+        raise ValueError("planned failure")
 
 
 class SmokeTest(unittest.TestCase):
@@ -201,6 +209,141 @@ class SmokeTest(unittest.TestCase):
             self.assertEqual(len(tool_calls), 1)
             self.assertEqual(tool_calls[0].status, ToolCallStatus.SKIPPED)
             self.assertEqual(tool_calls[0].failure_type, FailureType.NONE)
+
+    def test_task_graph_happy_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = str(Path(tmpdir) / "state.db")
+            state_store = StateStore(db_path)
+            registry = ToolRegistry()
+            registry.register(EchoTool())
+            registry.register(WriteNoteTool(state_store))
+            policy = PermissionPolicy(allowed_tools={"echo", "write_note"})
+            agent = SimpleAgent(registry=registry)
+            orchestrator = Orchestrator(
+                state_store=state_store,
+                registry=registry,
+                policy=policy,
+                agent=agent,
+            )
+
+            run = state_store.create_run(label="graph", metadata={})
+            task_a = state_store.create_task(
+                run_id=run.id,
+                title="A",
+                description="Echo A",
+                input_json={"tool": "echo", "payload": {"message": "A"}},
+            )
+            task_b = state_store.create_task(
+                run_id=run.id,
+                title="B",
+                description="Note B",
+                input_json={"tool": "write_note", "payload": {"note": "B"}},
+                depends_on=[task_a.id],
+            )
+            task_c = state_store.create_task(
+                run_id=run.id,
+                title="C",
+                description="Echo C",
+                input_json={"tool": "echo", "payload": {"message": "C"}},
+                depends_on=[task_b.id],
+            )
+
+            orchestrator.run_task_graph(run.id)
+
+            tasks = {task.id: task for task in state_store.list_tasks(run.id)}
+            self.assertEqual(tasks[task_a.id].status, TaskStatus.SUCCEEDED)
+            self.assertEqual(tasks[task_b.id].status, TaskStatus.SUCCEEDED)
+            self.assertEqual(tasks[task_c.id].status, TaskStatus.SUCCEEDED)
+
+            tool_calls = list(state_store.list_tool_calls(run.id))
+            self.assertEqual([call.task_id for call in tool_calls], [task_a.id, task_b.id, task_c.id])
+
+    def test_task_graph_dependency_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = str(Path(tmpdir) / "state.db")
+            state_store = StateStore(db_path)
+            registry = ToolRegistry()
+            registry.register(AlwaysFailTool())
+            policy = PermissionPolicy(allowed_tools={"always_fail"})
+            agent = SimpleAgent(registry=registry)
+            orchestrator = Orchestrator(
+                state_store=state_store,
+                registry=registry,
+                policy=policy,
+                agent=agent,
+            )
+
+            run = state_store.create_run(label="dep-fail", metadata={})
+            task_a = state_store.create_task(
+                run_id=run.id,
+                title="A",
+                description="Failing A",
+                input_json={"tool": "always_fail", "payload": {}},
+            )
+            task_b = state_store.create_task(
+                run_id=run.id,
+                title="B",
+                description="Blocked B",
+                input_json={"tool": "always_fail", "payload": {}},
+                depends_on=[task_a.id],
+            )
+
+            orchestrator.run_task_graph(run.id)
+
+            updated_a = state_store.get_task(task_a.id)
+            updated_b = state_store.get_task(task_b.id)
+            assert updated_a is not None
+            assert updated_b is not None
+            self.assertEqual(updated_a.status, TaskStatus.FAILED)
+            self.assertEqual(updated_a.failure_type, FailureType.INVALID_INPUT)
+            self.assertEqual(updated_b.status, TaskStatus.FAILED)
+            self.assertEqual(updated_b.failure_type, FailureType.SYSTEM_ERROR)
+            self.assertIn(task_a.id, updated_b.error or "")
+            tool_calls_b = list(state_store.list_tool_calls_for_task(task_b.id))
+            self.assertEqual(tool_calls_b, [])
+
+    def test_task_graph_deadlock_detection(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = str(Path(tmpdir) / "state.db")
+            state_store = StateStore(db_path)
+            registry = ToolRegistry()
+            registry.register(EchoTool())
+            policy = PermissionPolicy(allowed_tools={"echo"})
+            agent = SimpleAgent(registry=registry)
+            orchestrator = Orchestrator(
+                state_store=state_store,
+                registry=registry,
+                policy=policy,
+                agent=agent,
+            )
+
+            run = state_store.create_run(label="deadlock", metadata={})
+            task_a = state_store.create_task(
+                run_id=run.id,
+                title="A",
+                description="A",
+                input_json={"tool": "echo", "payload": {"message": "A"}},
+            )
+            task_b = state_store.create_task(
+                run_id=run.id,
+                title="B",
+                description="B",
+                input_json={"tool": "echo", "payload": {"message": "B"}},
+                depends_on=[task_a.id],
+            )
+            task_a.depends_on = [task_b.id]
+            state_store.update_task(task_a)
+
+            orchestrator.run_task_graph(run.id)
+
+            updated_a = state_store.get_task(task_a.id)
+            updated_b = state_store.get_task(task_b.id)
+            assert updated_a is not None
+            assert updated_b is not None
+            self.assertEqual(updated_a.status, TaskStatus.FAILED)
+            self.assertEqual(updated_b.status, TaskStatus.FAILED)
+            self.assertIn("Deadlock/cycle detected", updated_a.error or "")
+            self.assertIn("Deadlock/cycle detected", updated_b.error or "")
 
 
 if __name__ == "__main__":

@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, Optional, Tuple, Type
 
 from gismo.core.agent import Agent
-from gismo.core.models import FailureType, Task, ToolCall, ToolCallStatus
+from gismo.core.models import FailureType, Task, TaskStatus, ToolCall, ToolCallStatus
 from gismo.core.permissions import PermissionPolicy
 from gismo.core.state import StateStore
 from gismo.core.tools import ToolRegistry
@@ -115,6 +115,72 @@ class Orchestrator:
 
         return task
 
+    def run_task_graph(self, run_id: str) -> Dict[str, Task]:
+        tasks = {task.id: task for task in self.state_store.list_tasks(run_id)}
+        if not tasks:
+            return {}
+
+        while True:
+            runnable: list[Task] = []
+            pending = [task for task in tasks.values() if task.status == TaskStatus.PENDING]
+
+            for task in pending:
+                if not task.depends_on:
+                    runnable.append(task)
+                    continue
+
+                missing = [dep for dep in task.depends_on if dep not in tasks]
+                if missing:
+                    error = f"Dependency missing: {', '.join(missing)}"
+                    task.mark_failed(error, FailureType.SYSTEM_ERROR, status_reason=error)
+                    with self.state_store.transaction() as connection:
+                        self.state_store.update_task(task, connection=connection)
+                    continue
+
+                failed_deps = [
+                    dep_id
+                    for dep_id in task.depends_on
+                    if tasks[dep_id].status == TaskStatus.FAILED
+                ]
+                if failed_deps:
+                    error = f"Dependency failed: {failed_deps[0]}"
+                    task.mark_failed(error, FailureType.SYSTEM_ERROR, status_reason=error)
+                    with self.state_store.transaction() as connection:
+                        self.state_store.update_task(task, connection=connection)
+                    continue
+
+                if all(tasks[dep_id].status == TaskStatus.SUCCEEDED for dep_id in task.depends_on):
+                    runnable.append(task)
+
+            if runnable:
+                for task in runnable:
+                    tool_name, tool_input = _task_tool_spec(task)
+                    if tool_name is None:
+                        error = "Invalid task input: missing tool or payload"
+                        task.mark_failed(error, FailureType.INVALID_INPUT, status_reason=error)
+                        with self.state_store.transaction() as connection:
+                            self.state_store.update_task(task, connection=connection)
+                        continue
+                    updated = self.run_tool(run_id, task, tool_name, tool_input)
+                    tasks[task.id] = updated
+                continue
+
+            pending = [task for task in tasks.values() if task.status == TaskStatus.PENDING]
+            if not pending:
+                break
+
+            diagnostics = "; ".join(
+                f"{task.id} depends_on={task.depends_on}" for task in pending
+            )
+            error = f"Deadlock/cycle detected: {diagnostics}"
+            for task in pending:
+                task.mark_failed(error, FailureType.SYSTEM_ERROR, status_reason=error)
+                with self.state_store.transaction() as connection:
+                    self.state_store.update_task(task, connection=connection)
+            break
+
+        return tasks
+
 
 def _normalize_input(payload: Dict[str, Any]) -> str:
     return json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
@@ -144,3 +210,13 @@ def _safe_error_message(exc: BaseException) -> str:
 
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _task_tool_spec(task: Task) -> Tuple[Optional[str], Dict[str, Any]]:
+    if not isinstance(task.input_json, dict):
+        return None, {}
+    tool_name = task.input_json.get("tool")
+    payload = task.input_json.get("payload")
+    if not tool_name or not isinstance(payload, dict):
+        return None, {}
+    return tool_name, payload

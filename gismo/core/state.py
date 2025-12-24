@@ -323,6 +323,25 @@ class StateStore:
             ).fetchall()
         return [self._row_to_tool_call(row) for row in rows]
 
+    def get_run(self, run_id: str) -> Optional[Run]:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM runs WHERE id = ?",
+                (run_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return self._row_to_run(row)
+
+    def get_latest_run(self) -> Optional[Run]:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM runs ORDER BY created_at DESC LIMIT 1",
+            ).fetchone()
+        if row is None:
+            return None
+        return self._row_to_run(row)
+
     def find_succeeded_task_by_idempotency(
         self,
         idempotency_key: str,
@@ -377,6 +396,14 @@ class StateStore:
             status_reason=row["status_reason"],
         )
         return task
+
+    def _row_to_run(self, row: sqlite3.Row) -> Run:
+        return Run(
+            id=row["id"],
+            created_at=_parse_dt(row["created_at"]),
+            label=row["label"],
+            metadata_json=json.loads(row["metadata_json"]),
+        )
 
     def _row_to_tool_call(self, row: sqlite3.Row) -> ToolCall:
         tool_call = ToolCall(

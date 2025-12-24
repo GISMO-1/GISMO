@@ -165,6 +165,13 @@ Run operator commands with a policy:
 python -m gismo.cli.main run --policy policy/dev.json "echo: hello"
 ```
 
+Export a run audit trail as JSONL:
+
+```bash
+python -m gismo.cli.main export --run <RUN_ID> --format jsonl --out exports/<RUN_ID>.jsonl
+python -m gismo.cli.main export --latest --format jsonl
+```
+
 Expected behavior:
 * Creates a run and two tasks (echo, write_note)
 * Echo succeeds immediately
@@ -197,6 +204,11 @@ make test
 make demo
 make demo-graph
 ```
+
+## Policies
+
+* `policy/readonly.json`: default readonly policy if no `--policy` is provided.
+* `policy/dev-safe.json`: dev-safe policy allowing `run_shell` with a minimal allowlist.
 
 ## Operator Commands
 

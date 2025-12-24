@@ -15,6 +15,9 @@
 - Added toolpack tests covering base directory enforcement and shell allowlist outputs.
 - Restored verification coverage for toolpack tests and made tests importable as a package.
 - Added readonly default policy auto-loading with enforcement tests for denied tools.
+- Added JSONL audit export for runs, tasks, and tool calls with optional redaction.
+- Added dev-safe shell policy profile and tests for allowlisted shell execution.
+- Extended CLI and documentation with export and policy usage.
 
 ## Next Steps
 - Expand tool catalog and add richer permission policies.
@@ -25,13 +28,7 @@
 
 ## Tests
 - `python scripts/verify.py`
-- `python -m unittest -v`
 - `python -m unittest discover -s tests -p "test*.py" -v`
-- `python -m unittest -v tests.test_toolpacks`
-- `python -m unittest -v tests.test_policy_defaults`
-- Optional: `make test`
-- Optional: `make demo`
-- Optional: `make demo-graph`
 
 ## Notes
 - Validation is Python-only; do not run cargo/npm checks.

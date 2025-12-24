@@ -12,6 +12,7 @@ from gismo.cli.operator import (
     required_tools,
 )
 from gismo.core.agent import SimpleAgent
+from gismo.core.export import export_latest_run_jsonl, export_run_jsonl
 from gismo.core.orchestrator import Orchestrator
 from gismo.core.permissions import PermissionPolicy, load_policy
 from gismo.core.state import StateStore
@@ -190,6 +191,48 @@ def run_operator(db_path: str, command_parts: list[str], policy_path: str | None
     _print_operator_summary(state_store, run.id)
 
 
+def run_export(
+    db_path: str,
+    *,
+    run_id: str | None,
+    use_latest: bool,
+    export_format: str,
+    out_path: str | None,
+    redact: bool,
+    policy_path: str | None,
+) -> None:
+    if export_format != "jsonl":
+        raise ValueError("Only jsonl export is supported")
+    if run_id and use_latest:
+        raise ValueError("Provide either --run or --latest, not both")
+    if not run_id and not use_latest:
+        raise ValueError("Export requires --run or --latest")
+
+    repo_root = Path(__file__).resolve().parents[2]
+    state_store = StateStore(db_path)
+    policy_path, warn = _resolve_default_policy_path(policy_path, repo_root)
+    if warn:
+        _warn_missing_default_policy()
+    policy = load_policy(policy_path, repo_root=repo_root)
+    base_dir = policy.fs.base_dir
+    if use_latest:
+        export_path = export_latest_run_jsonl(
+            state_store,
+            out_path=out_path,
+            redact=redact,
+            base_dir=base_dir,
+        )
+    else:
+        export_path = export_run_jsonl(
+            state_store,
+            run_id,
+            out_path=out_path,
+            redact=redact,
+            base_dir=base_dir,
+        )
+    print(f"Exported run audit to {export_path}")
+
+
 def _print_operator_summary(state_store: StateStore, run_id: str) -> None:
     print("=== GISMO Operator Summary ===")
     print(f"Run: {run_id}")
@@ -262,6 +305,43 @@ def build_parser() -> argparse.ArgumentParser:
         nargs=argparse.REMAINDER,
         help="Operator command string (echo:, note:, or graph:)",
     )
+    export_parser = subparsers.add_parser("export", help="Export run audit trail")
+    export_parser.add_argument(
+        "--db-path",
+        default=str(Path(".gismo") / "state.db"),
+        help="Path to SQLite state database",
+    )
+    export_parser.add_argument(
+        "--policy",
+        default=None,
+        help="Path to a JSON policy file",
+    )
+    export_parser.add_argument(
+        "--run",
+        dest="run_id",
+        default=None,
+        help="Run ID to export",
+    )
+    export_parser.add_argument(
+        "--latest",
+        action="store_true",
+        help="Export the most recent run",
+    )
+    export_parser.add_argument(
+        "--format",
+        default="jsonl",
+        help="Export format (jsonl only)",
+    )
+    export_parser.add_argument(
+        "--out",
+        default=None,
+        help="Output file path (defaults to exports/<run_id>.jsonl)",
+    )
+    export_parser.add_argument(
+        "--redact",
+        action="store_true",
+        help="Redact file contents, shell output, and large tool outputs",
+    )
     return parser
 
 
@@ -274,6 +354,16 @@ def main() -> None:
         run_demo_graph(args.db_path, args.policy)
     elif args.command == "run":
         run_operator(args.db_path, args.operator_command, args.policy)
+    elif args.command == "export":
+        run_export(
+            args.db_path,
+            run_id=args.run_id,
+            use_latest=args.latest,
+            export_format=args.format,
+            out_path=args.out,
+            redact=args.redact,
+            policy_path=args.policy,
+        )
 
 
 def _build_registry(state_store: StateStore, policy: PermissionPolicy) -> ToolRegistry:

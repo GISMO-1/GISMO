@@ -91,6 +91,13 @@ Breaking changes are allowed early, but they must be:
 
 ---
 
+## 5.1) Validation
+- Required: `python scripts/verify.py`
+- Optional: `make test`, `make demo`, `make demo-graph`
+- Do not run cargo/npm commands; this repo is Python-only.
+
+---
+
 ## 6) Documentation Requirements
 ### 6.1 README
 README must remain truthful and minimal.  

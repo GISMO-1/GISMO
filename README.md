@@ -168,6 +168,22 @@ make demo-graph
 make test
 ```
 
+## Validation
+
+Required verification:
+
+```bash
+python scripts/verify.py
+```
+
+Optional checks:
+
+```bash
+make test
+make demo
+make demo-graph
+```
+
 ## Operator Commands
 
 GISMO supports deterministic operator-like commands that map to tasks and tools. The CLI only allows the tools needed for each command.

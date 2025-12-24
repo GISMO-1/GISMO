@@ -124,3 +124,26 @@ Expect breaking changes until core abstractions stabilize.
 
 Most AI systems **talk**.
 GISMO is built to **operate**.
+
+---
+
+## Quickstart
+
+**Python:** 3.11+
+
+Run the demo workflow:
+
+```bash
+python -m gismo.cli.main demo
+```
+
+Expected behavior:
+* Creates a run and two tasks (echo, write_note)
+* Echo succeeds immediately
+* write_note fails on first attempt due to permissions, then succeeds after being allowed
+* Outputs a summary of tasks and tool calls
+
+## Decisions (v0 scope)
+
+* Core state, task lifecycle, agent execution, and permission gating are implemented with standard library tools.
+* Persistence uses SQLite via the `sqlite3` module for auditability and portability.

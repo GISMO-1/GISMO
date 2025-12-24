@@ -13,6 +13,7 @@
 - Added policy-driven filesystem and shell toolpack with strict base directory and allowlist enforcement.
 - Added policy loader for CLI workflows and documented policy usage in README.
 - Added toolpack tests covering base directory enforcement and shell allowlist outputs.
+- Restored verification coverage for toolpack tests and made tests importable as a package.
 
 ## Next Steps
 - Expand tool catalog and add richer permission policies.
@@ -24,6 +25,8 @@
 ## Tests
 - `python scripts/verify.py`
 - `python -m unittest -v`
+- `python -m unittest discover -s tests -p "test*.py" -v`
+- `python -m unittest -v tests.test_toolpacks`
 - Optional: `make test`
 - Optional: `make demo`
 - Optional: `make demo-graph`

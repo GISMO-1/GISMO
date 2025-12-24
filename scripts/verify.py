@@ -14,8 +14,9 @@ def run(cmd: list[str]) -> None:
 
 def main() -> int:
     print(f"Python version: {sys.version}")
-    run([sys.executable, "-m", "unittest", "tests.test_smoke", "-v"])
     run([sys.executable, "-m", "unittest", "discover", "-s", "tests", "-p", "test*.py", "-v"])
+    run([sys.executable, "-m", "unittest", "-v", "tests.test_smoke"])
+    run([sys.executable, "-m", "unittest", "-v", "tests.test_toolpacks"])
     return 0
 
 

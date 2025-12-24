@@ -34,6 +34,13 @@ class ToolCallStatus(str, Enum):
     SKIPPED = "SKIPPED"
 
 
+class QueueStatus(str, Enum):
+    QUEUED = "QUEUED"
+    IN_PROGRESS = "IN_PROGRESS"
+    SUCCEEDED = "SUCCEEDED"
+    FAILED = "FAILED"
+
+
 @dataclass
 class Run:
     id: str = field(default_factory=lambda: str(uuid4()))
@@ -114,3 +121,18 @@ class ToolCall:
         self.error = error
         self.failure_type = failure_type
         self.finished_at = _utc_now()
+
+
+@dataclass
+class QueueItem:
+    command_text: str
+    run_id: Optional[str] = None
+    id: str = field(default_factory=lambda: str(uuid4()))
+    status: QueueStatus = QueueStatus.QUEUED
+    created_at: datetime = field(default_factory=_utc_now)
+    updated_at: datetime = field(default_factory=_utc_now)
+    started_at: Optional[datetime] = None
+    finished_at: Optional[datetime] = None
+    attempt_count: int = 0
+    max_attempts: int = 3
+    last_error: Optional[str] = None

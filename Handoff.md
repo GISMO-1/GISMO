@@ -19,6 +19,8 @@
 - Added dev-safe shell policy profile and tests for allowlisted shell execution.
 - Extended CLI and documentation with export and policy usage.
 - Wired CLI subcommand handlers for demo, run, and export with parser routing tests.
+- Added SQLite-backed queue with daemon execution loop and CLI enqueue/daemon commands.
+- Added daemon queue tests for enqueue/claim, execution, retries, and non-retryable failures.
 
 ## Next Steps
 - Expand tool catalog and add richer permission policies.
@@ -26,9 +28,12 @@
 - Extend orchestration tests to cover recovery workflows.
 - Consider richer operator command validation and error messaging.
 - Add policy-driven examples for operator tasks using the new toolpack.
+- Extend daemon workflows with observability metrics and backoff tuning.
 
 ## Tests
 - `python scripts/verify.py`
+- `python -m gismo.cli.main enqueue "echo: daemon smoke"`
+- `python -m gismo.cli.main daemon --once --policy policy/readonly.json`
 
 ## Notes
 - Validation is Python-only; do not run cargo/npm checks.

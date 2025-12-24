@@ -2,6 +2,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from gismo.cli.operator import make_idempotency_key, normalize_command, parse_command, required_tools
 from gismo.core.agent import SimpleAgent
 from gismo.core.models import FailureType, TaskStatus, ToolCallStatus
 from gismo.core.orchestrator import Orchestrator
@@ -38,6 +39,41 @@ class AlwaysFailTool(Tool):
 
     def run(self, tool_input: dict) -> dict:
         raise ValueError("planned failure")
+
+
+def run_operator_plan(
+    state_store: StateStore,
+    orchestrator: Orchestrator,
+    plan: dict,
+    normalized_command: str,
+) -> tuple[str, list[str]]:
+    run = state_store.create_run(label="operator-test", metadata={"command": normalized_command})
+    created_task_ids = []
+    previous_task_id = None
+    for index, step in enumerate(plan["steps"]):
+        tool_name = step["tool_name"]
+        tool_input = step["input_json"]
+        idempotency_key = make_idempotency_key(step, normalized_command, index)
+        depends_on = [previous_task_id] if plan["mode"] == "graph" and previous_task_id else None
+        task = state_store.create_task(
+            run_id=run.id,
+            title=step["title"],
+            description="Operator test step",
+            input_json={"tool": tool_name, "payload": tool_input},
+            depends_on=depends_on,
+            idempotency_key=idempotency_key,
+        )
+        created_task_ids.append(task.id)
+        previous_task_id = task.id
+
+    if plan["mode"] == "single":
+        task = state_store.get_task(created_task_ids[0])
+        assert task is not None
+        orchestrator.run_tool(run.id, task, task.input_json["tool"], task.input_json["payload"])
+    else:
+        orchestrator.run_task_graph(run.id)
+
+    return run.id, created_task_ids
 
 
 class SmokeTest(unittest.TestCase):
@@ -344,6 +380,131 @@ class SmokeTest(unittest.TestCase):
             self.assertEqual(updated_b.status, TaskStatus.FAILED)
             self.assertIn("Deadlock/cycle detected", updated_a.error or "")
             self.assertIn("Deadlock/cycle detected", updated_b.error or "")
+
+    def test_operator_run_echo(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = str(Path(tmpdir) / "state.db")
+            state_store = StateStore(db_path)
+            registry = ToolRegistry()
+            registry.register(EchoTool())
+            policy = PermissionPolicy(allowed_tools=set())
+            agent = SimpleAgent(registry=registry)
+            orchestrator = Orchestrator(
+                state_store=state_store,
+                registry=registry,
+                policy=policy,
+                agent=agent,
+            )
+
+            command = "echo: hello operator"
+            plan = parse_command(command)
+            normalized = normalize_command(command)
+            policy.allowed_tools = required_tools(plan)
+            run_id, task_ids = run_operator_plan(state_store, orchestrator, plan, normalized)
+
+            tasks = {task.id: task for task in state_store.list_tasks(run_id)}
+            self.assertEqual(len(tasks), 1)
+            self.assertEqual(tasks[task_ids[0]].status, TaskStatus.SUCCEEDED)
+            tool_calls = list(state_store.list_tool_calls(run_id))
+            self.assertEqual(len(tool_calls), 1)
+            self.assertEqual(tool_calls[0].status, ToolCallStatus.SUCCEEDED)
+
+    def test_operator_run_note_permissions(self) -> None:
+        plan = parse_command("note: keep this")
+        tools = required_tools(plan)
+        self.assertEqual(tools, {"write_note"})
+        policy = PermissionPolicy(allowed_tools=tools)
+        policy.check_tool_allowed("write_note")
+        with self.assertRaises(PermissionError):
+            policy.check_tool_allowed("echo")
+
+    def test_operator_run_graph_creates_dependencies(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = str(Path(tmpdir) / "state.db")
+            state_store = StateStore(db_path)
+            registry = ToolRegistry()
+            registry.register(EchoTool())
+            registry.register(WriteNoteTool(state_store))
+            policy = PermissionPolicy(allowed_tools=set())
+            agent = SimpleAgent(registry=registry)
+            orchestrator = Orchestrator(
+                state_store=state_store,
+                registry=registry,
+                policy=policy,
+                agent=agent,
+            )
+
+            command = "graph: echo A -> note B -> echo C"
+            plan = parse_command(command)
+            normalized = normalize_command(command)
+            policy.allowed_tools = required_tools(plan)
+            run_id, task_ids = run_operator_plan(state_store, orchestrator, plan, normalized)
+
+            tasks = {task.id: task for task in state_store.list_tasks(run_id)}
+            self.assertEqual(len(tasks), 3)
+            self.assertEqual(tasks[task_ids[0]].depends_on, [])
+            self.assertEqual(tasks[task_ids[1]].depends_on, [task_ids[0]])
+            self.assertEqual(tasks[task_ids[2]].depends_on, [task_ids[1]])
+            self.assertEqual(tasks[task_ids[0]].status, TaskStatus.SUCCEEDED)
+            self.assertEqual(tasks[task_ids[1]].status, TaskStatus.SUCCEEDED)
+            self.assertEqual(tasks[task_ids[2]].status, TaskStatus.SUCCEEDED)
+
+    def test_operator_idempotency_repeat(self) -> None:
+        class CountingEchoTool(Tool):
+            def __init__(self) -> None:
+                super().__init__(name="echo", description="Counts echo invocations")
+                self.calls = 0
+
+            def run(self, tool_input: dict) -> dict:
+                self.calls += 1
+                return {"count": self.calls}
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = str(Path(tmpdir) / "state.db")
+            state_store = StateStore(db_path)
+            registry = ToolRegistry()
+            counting = CountingEchoTool()
+            registry.register(counting)
+            policy = PermissionPolicy(allowed_tools=set())
+            agent = SimpleAgent(registry=registry)
+            orchestrator = Orchestrator(
+                state_store=state_store,
+                registry=registry,
+                policy=policy,
+                agent=agent,
+            )
+
+            command = "echo: repeat"
+            plan = parse_command(command)
+            normalized = normalize_command(command)
+            policy.allowed_tools = required_tools(plan)
+
+            run = state_store.create_run(label="operator-idempotency", metadata={})
+            step = plan["steps"][0]
+            idempotency_key = make_idempotency_key(step, normalized, 0)
+            first_task = state_store.create_task(
+                run_id=run.id,
+                title=step["title"],
+                description="First operator run",
+                input_json={"tool": "echo", "payload": step["input_json"]},
+                idempotency_key=idempotency_key,
+            )
+            orchestrator.run_tool(run.id, first_task, "echo", step["input_json"])
+
+            second_task = state_store.create_task(
+                run_id=run.id,
+                title=step["title"],
+                description="Second operator run",
+                input_json={"tool": "echo", "payload": step["input_json"]},
+                idempotency_key=idempotency_key,
+            )
+            result = orchestrator.run_tool(run.id, second_task, "echo", step["input_json"])
+
+            self.assertEqual(counting.calls, 1)
+            self.assertEqual(result.status, TaskStatus.SUCCEEDED)
+            tool_calls = list(state_store.list_tool_calls_for_task(second_task.id))
+            self.assertEqual(len(tool_calls), 1)
+            self.assertEqual(tool_calls[0].status, ToolCallStatus.SKIPPED)
 
 
 if __name__ == "__main__":

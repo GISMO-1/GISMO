@@ -4,6 +4,12 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
+from gismo.cli.operator import (
+    make_idempotency_key,
+    normalize_command,
+    parse_command,
+    required_tools,
+)
 from gismo.core.agent import SimpleAgent
 from gismo.core.orchestrator import Orchestrator
 from gismo.core.permissions import PermissionPolicy
@@ -121,6 +127,70 @@ def run_demo_graph(db_path: str) -> None:
             print(f"  output: {task.output_json}")
 
 
+def run_operator(db_path: str, command_parts: list[str]) -> None:
+    command_text = " ".join(command_parts).strip()
+    if not command_text:
+        raise ValueError("Operator run requires a command string.")
+
+    state_store = StateStore(db_path)
+    registry = ToolRegistry()
+    registry.register(EchoTool())
+    registry.register(WriteNoteTool(state_store))
+
+    plan = parse_command(command_text)
+    normalized = normalize_command(command_text)
+    policy = PermissionPolicy(allowed_tools=required_tools(plan))
+    agent = SimpleAgent(registry=registry)
+    orchestrator = Orchestrator(
+        state_store=state_store,
+        registry=registry,
+        policy=policy,
+        agent=agent,
+    )
+
+    run = state_store.create_run(label="operator-run", metadata={"command": normalized})
+
+    created_tasks = []
+    previous_task_id = None
+    for index, step in enumerate(plan["steps"]):
+        tool_name = step["tool_name"]
+        tool_input = step["input_json"]
+        idempotency_key = make_idempotency_key(step, normalized, index)
+        depends_on = [previous_task_id] if plan["mode"] == "graph" and previous_task_id else None
+        task = state_store.create_task(
+            run_id=run.id,
+            title=step["title"],
+            description="Operator command step",
+            input_json={"tool": tool_name, "payload": tool_input},
+            depends_on=depends_on,
+            idempotency_key=idempotency_key,
+        )
+        created_tasks.append(task)
+        previous_task_id = task.id
+
+    if plan["mode"] == "single":
+        task = created_tasks[0]
+        orchestrator.run_tool(run.id, task, task.input_json["tool"], task.input_json["payload"])
+    else:
+        orchestrator.run_task_graph(run.id)
+
+    _print_operator_summary(state_store, run.id)
+
+
+def _print_operator_summary(state_store: StateStore, run_id: str) -> None:
+    print("=== GISMO Operator Summary ===")
+    print(f"Run: {run_id}")
+    print("Tasks:")
+    for task in state_store.list_tasks(run_id):
+        tool_calls = list(state_store.list_tool_calls_for_task(task.id))
+        skipped = sum(1 for call in tool_calls if call.status.value == "SKIPPED")
+        failure_type = task.failure_type.value if task.failure_type else "NONE"
+        print(
+            f"- {task.id} {task.title} [{task.status.value}] "
+            f"failure_type={failure_type} tool_calls={len(tool_calls)} skipped={skipped}"
+        )
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="GISMO CLI")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -136,6 +206,17 @@ def build_parser() -> argparse.ArgumentParser:
         default=str(Path(".gismo") / "state.db"),
         help="Path to SQLite state database",
     )
+    run_parser = subparsers.add_parser("run", help="Run an operator command")
+    run_parser.add_argument(
+        "--db-path",
+        default=str(Path(".gismo") / "state.db"),
+        help="Path to SQLite state database",
+    )
+    run_parser.add_argument(
+        "operator_command",
+        nargs=argparse.REMAINDER,
+        help="Operator command string (echo:, note:, or graph:)",
+    )
     return parser
 
 
@@ -146,6 +227,8 @@ def main() -> None:
         run_demo(args.db_path)
     elif args.command == "demo-graph":
         run_demo_graph(args.db_path)
+    elif args.command == "run":
+        run_operator(args.db_path, args.operator_command)
 
 
 if __name__ == "__main__":

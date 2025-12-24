@@ -18,6 +18,7 @@
 - Added JSONL audit export for runs, tasks, and tool calls with optional redaction.
 - Added dev-safe shell policy profile and tests for allowlisted shell execution.
 - Extended CLI and documentation with export and policy usage.
+- Wired CLI subcommand handlers for demo, run, and export with parser routing tests.
 
 ## Next Steps
 - Expand tool catalog and add richer permission policies.
@@ -28,7 +29,6 @@
 
 ## Tests
 - `python scripts/verify.py`
-- `python -m unittest discover -s tests -p "test*.py" -v`
 
 ## Notes
 - Validation is Python-only; do not run cargo/npm checks.

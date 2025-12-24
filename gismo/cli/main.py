@@ -264,6 +264,30 @@ def _warn_missing_default_policy() -> None:
     )
 
 
+def _handle_demo(args: argparse.Namespace) -> None:
+    run_demo(args.db_path, args.policy)
+
+
+def _handle_demo_graph(args: argparse.Namespace) -> None:
+    run_demo_graph(args.db_path, args.policy)
+
+
+def _handle_run(args: argparse.Namespace) -> None:
+    run_operator(args.db_path, args.operator_command, args.policy)
+
+
+def _handle_export(args: argparse.Namespace) -> None:
+    run_export(
+        args.db_path,
+        run_id=args.run_id,
+        use_latest=args.latest,
+        export_format=args.format,
+        out_path=args.out,
+        redact=args.redact,
+        policy_path=args.policy,
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="GISMO CLI")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -278,6 +302,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Path to a JSON policy file",
     )
+    demo_parser.set_defaults(handler=_handle_demo)
     demo_graph_parser = subparsers.add_parser("demo-graph", help="Run the task graph demo")
     demo_graph_parser.add_argument(
         "--db-path",
@@ -289,6 +314,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Path to a JSON policy file",
     )
+    demo_graph_parser.set_defaults(handler=_handle_demo_graph)
     run_parser = subparsers.add_parser("run", help="Run an operator command")
     run_parser.add_argument(
         "--db-path",
@@ -305,6 +331,7 @@ def build_parser() -> argparse.ArgumentParser:
         nargs=argparse.REMAINDER,
         help="Operator command string (echo:, note:, or graph:)",
     )
+    run_parser.set_defaults(handler=_handle_run)
     export_parser = subparsers.add_parser("export", help="Export run audit trail")
     export_parser.add_argument(
         "--db-path",
@@ -342,28 +369,17 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Redact file contents, shell output, and large tool outputs",
     )
+    export_parser.set_defaults(handler=_handle_export)
     return parser
 
 
 def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
-    if args.command == "demo":
-        run_demo(args.db_path, args.policy)
-    elif args.command == "demo-graph":
-        run_demo_graph(args.db_path, args.policy)
-    elif args.command == "run":
-        run_operator(args.db_path, args.operator_command, args.policy)
-    elif args.command == "export":
-        run_export(
-            args.db_path,
-            run_id=args.run_id,
-            use_latest=args.latest,
-            export_format=args.format,
-            out_path=args.out,
-            redact=args.redact,
-            policy_path=args.policy,
-        )
+    handler = getattr(args, "handler", None)
+    if handler is None:
+        parser.error("No command provided.")
+    handler(args)
 
 
 def _build_registry(state_store: StateStore, policy: PermissionPolicy) -> ToolRegistry:

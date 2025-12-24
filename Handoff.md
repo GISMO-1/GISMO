@@ -20,10 +20,9 @@
 
 ## Tests
 - `python scripts/verify.py`
-- `python -m gismo.cli.main run "echo: hello"`
-- `python -m gismo.cli.main run "graph: echo A -> note B -> echo C"`
-- `python -m unittest -v`
-- `python -m unittest discover -s tests -p "test*.py" -v`
+- Optional: `make test`
+- Optional: `make demo`
+- Optional: `make demo-graph`
 
 ## Notes
-- Do not run cargo/npm checks; this repo is Python-only.
+- Validation is Python-only; do not run cargo/npm checks.

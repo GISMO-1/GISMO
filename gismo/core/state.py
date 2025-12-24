@@ -4,11 +4,20 @@ from __future__ import annotations
 import json
 import sqlite3
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, Optional
 
-from gismo.core.models import FailureType, Run, Task, TaskStatus, ToolCall, ToolCallStatus
+from gismo.core.models import (
+    FailureType,
+    QueueItem,
+    QueueStatus,
+    Run,
+    Task,
+    TaskStatus,
+    ToolCall,
+    ToolCallStatus,
+)
 
 
 class StateStore:
@@ -77,6 +86,23 @@ class StateStore:
                 )
                 """
             )
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS queue_items (
+                    id TEXT PRIMARY KEY,
+                    run_id TEXT,
+                    command_text TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    started_at TEXT,
+                    finished_at TEXT,
+                    attempt_count INTEGER NOT NULL DEFAULT 0,
+                    max_attempts INTEGER NOT NULL DEFAULT 3,
+                    last_error TEXT
+                )
+                """
+            )
             self._ensure_columns(connection)
             connection.commit()
 
@@ -108,6 +134,26 @@ class StateStore:
             "INTEGER NOT NULL DEFAULT 1",
         )
         self._ensure_column(connection, "tool_calls", "failure_type", "TEXT")
+        self._ensure_column(
+            connection,
+            "queue_items",
+            "attempt_count",
+            "INTEGER NOT NULL DEFAULT 0",
+        )
+        self._ensure_column(
+            connection,
+            "queue_items",
+            "max_attempts",
+            "INTEGER NOT NULL DEFAULT 3",
+        )
+        self._ensure_column(connection, "queue_items", "last_error", "TEXT")
+        self._ensure_column(connection, "queue_items", "started_at", "TEXT")
+        self._ensure_column(connection, "queue_items", "finished_at", "TEXT")
+        self._ensure_column(connection, "queue_items", "run_id", "TEXT")
+        self._ensure_column(connection, "queue_items", "command_text", "TEXT NOT NULL")
+        self._ensure_column(connection, "queue_items", "status", "TEXT NOT NULL")
+        self._ensure_column(connection, "queue_items", "created_at", "TEXT NOT NULL")
+        self._ensure_column(connection, "queue_items", "updated_at", "TEXT NOT NULL")
 
     def _ensure_column(
         self,
@@ -333,6 +379,202 @@ class StateStore:
             return None
         return self._row_to_run(row)
 
+    def enqueue_command(
+        self,
+        command_text: str,
+        run_id: Optional[str] = None,
+        max_attempts: int = 3,
+    ) -> QueueItem:
+        if not command_text or not command_text.strip():
+            raise ValueError("command_text must be a non-empty string")
+        item = QueueItem(
+            command_text=command_text.strip(),
+            run_id=run_id,
+            max_attempts=max_attempts,
+        )
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO queue_items (
+                    id, run_id, command_text, status, created_at, updated_at,
+                    started_at, finished_at, attempt_count, max_attempts, last_error
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    item.id,
+                    item.run_id,
+                    item.command_text,
+                    item.status.value,
+                    item.created_at.isoformat(),
+                    item.updated_at.isoformat(),
+                    item.started_at.isoformat() if item.started_at else None,
+                    item.finished_at.isoformat() if item.finished_at else None,
+                    item.attempt_count,
+                    item.max_attempts,
+                    item.last_error,
+                ),
+            )
+            connection.commit()
+        return item
+
+    def claim_next_queue_item(self) -> Optional[QueueItem]:
+        connection = self._connect()
+        connection.row_factory = sqlite3.Row
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                """
+                SELECT * FROM queue_items
+                WHERE status = ?
+                ORDER BY created_at
+                LIMIT 1
+                """,
+                (QueueStatus.QUEUED.value,),
+            ).fetchone()
+            if row is None:
+                connection.commit()
+                return None
+            now = _utc_now().isoformat()
+            updated = connection.execute(
+                """
+                UPDATE queue_items
+                SET status = ?, started_at = ?, updated_at = ?
+                WHERE id = ? AND status = ?
+                """,
+                (
+                    QueueStatus.IN_PROGRESS.value,
+                    now,
+                    now,
+                    row["id"],
+                    QueueStatus.QUEUED.value,
+                ),
+            )
+            if updated.rowcount == 0:
+                connection.commit()
+                return None
+            connection.commit()
+            row = connection.execute(
+                "SELECT * FROM queue_items WHERE id = ?",
+                (row["id"],),
+            ).fetchone()
+            return self._row_to_queue_item(row) if row else None
+        except Exception:  # noqa: BLE001
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+
+    def mark_queue_item_succeeded(self, item_id: str) -> None:
+        now = _utc_now().isoformat()
+        with self._connect() as connection:
+            connection.execute(
+                """
+                UPDATE queue_items
+                SET status = ?, updated_at = ?, finished_at = ?
+                WHERE id = ?
+                """,
+                (QueueStatus.SUCCEEDED.value, now, now, item_id),
+            )
+            connection.commit()
+
+    def mark_queue_item_failed(self, item_id: str, error: str, retryable: bool) -> None:
+        item = self.get_queue_item(item_id)
+        if item is None:
+            return
+        now = _utc_now().isoformat()
+        if retryable and item.attempt_count < item.max_attempts:
+            with self._connect() as connection:
+                connection.execute(
+                    """
+                    UPDATE queue_items
+                    SET status = ?, updated_at = ?, attempt_count = ?, last_error = ?,
+                        started_at = NULL
+                    WHERE id = ?
+                    """,
+                    (
+                        QueueStatus.QUEUED.value,
+                        now,
+                        item.attempt_count + 1,
+                        error,
+                        item_id,
+                    ),
+                )
+                connection.commit()
+            return
+        with self._connect() as connection:
+            connection.execute(
+                """
+                UPDATE queue_items
+                SET status = ?, updated_at = ?, finished_at = ?, last_error = ?
+                WHERE id = ?
+                """,
+                (QueueStatus.FAILED.value, now, now, error, item_id),
+            )
+            connection.commit()
+
+    def requeue_stale_in_progress(self, older_than_seconds: int = 600) -> int:
+        threshold = _utc_now().timestamp() - older_than_seconds
+        updated = 0
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM queue_items
+                WHERE status = ? AND started_at IS NOT NULL
+                """,
+                (QueueStatus.IN_PROGRESS.value,),
+            ).fetchall()
+            now = _utc_now().isoformat()
+            for row in rows:
+                started_at = _parse_dt(row["started_at"]).timestamp()
+                if started_at >= threshold:
+                    continue
+                attempt_count = row["attempt_count"]
+                max_attempts = row["max_attempts"]
+                if attempt_count < max_attempts:
+                    connection.execute(
+                        """
+                        UPDATE queue_items
+                        SET status = ?, updated_at = ?, attempt_count = ?, last_error = ?,
+                            started_at = NULL
+                        WHERE id = ?
+                        """,
+                        (
+                            QueueStatus.QUEUED.value,
+                            now,
+                            attempt_count + 1,
+                            "Requeued stale in-progress item.",
+                            row["id"],
+                        ),
+                    )
+                else:
+                    connection.execute(
+                        """
+                        UPDATE queue_items
+                        SET status = ?, updated_at = ?, finished_at = ?, last_error = ?
+                        WHERE id = ?
+                        """,
+                        (
+                            QueueStatus.FAILED.value,
+                            now,
+                            now,
+                            "Exceeded max attempts after stale in-progress.",
+                            row["id"],
+                        ),
+                    )
+                updated += 1
+            connection.commit()
+        return updated
+
+    def get_queue_item(self, item_id: str) -> Optional[QueueItem]:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM queue_items WHERE id = ?",
+                (item_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return self._row_to_queue_item(row)
+
     def get_latest_run(self) -> Optional[Run]:
         with self._connect() as connection:
             row = connection.execute(
@@ -424,6 +666,25 @@ class StateStore:
         )
         return tool_call
 
+    def _row_to_queue_item(self, row: sqlite3.Row) -> QueueItem:
+        return QueueItem(
+            id=row["id"],
+            run_id=row["run_id"],
+            command_text=row["command_text"],
+            status=QueueStatus(row["status"]),
+            created_at=_parse_dt(row["created_at"]),
+            updated_at=_parse_dt(row["updated_at"]),
+            started_at=_parse_dt(row["started_at"]) if row["started_at"] else None,
+            finished_at=_parse_dt(row["finished_at"]) if row["finished_at"] else None,
+            attempt_count=row["attempt_count"],
+            max_attempts=row["max_attempts"],
+            last_error=row["last_error"],
+        )
+
 
 def _parse_dt(value: str) -> datetime:
     return datetime.fromisoformat(value)
+
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)

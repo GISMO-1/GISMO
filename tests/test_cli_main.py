@@ -28,6 +28,22 @@ class CliMainParserTest(unittest.TestCase):
         self.assertEqual(args.command, "demo")
         self.assertIs(args.handler, cli_main._handle_demo)
 
+    def test_enqueue_subcommand_routes_to_enqueue(self) -> None:
+        parser = cli_main.build_parser()
+        args = parser.parse_args(["enqueue", "echo:", "hello"])
+
+        self.assertEqual(args.command, "enqueue")
+        self.assertIs(args.handler, cli_main._handle_enqueue)
+        self.assertEqual(args.operator_command, ["echo:", "hello"])
+
+    def test_daemon_subcommand_routes_to_daemon(self) -> None:
+        parser = cli_main.build_parser()
+        args = parser.parse_args(["daemon", "--once"])
+
+        self.assertEqual(args.command, "daemon")
+        self.assertIs(args.handler, cli_main._handle_daemon)
+        self.assertTrue(args.once)
+
 
 if __name__ == "__main__":
     unittest.main()

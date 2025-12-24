@@ -12,6 +12,7 @@ from gismo.cli.operator import (
     required_tools,
 )
 from gismo.core.agent import SimpleAgent
+from gismo.core.daemon import run_daemon_loop
 from gismo.core.export import export_latest_run_jsonl, export_run_jsonl
 from gismo.core.orchestrator import Orchestrator
 from gismo.core.permissions import PermissionPolicy, load_policy
@@ -233,6 +234,40 @@ def run_export(
     print(f"Exported run audit to {export_path}")
 
 
+def run_enqueue(
+    db_path: str,
+    command_text: str,
+    *,
+    run_id: str | None,
+    max_attempts: int,
+) -> None:
+    state_store = StateStore(db_path)
+    item = state_store.enqueue_command(
+        command_text=command_text,
+        run_id=run_id,
+        max_attempts=max_attempts,
+    )
+    print(f"Enqueued {item.id} status={item.status.value}")
+
+
+def run_daemon(
+    db_path: str,
+    policy_path: str | None,
+    *,
+    sleep_seconds: float,
+    once: bool,
+    requeue_stale_seconds: int,
+) -> None:
+    state_store = StateStore(db_path)
+    state_store.requeue_stale_in_progress(older_than_seconds=requeue_stale_seconds)
+    run_daemon_loop(
+        state_store,
+        policy_path=policy_path,
+        sleep_seconds=sleep_seconds,
+        once=once,
+    )
+
+
 def _print_operator_summary(state_store: StateStore, run_id: str) -> None:
     print("=== GISMO Operator Summary ===")
     print(f"Run: {run_id}")
@@ -285,6 +320,28 @@ def _handle_export(args: argparse.Namespace) -> None:
         out_path=args.out,
         redact=args.redact,
         policy_path=args.policy,
+    )
+
+
+def _handle_enqueue(args: argparse.Namespace) -> None:
+    command_text = " ".join(args.operator_command).strip()
+    if not command_text:
+        raise ValueError("enqueue requires a command string")
+    run_enqueue(
+        args.db_path,
+        command_text,
+        run_id=args.run_id,
+        max_attempts=args.max_attempts,
+    )
+
+
+def _handle_daemon(args: argparse.Namespace) -> None:
+    run_daemon(
+        args.db_path,
+        args.policy,
+        sleep_seconds=args.sleep,
+        once=args.once,
+        requeue_stale_seconds=args.requeue_stale_seconds,
     )
 
 
@@ -370,6 +427,59 @@ def build_parser() -> argparse.ArgumentParser:
         help="Redact file contents, shell output, and large tool outputs",
     )
     export_parser.set_defaults(handler=_handle_export)
+    enqueue_parser = subparsers.add_parser("enqueue", help="Enqueue an operator command")
+    enqueue_parser.add_argument(
+        "--db-path",
+        default=str(Path(".gismo") / "state.db"),
+        help="Path to SQLite state database",
+    )
+    enqueue_parser.add_argument(
+        "--run",
+        dest="run_id",
+        default=None,
+        help="Optional existing run ID to attach tasks to",
+    )
+    enqueue_parser.add_argument(
+        "--max-attempts",
+        type=int,
+        default=3,
+        help="Maximum attempts for this queue item",
+    )
+    enqueue_parser.add_argument(
+        "operator_command",
+        nargs=argparse.REMAINDER,
+        help="Operator command string to enqueue",
+    )
+    enqueue_parser.set_defaults(handler=_handle_enqueue)
+    daemon_parser = subparsers.add_parser("daemon", help="Run the GISMO daemon loop")
+    daemon_parser.add_argument(
+        "--db-path",
+        default=str(Path(".gismo") / "state.db"),
+        help="Path to SQLite state database",
+    )
+    daemon_parser.add_argument(
+        "--policy",
+        default=None,
+        help="Path to a JSON policy file",
+    )
+    daemon_parser.add_argument(
+        "--sleep",
+        type=float,
+        default=2.0,
+        help="Sleep interval between queue polls",
+    )
+    daemon_parser.add_argument(
+        "--once",
+        action="store_true",
+        help="Process queued items once and exit when the queue is empty",
+    )
+    daemon_parser.add_argument(
+        "--requeue-stale-seconds",
+        type=int,
+        default=600,
+        help="Requeue IN_PROGRESS items older than this many seconds",
+    )
+    daemon_parser.set_defaults(handler=_handle_daemon)
     return parser
 
 

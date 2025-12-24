@@ -165,6 +165,13 @@ Run operator commands with a policy:
 python -m gismo.cli.main run --policy policy/dev.json "echo: hello"
 ```
 
+Daemon mode (queue + headless execution):
+
+```bash
+python -m gismo.cli.main enqueue "echo: daemon hello"
+python -m gismo.cli.main daemon --once --policy policy/readonly.json
+```
+
 Export a run audit trail as JSONL:
 
 ```bash
@@ -231,6 +238,17 @@ GISMO supports deterministic operator-like commands that map to tasks and tools.
   ```bash
   python -m gismo.cli.main run "graph: echo A -> note B -> echo C"
   ```
+
+## Daemon Mode
+
+Queue commands for headless execution and run the daemon to process them:
+
+```bash
+python -m gismo.cli.main enqueue "echo: daemon hello"
+python -m gismo.cli.main daemon --once --policy policy/readonly.json
+```
+
+Daemon runs always enforce policies; keep policies least-privilege and explicitly allow only the tools you need.
 
 ## Toolpack Policy & Safety
 

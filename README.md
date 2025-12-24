@@ -150,6 +150,16 @@ Expected behavior:
 * Outputs a summary of tasks and tool calls
 * Tool execution records retry attempts and idempotency skips in state
 
+## Developer Commands
+
+GISMO is a **Python-only** project. Use the Makefile helpers:
+
+```bash
+make demo
+make demo-graph
+make test
+```
+
 ## Decisions (v0 scope)
 
 * Core state, task lifecycle, agent execution, and permission gating are implemented with standard library tools.

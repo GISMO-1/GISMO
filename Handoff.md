@@ -21,6 +21,7 @@
 - Wired CLI subcommand handlers for demo, run, and export with parser routing tests.
 - Added SQLite-backed queue with daemon execution loop and CLI enqueue/daemon commands.
 - Added daemon queue tests for enqueue/claim, execution, retries, and non-retryable failures.
+- Added systemd service templates plus documentation and CLI support for consistent DB paths via --db.
 
 ## Next Steps
 - Expand tool catalog and add richer permission policies.
@@ -32,8 +33,8 @@
 
 ## Tests
 - `python scripts/verify.py`
-- `python -m gismo.cli.main enqueue "echo: daemon smoke"`
-- `python -m gismo.cli.main daemon --once --policy policy/readonly.json`
+- `python -m gismo.cli.main enqueue "echo: systemd smoke" --db /tmp/gismo_test.db`
+- `python -m gismo.cli.main daemon --once --policy policy/readonly.json --db /tmp/gismo_test.db`
 
 ## Notes
 - Validation is Python-only; do not run cargo/npm checks.

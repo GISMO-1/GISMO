@@ -1,6 +1,10 @@
+import tempfile
 import unittest
+from pathlib import Path
 
 from gismo.cli import main as cli_main
+from gismo.core.models import QueueStatus
+from gismo.core.state import StateStore
 
 
 class CliMainParserTest(unittest.TestCase):
@@ -43,6 +47,29 @@ class CliMainParserTest(unittest.TestCase):
         self.assertEqual(args.command, "daemon")
         self.assertIs(args.handler, cli_main._handle_daemon)
         self.assertTrue(args.once)
+
+    def test_enqueue_and_daemon_share_db_path(self) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+        policy_path = str(repo_root / "policy" / "readonly.json")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = str(Path(tmpdir) / "state.db")
+
+            cli_main.run_enqueue(db_path, "echo: systemd", run_id=None, max_attempts=1)
+            cli_main.run_daemon(
+                db_path,
+                policy_path,
+                sleep_seconds=0.0,
+                once=True,
+                requeue_stale_seconds=600,
+            )
+
+            state_store = StateStore(db_path)
+            run = state_store.get_latest_run()
+            assert run is not None
+            queue_item_id = run.metadata_json["queue_item_id"]
+            item = state_store.get_queue_item(queue_item_id)
+            assert item is not None
+            self.assertEqual(item.status, QueueStatus.SUCCEEDED)
 
 
 if __name__ == "__main__":

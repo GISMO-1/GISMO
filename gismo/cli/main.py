@@ -347,12 +347,19 @@ def _handle_daemon(args: argparse.Namespace) -> None:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="GISMO CLI")
-    subparsers = parser.add_subparsers(dest="command", required=True)
-    demo_parser = subparsers.add_parser("demo", help="Run the demo workflow")
-    demo_parser.add_argument(
+    db_parent = argparse.ArgumentParser(add_help=False)
+    db_parent.add_argument(
+        "--db",
         "--db-path",
+        dest="db_path",
         default=str(Path(".gismo") / "state.db"),
         help="Path to SQLite state database",
+    )
+    subparsers = parser.add_subparsers(dest="command", required=True)
+    demo_parser = subparsers.add_parser(
+        "demo",
+        help="Run the demo workflow",
+        parents=[db_parent],
     )
     demo_parser.add_argument(
         "--policy",
@@ -360,11 +367,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="Path to a JSON policy file",
     )
     demo_parser.set_defaults(handler=_handle_demo)
-    demo_graph_parser = subparsers.add_parser("demo-graph", help="Run the task graph demo")
-    demo_graph_parser.add_argument(
-        "--db-path",
-        default=str(Path(".gismo") / "state.db"),
-        help="Path to SQLite state database",
+    demo_graph_parser = subparsers.add_parser(
+        "demo-graph",
+        help="Run the task graph demo",
+        parents=[db_parent],
     )
     demo_graph_parser.add_argument(
         "--policy",
@@ -372,11 +378,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="Path to a JSON policy file",
     )
     demo_graph_parser.set_defaults(handler=_handle_demo_graph)
-    run_parser = subparsers.add_parser("run", help="Run an operator command")
-    run_parser.add_argument(
-        "--db-path",
-        default=str(Path(".gismo") / "state.db"),
-        help="Path to SQLite state database",
+    run_parser = subparsers.add_parser(
+        "run",
+        help="Run an operator command",
+        parents=[db_parent],
     )
     run_parser.add_argument(
         "--policy",
@@ -389,11 +394,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="Operator command string (echo:, note:, or graph:)",
     )
     run_parser.set_defaults(handler=_handle_run)
-    export_parser = subparsers.add_parser("export", help="Export run audit trail")
-    export_parser.add_argument(
-        "--db-path",
-        default=str(Path(".gismo") / "state.db"),
-        help="Path to SQLite state database",
+    export_parser = subparsers.add_parser(
+        "export",
+        help="Export run audit trail",
+        parents=[db_parent],
     )
     export_parser.add_argument(
         "--policy",
@@ -427,11 +431,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="Redact file contents, shell output, and large tool outputs",
     )
     export_parser.set_defaults(handler=_handle_export)
-    enqueue_parser = subparsers.add_parser("enqueue", help="Enqueue an operator command")
-    enqueue_parser.add_argument(
-        "--db-path",
-        default=str(Path(".gismo") / "state.db"),
-        help="Path to SQLite state database",
+    enqueue_parser = subparsers.add_parser(
+        "enqueue",
+        help="Enqueue an operator command",
+        parents=[db_parent],
     )
     enqueue_parser.add_argument(
         "--run",
@@ -451,11 +454,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="Operator command string to enqueue",
     )
     enqueue_parser.set_defaults(handler=_handle_enqueue)
-    daemon_parser = subparsers.add_parser("daemon", help="Run the GISMO daemon loop")
-    daemon_parser.add_argument(
-        "--db-path",
-        default=str(Path(".gismo") / "state.db"),
-        help="Path to SQLite state database",
+    daemon_parser = subparsers.add_parser(
+        "daemon",
+        help="Run the GISMO daemon loop",
+        parents=[db_parent],
     )
     daemon_parser.add_argument(
         "--policy",

@@ -1,0 +1,30 @@
+[Unit]
+Description=GISMO daemon
+After=network.target
+
+[Service]
+Type=simple
+User=gismo
+Group=gismo
+WorkingDirectory=/opt/gismo
+Environment=GISMO_DB_PATH=/var/lib/gismo/gismo.db
+Environment=GISMO_POLICY_PATH=/opt/gismo/policy/readonly.json
+Environment=GISMO_SLEEP_SECONDS=2.0
+EnvironmentFile=-/etc/gismo/gismo.env
+ExecStart=/usr/bin/python3 -m gismo.cli.main daemon --policy ${GISMO_POLICY_PATH} --db ${GISMO_DB_PATH} --sleep ${GISMO_SLEEP_SECONDS}
+Restart=on-failure
+RestartSec=2
+StateDirectory=gismo
+StateDirectoryMode=0750
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/gismo
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+CapabilityBoundingSet=
+LockPersonality=true
+
+[Install]
+WantedBy=multi-user.target

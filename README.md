@@ -168,8 +168,8 @@ python -m gismo.cli.main run --policy policy/dev.json "echo: hello"
 Daemon mode (queue + headless execution):
 
 ```bash
-python -m gismo.cli.main enqueue "echo: daemon hello"
-python -m gismo.cli.main daemon --once --policy policy/readonly.json
+python -m gismo.cli.main enqueue "echo: daemon hello" --db .gismo/state.db
+python -m gismo.cli.main daemon --once --policy policy/readonly.json --db .gismo/state.db
 ```
 
 Export a run audit trail as JSONL:
@@ -244,11 +244,15 @@ GISMO supports deterministic operator-like commands that map to tasks and tools.
 Queue commands for headless execution and run the daemon to process them:
 
 ```bash
-python -m gismo.cli.main enqueue "echo: daemon hello"
-python -m gismo.cli.main daemon --once --policy policy/readonly.json
+python -m gismo.cli.main enqueue "echo: daemon hello" --db /var/lib/gismo/gismo.db
+python -m gismo.cli.main daemon --once --policy policy/readonly.json --db /var/lib/gismo/gismo.db
 ```
 
 Daemon runs always enforce policies; keep policies least-privilege and explicitly allow only the tools you need.
+
+## Run as a service (systemd)
+
+See [deploy/systemd/README.md](deploy/systemd/README.md) for production-safe systemd units, hardening defaults, and steps to install a dedicated service user with a stable database path.
 
 ## Toolpack Policy & Safety
 

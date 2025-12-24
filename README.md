@@ -137,6 +137,12 @@ Run the demo workflow:
 python -m gismo.cli.main demo
 ```
 
+Run the dependency graph demo:
+
+```bash
+python -m gismo.cli.main demo-graph
+```
+
 Expected behavior:
 * Creates a run and two tasks (echo, write_note)
 * Echo succeeds immediately
@@ -149,3 +155,4 @@ Expected behavior:
 * Core state, task lifecycle, agent execution, and permission gating are implemented with standard library tools.
 * Persistence uses SQLite via the `sqlite3` module for auditability and portability.
 * Tool calls are idempotent by key + normalized input hash, with retry semantics and a failure taxonomy stored in state.
+* Task dependency graphs are persisted on tasks and executed via a scheduler that respects dependency ordering.

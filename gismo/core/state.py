@@ -43,6 +43,7 @@ class StateStore:
                     title TEXT NOT NULL,
                     description TEXT NOT NULL,
                     status TEXT NOT NULL,
+                    depends_on_json TEXT NOT NULL DEFAULT '[]',
                     idempotency_key TEXT NOT NULL DEFAULT '',
                     input_hash TEXT NOT NULL DEFAULT '',
                     created_at TEXT NOT NULL,
@@ -51,6 +52,7 @@ class StateStore:
                     output_json TEXT,
                     error TEXT,
                     failure_type TEXT,
+                    status_reason TEXT,
                     FOREIGN KEY (run_id) REFERENCES runs(id)
                 )
                 """
@@ -91,7 +93,14 @@ class StateStore:
             "input_hash",
             "TEXT NOT NULL DEFAULT ''",
         )
+        self._ensure_column(
+            connection,
+            "tasks",
+            "depends_on_json",
+            "TEXT NOT NULL DEFAULT '[]'",
+        )
         self._ensure_column(connection, "tasks", "failure_type", "TEXT")
+        self._ensure_column(connection, "tasks", "status_reason", "TEXT")
         self._ensure_column(
             connection,
             "tool_calls",
@@ -148,6 +157,7 @@ class StateStore:
         title: str,
         description: str,
         input_json: Dict[str, Any],
+        depends_on: Optional[list[str]] = None,
         idempotency_key: str = "",
         input_hash: str = "",
     ) -> Task:
@@ -156,6 +166,7 @@ class StateStore:
             title=title,
             description=description,
             input_json=input_json,
+            depends_on=list(depends_on or []),
             idempotency_key=idempotency_key,
             input_hash=input_hash,
         )
@@ -164,9 +175,10 @@ class StateStore:
                 """
                 INSERT INTO tasks (
                     id, run_id, title, description, status,
-                    idempotency_key, input_hash, created_at, updated_at,
-                    input_json, output_json, error, failure_type
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    depends_on_json, idempotency_key, input_hash,
+                    created_at, updated_at, input_json, output_json,
+                    error, failure_type, status_reason
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     task.id,
@@ -174,6 +186,7 @@ class StateStore:
                     task.title,
                     task.description,
                     task.status.value,
+                    json.dumps(task.depends_on),
                     task.idempotency_key,
                     task.input_hash,
                     task.created_at.isoformat(),
@@ -182,6 +195,7 @@ class StateStore:
                     json.dumps(task.output_json) if task.output_json is not None else None,
                     task.error,
                     task.failure_type.value if task.failure_type else None,
+                    task.status_reason,
                 ),
             )
             connection.commit()
@@ -197,7 +211,8 @@ class StateStore:
             """
             UPDATE tasks
             SET status = ?, updated_at = ?, output_json = ?, error = ?,
-                idempotency_key = ?, input_hash = ?, failure_type = ?
+                idempotency_key = ?, input_hash = ?, failure_type = ?,
+                depends_on_json = ?, status_reason = ?
             WHERE id = ?
             """,
             (
@@ -208,6 +223,8 @@ class StateStore:
                 task.idempotency_key,
                 task.input_hash,
                 task.failure_type.value if task.failure_type else None,
+                json.dumps(task.depends_on),
+                task.status_reason,
                 task.id,
             ),
         )
@@ -279,6 +296,17 @@ class StateStore:
             ).fetchall()
         return [self._row_to_task(row) for row in rows]
 
+    def get_tasks_by_ids(self, task_ids: list[str]) -> Iterable[Task]:
+        if not task_ids:
+            return []
+        placeholders = ",".join("?" for _ in task_ids)
+        with self._connect() as connection:
+            rows = connection.execute(
+                f"SELECT * FROM tasks WHERE id IN ({placeholders})",
+                tuple(task_ids),
+            ).fetchall()
+        return [self._row_to_task(row) for row in rows]
+
     def list_tool_calls(self, run_id: str) -> Iterable[ToolCall]:
         with self._connect() as connection:
             rows = connection.execute(
@@ -333,6 +361,9 @@ class StateStore:
             title=row["title"],
             description=row["description"],
             status=TaskStatus(row["status"]),
+            depends_on=json.loads(row["depends_on_json"])
+            if row["depends_on_json"]
+            else [],
             idempotency_key=row["idempotency_key"],
             input_hash=row["input_hash"],
             created_at=_parse_dt(row["created_at"]),
@@ -343,6 +374,7 @@ class StateStore:
             failure_type=FailureType(row["failure_type"])
             if row["failure_type"]
             else FailureType.NONE,
+            status_reason=row["status_reason"],
         )
         return task
 

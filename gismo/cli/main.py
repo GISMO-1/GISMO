@@ -12,18 +12,19 @@ from gismo.cli.operator import (
 )
 from gismo.core.agent import SimpleAgent
 from gismo.core.orchestrator import Orchestrator
-from gismo.core.permissions import PermissionPolicy
+from gismo.core.permissions import PermissionPolicy, load_policy
 from gismo.core.state import StateStore
 from gismo.core.tools import EchoTool, ToolRegistry, WriteNoteTool
+from gismo.core.toolpacks.fs_tools import FileSystemConfig, ListDirTool, ReadFileTool, WriteFileTool
+from gismo.core.toolpacks.shell_tool import ShellConfig, ShellTool
 
 
-def run_demo(db_path: str) -> None:
+def run_demo(db_path: str, policy_path: str | None) -> None:
+    repo_root = Path(__file__).resolve().parents[2]
     state_store = StateStore(db_path)
-    registry = ToolRegistry()
-    registry.register(EchoTool())
-    registry.register(WriteNoteTool(state_store))
+    policy = load_policy(policy_path, repo_root=repo_root, default_allowed_tools={"echo"})
+    registry = _build_registry(state_store, policy)
 
-    policy = PermissionPolicy(allowed_tools={"echo"})
     agent = SimpleAgent(registry=registry)
     orchestrator = Orchestrator(
         state_store=state_store,
@@ -75,13 +76,16 @@ def run_demo(db_path: str) -> None:
             print(f"  output: {call.output_json}")
 
 
-def run_demo_graph(db_path: str) -> None:
+def run_demo_graph(db_path: str, policy_path: str | None) -> None:
+    repo_root = Path(__file__).resolve().parents[2]
     state_store = StateStore(db_path)
-    registry = ToolRegistry()
-    registry.register(EchoTool())
-    registry.register(WriteNoteTool(state_store))
+    policy = load_policy(
+        policy_path,
+        repo_root=repo_root,
+        default_allowed_tools={"echo", "write_note"},
+    )
+    registry = _build_registry(state_store, policy)
 
-    policy = PermissionPolicy(allowed_tools={"echo", "write_note"})
     agent = SimpleAgent(registry=registry)
     orchestrator = Orchestrator(
         state_store=state_store,
@@ -127,19 +131,18 @@ def run_demo_graph(db_path: str) -> None:
             print(f"  output: {task.output_json}")
 
 
-def run_operator(db_path: str, command_parts: list[str]) -> None:
+def run_operator(db_path: str, command_parts: list[str], policy_path: str | None) -> None:
     command_text = " ".join(command_parts).strip()
     if not command_text:
         raise ValueError("Operator run requires a command string.")
 
+    repo_root = Path(__file__).resolve().parents[2]
     state_store = StateStore(db_path)
-    registry = ToolRegistry()
-    registry.register(EchoTool())
-    registry.register(WriteNoteTool(state_store))
-
     plan = parse_command(command_text)
     normalized = normalize_command(command_text)
-    policy = PermissionPolicy(allowed_tools=required_tools(plan))
+    default_tools = required_tools(plan) if policy_path is None else ()
+    policy = load_policy(policy_path, repo_root=repo_root, default_allowed_tools=default_tools)
+    registry = _build_registry(state_store, policy)
     agent = SimpleAgent(registry=registry)
     orchestrator = Orchestrator(
         state_store=state_store,
@@ -200,17 +203,32 @@ def build_parser() -> argparse.ArgumentParser:
         default=str(Path(".gismo") / "state.db"),
         help="Path to SQLite state database",
     )
+    demo_parser.add_argument(
+        "--policy",
+        default=None,
+        help="Path to a JSON policy file",
+    )
     demo_graph_parser = subparsers.add_parser("demo-graph", help="Run the task graph demo")
     demo_graph_parser.add_argument(
         "--db-path",
         default=str(Path(".gismo") / "state.db"),
         help="Path to SQLite state database",
     )
+    demo_graph_parser.add_argument(
+        "--policy",
+        default=None,
+        help="Path to a JSON policy file",
+    )
     run_parser = subparsers.add_parser("run", help="Run an operator command")
     run_parser.add_argument(
         "--db-path",
         default=str(Path(".gismo") / "state.db"),
         help="Path to SQLite state database",
+    )
+    run_parser.add_argument(
+        "--policy",
+        default=None,
+        help="Path to a JSON policy file",
     )
     run_parser.add_argument(
         "operator_command",
@@ -224,11 +242,28 @@ def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
     if args.command == "demo":
-        run_demo(args.db_path)
+        run_demo(args.db_path, args.policy)
     elif args.command == "demo-graph":
-        run_demo_graph(args.db_path)
+        run_demo_graph(args.db_path, args.policy)
     elif args.command == "run":
-        run_operator(args.db_path, args.operator_command)
+        run_operator(args.db_path, args.operator_command, args.policy)
+
+
+def _build_registry(state_store: StateStore, policy: PermissionPolicy) -> ToolRegistry:
+    registry = ToolRegistry()
+    registry.register(EchoTool())
+    registry.register(WriteNoteTool(state_store))
+    fs_config = FileSystemConfig(base_dir=policy.fs.base_dir)
+    registry.register(ReadFileTool(fs_config))
+    registry.register(WriteFileTool(fs_config))
+    registry.register(ListDirTool(fs_config))
+    shell_config = ShellConfig(
+        base_dir=policy.shell.base_dir,
+        allowlist=policy.shell.allowlist,
+        timeout_seconds=policy.shell.timeout_seconds,
+    )
+    registry.register(ShellTool(shell_config))
+    return registry
 
 
 if __name__ == "__main__":

@@ -1,0 +1,12 @@
+{
+  "allowed_tools": ["echo", "read_file", "list_dir", "write_note", "run_shell"],
+  "fs": { "base_dir": "." },
+  "shell": {
+    "base_dir": ".",
+    "allowlist": [
+      ["git", "status"],
+      ["python", "-m", "unittest"],
+      ["make", "test"]
+    ]
+  }
+}

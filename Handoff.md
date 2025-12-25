@@ -40,6 +40,7 @@
 - Reconciled supervise status against IPC reachability and daemon status with Windows-safe PID checks.
 - Derived Windows IPC pipe names from the database path and aligned supervise/IPC client discovery.
 - Added Windows IPC endpoint unit coverage and supervise db-path probe validation.
+- Hardened IPC accept shutdown handling with Windows-specific error guards and coverage tests.
 
 ## Next Steps
 - Validate IPC CLI db flag usage on Windows.

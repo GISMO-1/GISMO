@@ -14,6 +14,7 @@ from gismo.cli.operator import (
     required_tools,
 )
 from gismo.cli import ipc as ipc_cli
+from gismo.cli import supervise as supervise_cli
 from gismo.cli.windows_startup import (
     install_windows_startup_launcher,
     uninstall_windows_startup_launcher,
@@ -905,6 +906,28 @@ def _handle_ipc_requeue_stale(args: argparse.Namespace) -> None:
     print(ipc_cli.format_queue_requeue_stale_output(response.data or {}))
 
 
+def _handle_supervise_up(args: argparse.Namespace) -> None:
+    try:
+        token = ipc_cli.load_ipc_token(args.token)
+    except ValueError as exc:
+        print(str(exc))
+        raise SystemExit(2) from exc
+    supervise_cli.run_supervise_up(args.db_path, token)
+
+
+def _handle_supervise_status(args: argparse.Namespace) -> None:
+    try:
+        token = ipc_cli.load_ipc_token(args.token)
+    except ValueError as exc:
+        print(str(exc))
+        raise SystemExit(2) from exc
+    supervise_cli.run_supervise_status(token, db_path=args.db_path)
+
+
+def _handle_supervise_down(_args: argparse.Namespace) -> None:
+    supervise_cli.run_supervise_down()
+
+
 def build_parser() -> argparse.ArgumentParser:
     default_db_path = str(Path(".gismo") / "state.db")
     db_parent = argparse.ArgumentParser(add_help=False)
@@ -1140,6 +1163,48 @@ def build_parser() -> argparse.ArgumentParser:
         help="Confirm removal (required to delete the launcher)",
     )
     daemon_uninstall_startup_parser.set_defaults(handler=_handle_daemon_uninstall_windows_startup)
+
+    supervise_parser = subparsers.add_parser(
+        "supervise",
+        aliases=["svc"],
+        help="Run IPC + daemon together",
+        parents=[db_parent_optional],
+    )
+    supervise_subparsers = supervise_parser.add_subparsers(
+        dest="supervise_command",
+        required=True,
+    )
+
+    supervise_up_parser = supervise_subparsers.add_parser(
+        "up",
+        help="Start IPC server and daemon worker",
+        parents=[db_parent_optional],
+    )
+    supervise_up_parser.add_argument(
+        "--token",
+        default=None,
+        help="IPC auth token (or set GISMO_IPC_TOKEN)",
+    )
+    supervise_up_parser.set_defaults(handler=_handle_supervise_up)
+
+    supervise_status_parser = supervise_subparsers.add_parser(
+        "status",
+        help="Show supervisor status",
+        parents=[db_parent_optional],
+    )
+    supervise_status_parser.add_argument(
+        "--token",
+        default=None,
+        help="IPC auth token (or set GISMO_IPC_TOKEN)",
+    )
+    supervise_status_parser.set_defaults(handler=_handle_supervise_status)
+
+    supervise_down_parser = supervise_subparsers.add_parser(
+        "down",
+        help="Stop supervisor-managed processes",
+        parents=[db_parent_optional],
+    )
+    supervise_down_parser.set_defaults(handler=_handle_supervise_down)
 
     queue_parser = subparsers.add_parser(
         "queue",

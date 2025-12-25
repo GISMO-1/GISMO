@@ -81,6 +81,14 @@ class CliMainParserTest(unittest.TestCase):
         serve_args = parser.parse_args(["ipc", "serve", "--db", db_path])
         self.assertEqual(serve_args.db_path, db_path)
 
+    def test_supervise_subcommand_routes_to_supervise(self) -> None:
+        parser = cli_main.build_parser()
+        args = parser.parse_args(["supervise", "status", "--token", "token"])
+
+        self.assertEqual(args.command, "supervise")
+        self.assertEqual(args.supervise_command, "status")
+        self.assertIs(args.handler, cli_main._handle_supervise_status)
+
     def test_enqueue_and_daemon_share_db_path(self) -> None:
         repo_root = Path(__file__).resolve().parents[1]
         policy_path = str(repo_root / "policy" / "readonly.json")

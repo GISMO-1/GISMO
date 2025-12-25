@@ -101,6 +101,7 @@ class IpcHandlerTest(unittest.TestCase):
 
     def test_new_actions_require_token(self) -> None:
         actions = [
+            "ping",
             "daemon_status",
             "daemon_pause",
             "daemon_resume",
@@ -136,6 +137,17 @@ class IpcHandlerTest(unittest.TestCase):
         self.assertIsNone(self.state_store.get_queue_item(failed_item.id))
         self.assertIsNotNone(self.state_store.get_queue_item(queued_item.id))
         self.assertIsNotNone(self.state_store.get_queue_item(succeeded_item.id))
+
+    def test_ping_response_shape(self) -> None:
+        response = ipc_cli.handle_ipc_request(
+            {"action": "ping", "token": self.token, "args": {}},
+            expected_token=self.token,
+            state_store=self.state_store,
+        )
+        self.assertTrue(response["ok"])
+        data = response["data"]
+        assert data is not None
+        self.assertEqual(data["status"], "ok")
 
 
 if __name__ == "__main__":

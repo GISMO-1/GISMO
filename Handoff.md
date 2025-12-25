@@ -33,10 +33,13 @@
 - Added local IPC control plane (named pipe/Unix socket) with token auth, CLI wiring, and handler tests.
 - Restored global CLI db flag parsing and IPC subcommand support for db path overrides.
 - Added IPC client connection error handling with friendly CLI messaging and tests.
+- Added daemon pause state persistence, IPC daemon controls, and queue maintenance IPC actions.
+- Added queue requeue-stale and purge-failed IPC behaviors with coverage tests.
 
 ## Next Steps
 - Validate IPC CLI db flag usage on Windows.
 - Validate IPC client connection errors on Windows named pipes.
+- Validate IPC daemon pause/resume behavior in long-running deployments.
 - Expand tool catalog and add richer permission policies.
 - Add query/reporting helpers for audit trails.
 - Extend orchestration tests to cover recovery workflows.

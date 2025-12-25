@@ -186,6 +186,11 @@ python -m gismo.cli.main --db .gismo/state.db ipc queue-stats
 python -m gismo.cli.main ipc serve --db .gismo/state.db
 python -m gismo.cli.main ipc enqueue "echo: hello"
 python -m gismo.cli.main ipc queue-stats
+python -m gismo.cli.main ipc daemon-status
+python -m gismo.cli.main ipc daemon-pause
+python -m gismo.cli.main ipc daemon-resume
+python -m gismo.cli.main ipc purge-failed
+python -m gismo.cli.main ipc requeue-stale --older-than-minutes 10 --limit 25
 python -m gismo.cli.main ipc run-show <RUN_ID>
 ```
 

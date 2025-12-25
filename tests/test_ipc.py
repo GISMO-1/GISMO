@@ -99,6 +99,44 @@ class IpcHandlerTest(unittest.TestCase):
             with self.assertRaises(ipc_cli.IPCConnectionError):
                 ipc_cli.ipc_request("queue_stats", {}, self.token)
 
+    def test_new_actions_require_token(self) -> None:
+        actions = [
+            "daemon_status",
+            "daemon_pause",
+            "daemon_resume",
+            "queue_purge_failed",
+            "queue_requeue_stale",
+        ]
+        for action in actions:
+            with self.subTest(action=action):
+                response = ipc_cli.handle_ipc_request(
+                    {"action": action, "args": {}},
+                    expected_token=self.token,
+                    state_store=self.state_store,
+                )
+                self.assertFalse(response["ok"])
+                self.assertEqual(response["error"], "unauthorized")
+
+    def test_queue_purge_failed_deletes_only_failed(self) -> None:
+        failed_item = self.state_store.enqueue_command("echo: fail")
+        self.state_store.mark_queue_item_failed(failed_item.id, "boom", retryable=False)
+        queued_item = self.state_store.enqueue_command("echo: queued")
+        succeeded_item = self.state_store.enqueue_command("echo: ok")
+        self.state_store.mark_queue_item_succeeded(succeeded_item.id)
+
+        response = ipc_cli.handle_ipc_request(
+            {"action": "queue_purge_failed", "token": self.token, "args": {}},
+            expected_token=self.token,
+            state_store=self.state_store,
+        )
+        self.assertTrue(response["ok"])
+        data = response["data"]
+        assert data is not None
+        self.assertEqual(data["deleted"], 1)
+        self.assertIsNone(self.state_store.get_queue_item(failed_item.id))
+        self.assertIsNotNone(self.state_store.get_queue_item(queued_item.id))
+        self.assertIsNotNone(self.state_store.get_queue_item(succeeded_item.id))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -32,6 +32,9 @@ def run_daemon_loop(
     stop_event = threading.Event()
     _register_shutdown_handlers(stop_event)
     while not stop_event.is_set():
+        if state.get_daemon_paused():
+            stop_event.wait(sleep_seconds)
+            continue
         item = state.claim_next_queue_item()
         if item is None:
             if once:

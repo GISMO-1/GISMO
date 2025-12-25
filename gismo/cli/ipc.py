@@ -166,6 +166,37 @@ def handle_ipc_request(
             data = _serialize_queue_stats(stats)
             data["db_path"] = state_store.db_path
             return IPCResponse(True, request_id, data, None).to_dict()
+        if action == "daemon_status":
+            data = {"paused": state_store.get_daemon_paused()}
+            return IPCResponse(True, request_id, data, None).to_dict()
+        if action == "daemon_pause":
+            state_store.set_daemon_paused(True)
+            data = {"paused": True}
+            return IPCResponse(True, request_id, data, None).to_dict()
+        if action == "daemon_resume":
+            state_store.set_daemon_paused(False)
+            data = {"paused": False}
+            return IPCResponse(True, request_id, data, None).to_dict()
+        if action == "queue_purge_failed":
+            deleted = state_store.delete_queue_items_by_status(QueueStatus.FAILED)
+            data = {"deleted": deleted}
+            return IPCResponse(True, request_id, data, None).to_dict()
+        if action == "queue_requeue_stale":
+            older_than_minutes = int(args.get("older_than_minutes", 0))
+            limit = args.get("limit")
+            limit_value = int(limit) if limit is not None else 100
+            if older_than_minutes <= 0:
+                raise ValueError("older_than_minutes must be > 0")
+            updated = state_store.requeue_stale_in_progress_queue(
+                older_than_seconds=older_than_minutes * 60,
+                limit=limit_value,
+            )
+            data = {
+                "requeued": updated,
+                "older_than_minutes": older_than_minutes,
+                "limit": limit_value,
+            }
+            return IPCResponse(True, request_id, data, None).to_dict()
         if action == "run_show":
             run_id = str(args.get("run_id") or "").strip()
             if not run_id:
@@ -357,6 +388,37 @@ def format_queue_stats_output(stats: Dict[str, Any]) -> str:
 
 def format_enqueue_output(data: Dict[str, Any]) -> str:
     return f"Enqueued {data['queue_item_id']} status={data['status']}"
+
+
+def format_daemon_status_output(data: Dict[str, Any]) -> str:
+    paused = data.get("paused", False)
+    state = "paused" if paused else "running"
+    return f"Daemon status: {state}"
+
+
+def format_daemon_pause_output(data: Dict[str, Any]) -> str:
+    paused = data.get("paused", False)
+    return "Daemon paused." if paused else "Daemon pause failed."
+
+
+def format_daemon_resume_output(data: Dict[str, Any]) -> str:
+    paused = data.get("paused", True)
+    return "Daemon resumed." if not paused else "Daemon resume failed."
+
+
+def format_queue_purge_failed_output(data: Dict[str, Any]) -> str:
+    deleted = int(data.get("deleted", 0))
+    return f"Deleted {deleted} failed queue item(s)."
+
+
+def format_queue_requeue_stale_output(data: Dict[str, Any]) -> str:
+    requeued = int(data.get("requeued", 0))
+    older_than_minutes = data.get("older_than_minutes", "-")
+    limit = data.get("limit", "-")
+    return (
+        f"Requeued {requeued} stale queue item(s) "
+        f"(older_than_minutes={older_than_minutes}, limit={limit})."
+    )
 
 
 def format_run_show_output(payload: Dict[str, Any]) -> str:

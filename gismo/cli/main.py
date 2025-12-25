@@ -716,7 +716,8 @@ def _handle_ipc_serve(args: argparse.Namespace) -> None:
     except ValueError as exc:
         print(str(exc))
         raise SystemExit(2) from exc
-    ipc_cli.serve_ipc(args.db_path, token)
+    db_path = getattr(args, "db_path", None) or str(ipc_cli.DEFAULT_DB_PATH)
+    ipc_cli.serve_ipc(db_path, token)
 
 
 def _print_ipc_connection_error() -> None:
@@ -743,6 +744,7 @@ def _handle_ipc_enqueue(args: argparse.Namespace) -> None:
                     "max_attempts": args.max_attempts,
                 },
                 token,
+                getattr(args, "db_path", None),
             )
         )
     except ipc_cli.IPCConnectionError:
@@ -764,7 +766,9 @@ def _handle_ipc_ping(args: argparse.Namespace) -> None:
         print(str(exc))
         raise SystemExit(2) from exc
     try:
-        response = ipc_cli.parse_ipc_response(ipc_cli.ipc_request("ping", {}, token))
+        response = ipc_cli.parse_ipc_response(
+            ipc_cli.ipc_request("ping", {}, token, getattr(args, "db_path", None))
+        )
     except ipc_cli.IPCConnectionError:
         _print_ipc_connection_error()
         raise SystemExit(2)
@@ -784,7 +788,9 @@ def _handle_ipc_queue_stats(args: argparse.Namespace) -> None:
         print(str(exc))
         raise SystemExit(2) from exc
     try:
-        response = ipc_cli.parse_ipc_response(ipc_cli.ipc_request("queue_stats", {}, token))
+        response = ipc_cli.parse_ipc_response(
+            ipc_cli.ipc_request("queue_stats", {}, token, getattr(args, "db_path", None))
+        )
     except ipc_cli.IPCConnectionError:
         _print_ipc_connection_error()
         raise SystemExit(2)
@@ -805,7 +811,12 @@ def _handle_ipc_run_show(args: argparse.Namespace) -> None:
         raise SystemExit(2) from exc
     try:
         response = ipc_cli.parse_ipc_response(
-            ipc_cli.ipc_request("run_show", {"run_id": args.run_id}, token)
+            ipc_cli.ipc_request(
+                "run_show",
+                {"run_id": args.run_id},
+                token,
+                getattr(args, "db_path", None),
+            )
         )
     except ipc_cli.IPCConnectionError:
         _print_ipc_connection_error()
@@ -828,7 +839,9 @@ def _handle_ipc_daemon_status(args: argparse.Namespace) -> None:
         print(str(exc))
         raise SystemExit(2) from exc
     try:
-        response = ipc_cli.parse_ipc_response(ipc_cli.ipc_request("daemon_status", {}, token))
+        response = ipc_cli.parse_ipc_response(
+            ipc_cli.ipc_request("daemon_status", {}, token, getattr(args, "db_path", None))
+        )
     except ipc_cli.IPCConnectionError:
         _print_ipc_connection_error()
         raise SystemExit(2)
@@ -848,7 +861,9 @@ def _handle_ipc_daemon_pause(args: argparse.Namespace) -> None:
         print(str(exc))
         raise SystemExit(2) from exc
     try:
-        response = ipc_cli.parse_ipc_response(ipc_cli.ipc_request("daemon_pause", {}, token))
+        response = ipc_cli.parse_ipc_response(
+            ipc_cli.ipc_request("daemon_pause", {}, token, getattr(args, "db_path", None))
+        )
     except ipc_cli.IPCConnectionError:
         _print_ipc_connection_error()
         raise SystemExit(2)
@@ -868,7 +883,9 @@ def _handle_ipc_daemon_resume(args: argparse.Namespace) -> None:
         print(str(exc))
         raise SystemExit(2) from exc
     try:
-        response = ipc_cli.parse_ipc_response(ipc_cli.ipc_request("daemon_resume", {}, token))
+        response = ipc_cli.parse_ipc_response(
+            ipc_cli.ipc_request("daemon_resume", {}, token, getattr(args, "db_path", None))
+        )
     except ipc_cli.IPCConnectionError:
         _print_ipc_connection_error()
         raise SystemExit(2)
@@ -889,7 +906,12 @@ def _handle_ipc_purge_failed(args: argparse.Namespace) -> None:
         raise SystemExit(2) from exc
     try:
         response = ipc_cli.parse_ipc_response(
-            ipc_cli.ipc_request("queue_purge_failed", {}, token)
+            ipc_cli.ipc_request(
+                "queue_purge_failed",
+                {},
+                token,
+                getattr(args, "db_path", None),
+            )
         )
     except ipc_cli.IPCConnectionError:
         _print_ipc_connection_error()
@@ -912,7 +934,12 @@ def _handle_ipc_requeue_stale(args: argparse.Namespace) -> None:
     payload = {"older_than_minutes": args.older_than_minutes, "limit": args.limit}
     try:
         response = ipc_cli.parse_ipc_response(
-            ipc_cli.ipc_request("queue_requeue_stale", payload, token)
+            ipc_cli.ipc_request(
+                "queue_requeue_stale",
+                payload,
+                token,
+                getattr(args, "db_path", None),
+            )
         )
     except ipc_cli.IPCConnectionError:
         _print_ipc_connection_error()
@@ -932,7 +959,8 @@ def _handle_supervise_up(args: argparse.Namespace) -> None:
     except ValueError as exc:
         print(str(exc))
         raise SystemExit(2) from exc
-    supervise_cli.run_supervise_up(args.db_path, token)
+    db_path = getattr(args, "db_path", None) or str(ipc_cli.DEFAULT_DB_PATH)
+    supervise_cli.run_supervise_up(db_path, token)
 
 
 def _handle_supervise_status(args: argparse.Namespace) -> None:
@@ -941,7 +969,8 @@ def _handle_supervise_status(args: argparse.Namespace) -> None:
     except ValueError as exc:
         print(str(exc))
         raise SystemExit(2) from exc
-    supervise_cli.run_supervise_status(token, db_path=args.db_path)
+    db_path = getattr(args, "db_path", None)
+    supervise_cli.run_supervise_status(token, db_path=db_path)
 
 
 def _handle_supervise_down(_args: argparse.Namespace) -> None:

@@ -1,6 +1,7 @@
 """Local IPC control plane for GISMO."""
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -39,6 +40,7 @@ class IPCResponse:
 
 
 LOGGER = logging.getLogger(__name__)
+DEFAULT_DB_PATH = Path(".gismo") / "state.db"
 
 
 class IPCConnectionError(RuntimeError):
@@ -55,9 +57,25 @@ def _connect(endpoint: IPCEndpoint) -> Client:
     return Client(endpoint.address, family=endpoint.family)
 
 
-def default_ipc_endpoint() -> IPCEndpoint:
-    if os.name == "nt":
-        return IPCEndpoint(r"\\.\pipe\gismo-ipc", "AF_PIPE")
+def _resolve_db_path(db_path: str | None) -> str:
+    if db_path:
+        resolved = Path(db_path).expanduser().resolve(strict=False)
+        return os.path.normcase(str(resolved))
+    resolved_default = DEFAULT_DB_PATH.resolve(strict=False)
+    return os.path.normcase(str(resolved_default))
+
+
+def _ipc_pipe_suffix(db_path: str | None) -> str:
+    resolved = _resolve_db_path(db_path)
+    digest = hashlib.sha256(resolved.encode("utf-8")).hexdigest()
+    return digest[:12]
+
+
+def ipc_endpoint(db_path: str | None, *, os_name: str | None = None) -> IPCEndpoint:
+    resolved_os = os_name or os.name
+    if resolved_os == "nt":
+        suffix = _ipc_pipe_suffix(db_path)
+        return IPCEndpoint(rf"\\.\pipe\gismo-{suffix}", "AF_PIPE")
     return IPCEndpoint("/tmp/gismo-ipc.sock", "AF_UNIX")
 
 
@@ -237,7 +255,7 @@ def _log_request(request_id: str, action: str | None, caller: str | None) -> Non
 
 
 def serve_ipc(db_path: str, token: str) -> None:
-    endpoint = default_ipc_endpoint()
+    endpoint = ipc_endpoint(db_path)
     socket_path = Path(endpoint.address) if endpoint.family == "AF_UNIX" else None
     if socket_path is not None:
         if socket_path.exists():
@@ -248,7 +266,16 @@ def serve_ipc(db_path: str, token: str) -> None:
         socket_path.parent.mkdir(parents=True, exist_ok=True)
 
     logging.basicConfig(level=logging.INFO, format="%(message)s")
-    listener = Listener(endpoint.address, family=endpoint.family)
+    try:
+        listener = Listener(endpoint.address, family=endpoint.family)
+    except OSError:
+        print(
+            "IPC listener failed to bind. "
+            f"Address={endpoint.address}. "
+            "If a stale IPC server or pipe collision exists, run "
+            "`python -m gismo.cli.main supervise down` and retry."
+        )
+        raise SystemExit(1) from None
     state_store = StateStore(db_path)
 
     try:
@@ -279,8 +306,13 @@ def serve_ipc(db_path: str, token: str) -> None:
             socket_path.unlink()
 
 
-def ipc_request(action: str, args: Dict[str, Any], token: str) -> Dict[str, Any]:
-    endpoint = default_ipc_endpoint()
+def ipc_request(
+    action: str,
+    args: Dict[str, Any],
+    token: str,
+    db_path: str | None = None,
+) -> Dict[str, Any]:
+    endpoint = ipc_endpoint(db_path)
     request_id = str(uuid.uuid4())
     request = {
         "request_id": request_id,

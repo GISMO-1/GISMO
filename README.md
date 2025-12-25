@@ -195,6 +195,9 @@ python -m gismo.cli.main ipc requeue-stale --older-than-minutes 10 --limit 25
 python -m gismo.cli.main ipc run-show <RUN_ID>
 ```
 
+Note: On Windows, the IPC named pipe is derived from the database path. Ensure the
+same `--db` value is used for `ipc serve`, `ipc ...` clients, and `supervise`.
+
 Local supervisor (IPC + daemon in one terminal):
 
 ```bash

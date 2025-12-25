@@ -1,3 +1,4 @@
+import re
 import tempfile
 import unittest
 from unittest import mock
@@ -148,6 +149,19 @@ class IpcHandlerTest(unittest.TestCase):
         data = response["data"]
         assert data is not None
         self.assertEqual(data["status"], "ok")
+
+
+class IpcEndpointTest(unittest.TestCase):
+    def test_windows_ipc_endpoint_is_stable_and_sanitized(self) -> None:
+        db_path = r"C:\Users\gismo\state.db"
+        endpoint_one = ipc_cli.ipc_endpoint(db_path, os_name="nt")
+        endpoint_two = ipc_cli.ipc_endpoint(db_path, os_name="nt")
+        self.assertEqual(endpoint_one.address, endpoint_two.address)
+        self.assertEqual(endpoint_one.family, "AF_PIPE")
+        self.assertRegex(
+            endpoint_one.address,
+            re.compile(r"^\\\\\.\\pipe\\gismo-[0-9a-f]{12}$"),
+        )
 
 
 if __name__ == "__main__":

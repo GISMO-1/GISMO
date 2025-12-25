@@ -38,10 +38,13 @@
 - Added supervise CLI command to run IPC server and daemon together with PID-based control.
 - Added IPC ping CLI wiring plus supervisor reuse/authorization checks and PID tracking for started children.
 - Reconciled supervise status against IPC reachability and daemon status with Windows-safe PID checks.
+- Derived Windows IPC pipe names from the database path and aligned supervise/IPC client discovery.
+- Added Windows IPC endpoint unit coverage and supervise db-path probe validation.
 
 ## Next Steps
 - Validate IPC CLI db flag usage on Windows.
 - Validate IPC client connection errors on Windows named pipes.
+- Validate Windows IPC pipe binding error messaging and supervise cleanup.
 - Validate IPC daemon pause/resume behavior in long-running deployments.
 - Validate supervise up/down behavior on Windows named pipes and terminal restarts.
 - Validate supervise status output on Windows when IPC is running outside supervise.

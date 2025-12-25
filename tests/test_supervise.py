@@ -118,6 +118,28 @@ class SuperviseUpTest(unittest.TestCase):
         self.assertTrue(saved_record.ipc_reused)
         self.assertTrue(saved_record.daemon_started)
 
+    def test_supervise_up_passes_db_path_to_ipc_probe(self) -> None:
+        process_ops = FakeProcessOps(spawn_processes=[FakeProcess(3101)])
+        ping_response = {
+            "ok": True,
+            "request_id": "ping-3",
+            "data": {"status": "ok"},
+            "error": None,
+        }
+        with tempfile.TemporaryDirectory() as tempdir:
+            pid_path = Path(tempdir) / "supervise.json"
+            with mock.patch(
+                "gismo.cli.supervise.ipc_cli.ipc_request",
+                return_value=ping_response,
+            ) as ipc_request_mock:
+                supervise_cli.run_supervise_up(
+                    "state.db",
+                    "token",
+                    pid_path=pid_path,
+                    process_ops=process_ops,
+                )
+        ipc_request_mock.assert_called_once_with("ping", {}, "token", "state.db")
+
     def test_ipc_unauthorized_fails_cleanly(self) -> None:
         process_ops = FakeProcessOps()
         unauthorized_response = {

@@ -160,7 +160,7 @@ def run_supervise_up(
             return
         pid_path.unlink(missing_ok=True)
 
-    ipc_reachable, ipc_authorized = _probe_ipc_server(token)
+    ipc_reachable, ipc_authorized = _probe_ipc_server(token, db_path)
     if ipc_reachable and not ipc_authorized:
         print("IPC authorization failed. Ensure the supervisor token matches the running IPC server.")
         raise SystemExit(1)
@@ -267,8 +267,11 @@ def run_supervise_status(
         lines.append(f"db_path_mismatch: requested={db_path}")
     ipc_reachable = False
     ipc_error = None
+    db_path_for_ipc = record.db_path if record is not None else db_path
     try:
-        ping = ipc_cli.parse_ipc_response(ipc_cli.ipc_request("ping", {}, token))
+        ping = ipc_cli.parse_ipc_response(
+            ipc_cli.ipc_request("ping", {}, token, db_path_for_ipc)
+        )
         ipc_reachable = ping.ok
         if not ping.ok:
             ipc_error = ping.error or "unknown"
@@ -278,7 +281,7 @@ def run_supervise_status(
     lines.append(_fmt_ipc_status(ipc_reachable, status.ipc_running))
     if ipc_reachable:
         daemon_status = ipc_cli.parse_ipc_response(
-            ipc_cli.ipc_request("daemon_status", {}, token)
+            ipc_cli.ipc_request("daemon_status", {}, token, db_path_for_ipc)
         )
         if daemon_status.ok:
             paused = bool(daemon_status.data and daemon_status.data.get("paused"))
@@ -357,9 +360,11 @@ def _fmt_ping(ok: bool, error: str | None) -> str:
     return "error"
 
 
-def _probe_ipc_server(token: str) -> tuple[bool, bool]:
+def _probe_ipc_server(token: str, db_path: str) -> tuple[bool, bool]:
     try:
-        response = ipc_cli.parse_ipc_response(ipc_cli.ipc_request("ping", {}, token))
+        response = ipc_cli.parse_ipc_response(
+            ipc_cli.ipc_request("ping", {}, token, db_path)
+        )
     except ipc_cli.IPCConnectionError:
         return False, False
     if response.ok:
@@ -367,14 +372,14 @@ def _probe_ipc_server(token: str) -> tuple[bool, bool]:
     if response.error == "unauthorized":
         return True, False
     if response.error == "unsupported_action":
-        return _probe_ipc_fallback(token)
+        return _probe_ipc_fallback(token, db_path)
     return False, False
 
 
-def _probe_ipc_fallback(token: str) -> tuple[bool, bool]:
+def _probe_ipc_fallback(token: str, db_path: str) -> tuple[bool, bool]:
     try:
         response = ipc_cli.parse_ipc_response(
-            ipc_cli.ipc_request("daemon_status", {}, token)
+            ipc_cli.ipc_request("daemon_status", {}, token, db_path)
         )
     except ipc_cli.IPCConnectionError:
         return False, False

@@ -178,6 +178,19 @@ python -m gismo.cli.main enqueue "echo: daemon hello" --db .gismo/state.db
 python -m gismo.cli.main daemon --once --policy policy/readonly.json --db .gismo/state.db
 ```
 
+Install the Windows Task Scheduler entry for an always-on daemon:
+
+```bash
+python -m gismo.cli.main daemon install-windows-task --db .gismo/state.db
+python -m gismo.cli.main daemon install-windows-task --db .gismo/state.db --name "GISMO Daemon" --force
+```
+
+Remove the Windows Task Scheduler entry:
+
+```bash
+python -m gismo.cli.main daemon uninstall-windows-task --name "GISMO Daemon" --yes
+```
+
 Inspect queue items (DB flag can be supplied before or after the queue subcommand):
 
 ```bash

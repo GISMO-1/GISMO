@@ -1,8 +1,10 @@
 """Daemon loop for executing queued operator commands."""
 from __future__ import annotations
 
+import signal
 import sqlite3
 import time
+import threading
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -27,12 +29,14 @@ def run_daemon_loop(
     once: bool,
 ) -> None:
     repo_root = Path(__file__).resolve().parents[2]
-    while True:
+    stop_event = threading.Event()
+    _register_shutdown_handlers(stop_event)
+    while not stop_event.is_set():
         item = state.claim_next_queue_item()
         if item is None:
             if once:
                 return
-            time.sleep(sleep_seconds)
+            stop_event.wait(sleep_seconds)
             continue
         _execute_queue_item(state, item, policy_path, repo_root)
 
@@ -184,3 +188,19 @@ def build_registry(state_store: StateStore, policy: PermissionPolicy) -> ToolReg
     )
     registry.register(ShellTool(shell_config))
     return registry
+
+
+def _register_shutdown_handlers(stop_event: threading.Event) -> None:
+    if threading.current_thread() is not threading.main_thread():
+        return
+
+    def _handle_signal(signum: int, _frame: object) -> None:
+        stop_event.set()
+        signal_name = getattr(signal.Signals(signum), "name", str(signum))
+        print(f"Daemon shutdown requested ({signal_name}).", flush=True)
+
+    for signal_name in ("SIGINT", "SIGTERM"):
+        sig = getattr(signal, signal_name, None)
+        if sig is None:
+            continue
+        signal.signal(sig, _handle_signal)

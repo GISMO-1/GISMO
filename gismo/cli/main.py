@@ -656,6 +656,7 @@ def build_parser() -> argparse.ArgumentParser:
     queue_stats_parser = queue_subparsers.add_parser(
         "stats",
         help="Show queue summary statistics",
+        parents=[db_parent],
     )
     queue_stats_parser.add_argument(
         "--json",
@@ -667,6 +668,7 @@ def build_parser() -> argparse.ArgumentParser:
     queue_list_parser = queue_subparsers.add_parser(
         "list",
         help="List queue items",
+        parents=[db_parent],
     )
     queue_list_parser.add_argument(
         "--limit",
@@ -699,6 +701,7 @@ def build_parser() -> argparse.ArgumentParser:
     queue_show_parser = queue_subparsers.add_parser(
         "show",
         help="Show a single queue item by id",
+        parents=[db_parent],
     )
     queue_show_parser.add_argument("id", help="Queue item id")
     queue_show_parser.add_argument(

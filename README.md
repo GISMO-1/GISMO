@@ -172,6 +172,14 @@ python -m gismo.cli.main enqueue "echo: daemon hello" --db .gismo/state.db
 python -m gismo.cli.main daemon --once --policy policy/readonly.json --db .gismo/state.db
 ```
 
+Inspect queue items (DB flag can be supplied before or after the queue subcommand):
+
+```bash
+python -m gismo.cli.main queue stats --db .gismo/state.db
+python -m gismo.cli.main queue list --db .gismo/state.db --limit 10 --json
+python -m gismo.cli.main queue show --db .gismo/state.db <QUEUE_ITEM_ID>
+```
+
 Export a run audit trail as JSONL:
 
 ```bash

@@ -13,6 +13,7 @@ from gismo.cli.operator import (
     parse_command,
     required_tools,
 )
+from gismo.cli import ipc as ipc_cli
 from gismo.cli.windows_startup import (
     install_windows_startup_launcher,
     uninstall_windows_startup_launcher,
@@ -708,6 +709,80 @@ def _handle_queue_purge_failed(args: argparse.Namespace) -> None:
         )
 
 
+def _handle_ipc_serve(args: argparse.Namespace) -> None:
+    try:
+        token = ipc_cli.load_ipc_token(args.token)
+    except ValueError as exc:
+        print(str(exc))
+        raise SystemExit(2) from exc
+    ipc_cli.serve_ipc(args.db_path, token)
+
+
+def _handle_ipc_enqueue(args: argparse.Namespace) -> None:
+    command_text = " ".join(args.operator_command).strip()
+    if not command_text:
+        raise ValueError("ipc enqueue requires a command string")
+    try:
+        token = ipc_cli.load_ipc_token(args.token)
+    except ValueError as exc:
+        print(str(exc))
+        raise SystemExit(2) from exc
+    response = ipc_cli.parse_ipc_response(
+        ipc_cli.ipc_request(
+            "enqueue",
+            {
+                "command": command_text,
+                "run_id": args.run_id,
+                "max_attempts": args.max_attempts,
+            },
+            token,
+        )
+    )
+    if not response.ok:
+        if response.error == "unauthorized":
+            print("IPC unauthorized")
+        else:
+            print(f"IPC error: {response.error or 'unknown error'}")
+        raise SystemExit(2)
+    print(ipc_cli.format_enqueue_output(response.data or {}))
+
+
+def _handle_ipc_queue_stats(args: argparse.Namespace) -> None:
+    try:
+        token = ipc_cli.load_ipc_token(args.token)
+    except ValueError as exc:
+        print(str(exc))
+        raise SystemExit(2) from exc
+    response = ipc_cli.parse_ipc_response(ipc_cli.ipc_request("queue_stats", {}, token))
+    if not response.ok:
+        if response.error == "unauthorized":
+            print("IPC unauthorized")
+        else:
+            print(f"IPC error: {response.error or 'unknown error'}")
+        raise SystemExit(2)
+    print(ipc_cli.format_queue_stats_output(response.data or {}))
+
+
+def _handle_ipc_run_show(args: argparse.Namespace) -> None:
+    try:
+        token = ipc_cli.load_ipc_token(args.token)
+    except ValueError as exc:
+        print(str(exc))
+        raise SystemExit(2) from exc
+    response = ipc_cli.parse_ipc_response(
+        ipc_cli.ipc_request("run_show", {"run_id": args.run_id}, token)
+    )
+    if not response.ok:
+        if response.error == "unauthorized":
+            print("IPC unauthorized")
+        elif response.error == "not_found":
+            print(f"Run not found: {args.run_id}")
+        else:
+            print(f"IPC error: {response.error or 'unknown error'}")
+        raise SystemExit(2)
+    print(ipc_cli.format_run_show_output(response.data or {}))
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="GISMO CLI")
     db_parent = argparse.ArgumentParser(add_help=False)
@@ -1011,6 +1086,78 @@ def build_parser() -> argparse.ArgumentParser:
         help="Confirm deletion (omit for dry-run)",
     )
     queue_purge_failed_parser.set_defaults(handler=_handle_queue_purge_failed)
+
+    ipc_parser = subparsers.add_parser(
+        "ipc",
+        help="Local IPC control plane",
+    )
+    ipc_subparsers = ipc_parser.add_subparsers(dest="ipc_command", required=True)
+
+    ipc_serve_parser = ipc_subparsers.add_parser(
+        "serve",
+        help="Start the IPC server",
+        parents=[db_parent],
+    )
+    ipc_serve_parser.add_argument(
+        "--token",
+        default=None,
+        help="IPC auth token (or set GISMO_IPC_TOKEN)",
+    )
+    ipc_serve_parser.set_defaults(handler=_handle_ipc_serve)
+
+    ipc_enqueue_parser = ipc_subparsers.add_parser(
+        "enqueue",
+        help="Enqueue an operator command via IPC",
+    )
+    ipc_enqueue_parser.add_argument(
+        "--token",
+        default=None,
+        help="IPC auth token (or set GISMO_IPC_TOKEN)",
+    )
+    ipc_enqueue_parser.add_argument(
+        "--run",
+        dest="run_id",
+        default=None,
+        help="Optional existing run ID to attach tasks to",
+    )
+    ipc_enqueue_parser.add_argument(
+        "--max-attempts",
+        type=int,
+        default=3,
+        help="Maximum attempts for this queue item",
+    )
+    ipc_enqueue_parser.add_argument(
+        "operator_command",
+        nargs=argparse.REMAINDER,
+        help="Operator command string to enqueue",
+    )
+    ipc_enqueue_parser.set_defaults(handler=_handle_ipc_enqueue)
+
+    ipc_queue_stats_parser = ipc_subparsers.add_parser(
+        "queue-stats",
+        help="Show queue summary statistics via IPC",
+    )
+    ipc_queue_stats_parser.add_argument(
+        "--token",
+        default=None,
+        help="IPC auth token (or set GISMO_IPC_TOKEN)",
+    )
+    ipc_queue_stats_parser.set_defaults(handler=_handle_ipc_queue_stats)
+
+    ipc_run_show_parser = ipc_subparsers.add_parser(
+        "run-show",
+        help="Show a run summary via IPC",
+    )
+    ipc_run_show_parser.add_argument(
+        "--token",
+        default=None,
+        help="IPC auth token (or set GISMO_IPC_TOKEN)",
+    )
+    ipc_run_show_parser.add_argument(
+        "run_id",
+        help="Run ID to show",
+    )
+    ipc_run_show_parser.set_defaults(handler=_handle_ipc_run_show)
 
     return parser
 

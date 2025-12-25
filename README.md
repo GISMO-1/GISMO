@@ -178,6 +178,16 @@ python -m gismo.cli.main enqueue "echo: daemon hello" --db .gismo/state.db
 python -m gismo.cli.main daemon --once --policy policy/readonly.json --db .gismo/state.db
 ```
 
+Local IPC control plane (same-machine only, token required):
+
+```bash
+export GISMO_IPC_TOKEN="your-token"
+python -m gismo.cli.main ipc serve --db .gismo/state.db
+python -m gismo.cli.main ipc enqueue "echo: hello"
+python -m gismo.cli.main ipc queue-stats
+python -m gismo.cli.main ipc run-show <RUN_ID>
+```
+
 Install the Windows Task Scheduler entry for an always-on daemon:
 
 ```bash

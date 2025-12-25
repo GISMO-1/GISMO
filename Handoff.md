@@ -30,6 +30,7 @@
 - Added daemon shutdown signal handling and Windows Task Scheduler install/uninstall CLI helpers.
 - Added optional Windows Task Scheduler startup trigger and improved install error reporting for non-admin defaults.
 - Added Windows Startup folder launcher install/uninstall commands with tests and Task Scheduler access-denied guidance.
+- Added local IPC control plane (named pipe/Unix socket) with token auth, CLI wiring, and handler tests.
 
 ## Next Steps
 - Expand tool catalog and add richer permission policies.
@@ -41,6 +42,7 @@
 - Consider additional CLI filters for run/task search and failure triage.
 - Add Windows-specific operational playbooks for Task Scheduler maintenance.
 - Document Windows Startup launcher maintenance steps.
+- Consider IPC integration tests over the real transport layer.
 
 ## Tests
 - `python scripts/verify.py`

@@ -1,117 +1,263 @@
 # GISMO Objectives, Progress Log, and Next Steps
 
 Date: 2025-12-25  
-Environment: Windows (PowerShell), Python 3.13.9, repo path `D:\repos\GISMO`, venv `.venv`
+Environment: Windows (PowerShell), Python 3.13.x  
+Repo path: `D:\repos\GISMO`  
+Virtual environment: `.venv`
+
+---
 
 ## 1) What we accomplished (this session)
 
+### Queue CLI introspection (implemented)
+
+The following queue inspection commands are now implemented in the CLI:
+
+- `queue stats`
+- `queue list`
+- `queue show <id>`
+
+Capabilities:
+- Short-ID resolution (prefix matching with ambiguity detection).
+- Human-readable output.
+- JSON output where requested.
+- Verified logic for resolving short IDs against full UUIDs.
+
+A new test suite was added and pushed:
+
+- `tests/test_queue_cli.py`
+  - Covers stats, list, show
+  - Covers short-id resolution and ambiguity handling
+
+Commit pushed:
+- `Add queue CLI tests (short id, stats, list, show)`
+
+---
+
 ### Packaging / import stability
 
-- Confirmed `python -m gismo.cli.main ...` failed when executed from the wrong directory because the package was not importable.
-- Verified correct execution from repo root (`D:\repos\GISMO`) and installed the project as editable:
+- Confirmed correct invocation pattern:
+  - `python -m gismo.cli.main ...`
+- Confirmed repo-root execution is required.
+- Project installed as editable:
   - `python -m pip install -e .`
-- Created and activated a local virtual environment:
-  - `python -m venv .venv`
-  - `.\.venv\Scripts\Activate.ps1`
-- Confirmed module resolution:
-  - `python -c "import gismo; print(gismo.__file__)"` resolves to the repo source.
+- Virtual environment created and used successfully.
+- Verified module resolution:
+  - `import gismo` resolves to repo source.
 
-### State / database clarity
+---
 
-- Identified two different SQLite DB locations:
-  - Default state DB: `D:\repos\GISMO\.gismo\state.db` (active, contains `queue_items`)
-  - Legacy/removed path previously used: `D:\gismo\data\gismo.db` (folder later deleted)
-- Verified schema exists in `state.db`:
-  - Tables: `queue_items`, `runs`, `tasks`, `tool_calls`
-- Verified there are queue entries and execution history in `state.db`.
-- Verified that the CLI `enqueue` and `daemon --once` flow works end-to-end for supported commands (`echo:`).
+### State / database behavior
 
-### Operator command constraints (expected behavior)
-
-- Confirmed `shell:` is currently unsupported by the operator implementation:
-  - Failed row example:
-    - Command: `shell: cmd /c echo PING_FROM_CMD ...`
-    - Error: `Unsupported command. Use echo:, note:, or graph:.`
-- Confirmed supported operator commands are currently:
+- Active SQLite DB location:
+  - `.gismo/state.db`
+- Schema verified:
+  - `queue_items`, `runs`, `tasks`, `tool_calls`
+- CLI enqueue + daemon execution works for supported operators:
   - `echo:`
   - `note:`
   - `graph:`
 
+---
+
+### Operator constraints (expected behavior)
+
+- `shell:` operator is intentionally unsupported by default.
+- Unsupported commands fail with:
+  - Clear rejection (but messaging still needs improvement).
+
+---
+
 ### Git hygiene
 
-- Verified repo is clean:
-  - `git status` shows working tree clean, branch up to date with origin.
+- Repo is clean.
+- Branch `main` is up to date with `origin/main`.
+- New tests are committed and pushed.
+
+---
 
 ## 2) Current status snapshot
 
-### Queue status (as of this session)
-
-- `queue_items` shows a mix of `SUCCEEDED` and `FAILED`.
-- The only observed failure cause is use of an unsupported `shell:` command.
-
 ### What is working
 
-- Editable install + venv is working.
-- CLI can enqueue and daemon can process supported operator commands.
-- State DB is persisting in `.gismo\state.db`.
+- Queue inspection commands exist and function logically.
+- Short-ID resolution works.
+- Editable install + venv workflow is stable.
+- State persistence works across CLI and daemon runs.
+- Tests correctly encode expected behavior.
 
-### What is not working (by design, but needs better UX)
+---
 
-- `shell:` commands are rejected; debugging required manual SQLite inspection.
-- CLI is missing operator introspection subcommands (queue list/show/stats), forcing ad-hoc scripts.
+### What is NOT working (current blockers)
+
+These are **real bugs**, not design decisions.
+
+#### A) CLI `--db` flag handling (critical)
+
+Tests expect this to work:
+
+```bash
+python -m gismo.cli.main queue stats --db <path>
+````
+
+Current behavior:
+
+* `queue` subcommands reject `--db` as an unrecognized argument.
+
+Root cause:
+
+* Argument parsing structure does not propagate `--db` to `queue` subcommands.
+
+---
+
+#### B) SQLite file locking on Windows (critical)
+
+Symptoms:
+
+* Many tests fail with:
+
+  ```
+  PermissionError: [WinError 32] The process cannot access the file because it is being used by another process
+  ```
+* Temporary directories fail to clean up because `state.db` is still open.
+
+Root cause:
+
+* SQLite connections are not being closed deterministically.
+* Some code paths leak connections or cursors.
+* Windows does not allow deletion of open SQLite files.
+
+Impact:
+
+* Massive test failure cascade.
+* Prevents reliable Windows support.
+
+---
+
+#### C) ShellTool fails on Windows (test failure)
+
+Failing test:
+
+* `ShellToolTest.test_shell_tool_logs_output_and_exit_code`
+
+Root cause:
+
+* `echo` is a shell builtin on Windows.
+* `subprocess.run(["echo", "hello"], shell=False)` fails with `FileNotFoundError`.
+
+Expected behavior:
+
+* Allowlisted shell commands should work cross-platform.
+* Windows requires `cmd /c echo hello` or equivalent handling.
+
+---
 
 ## 3) Decisions and direction
 
-### Immediate priority (next session)
+### Priority shift (important)
 
-Make GISMO self-diagnosing from the CLI so debugging does not require SQLite one-liners or scratch scripts.
+The original goal of *adding queue inspection commands* is **complete**.
 
-This means implementing:
-1. `queue stats`
-2. `queue list`
-3. `queue show <id>`
+The new immediate priority is:
 
-And improving failure messaging so it is obvious when a policy or operator capability blocks a command.
+> **Make the existing implementation pass the full test suite on Windows.**
 
-## 4) Next steps (do these in order)
+This is now a **stability and correctness phase**, not a feature phase.
 
-### Step 1 — Add CLI queue introspection commands
+---
 
-Implement a `queue` command group under `gismo.cli`:
+## 4) Immediate next steps (do these in order)
 
-- `python -m gismo.cli.main queue stats [--db PATH]`
-  - Output: counts grouped by status.
+### Step 1 — Fix CLI `--db` argument plumbing
 
-- `python -m gismo.cli.main queue list [--db PATH] [--limit N]`
-  - Output columns: created_at, id (short), status, command_text (trimmed).
+Requirements:
 
-- `python -m gismo.cli.main queue show <id> [--db PATH]`
-  - Output: full row, including `last_error`, attempt_count/max_attempts, timestamps.
+* `--db` (or `--db-path`) must be accepted by:
+
+  * `queue stats`
+  * `queue list`
+  * `queue show`
+* Tests explicitly place `--db` **after** the subcommand.
+* Argparse structure must support this without breaking existing commands.
 
 Acceptance criteria:
-- Works in PowerShell on Windows.
-- Defaults to `.gismo\state.db` if `--db` not provided.
-- Human-readable output (no giant dumps unless explicitly requested).
 
-### Step 2 — Improve operator error messaging
+* All queue CLI tests pass argument parsing.
+* No regression to other commands.
 
-When an unsupported command is encountered:
-- Include the rejected command prefix.
-- Include supported prefixes.
-- If policy is relevant, state which policy gate blocked it.
-- Make the message actionable (what to do next).
+---
 
-### Step 3 — Add a “dev-safe shell” option (optional, explicitly gated)
+### Step 2 — Fix SQLite connection lifecycle (Windows-safe)
 
-If desired, add a policy-gated `shell:` operator for local-only usage:
-- Disabled by default.
-- Explicit allow-list (commands or executables).
-- No network by default.
-- Clear warnings in docs and CLI help.
+Requirements:
 
-## 5) Notes / gotchas to remember
+* Every SQLite connection must be explicitly closed.
+* No connection may survive beyond command execution.
+* All early-return and exception paths must close connections.
+* Temp DBs must be deletable immediately after CLI exits.
 
-- PowerShell is not bash: heredocs like `python - << 'PY'` will fail in PowerShell.
-- Don’t paste prompt prefixes (e.g., `(.venv) PS D:\...>`) back into the terminal.
-- If you don’t pass `--db`, GISMO will use its default state DB (currently `.gismo\state.db`).
-- When debugging, prefer `queue show` once implemented instead of direct SQLite.
+Targets to audit:
+
+* StateStore initialization
+* Queue claim logic
+* Daemon execution loop
+* Export paths
+* Any cached or global connection usage
+
+Acceptance criteria:
+
+* Temporary directories clean up without error.
+* No `WinError 32` anywhere in test suite.
+* `pytest -q` passes SQLite-heavy tests on Windows.
+
+---
+
+### Step 3 — Fix ShellTool Windows compatibility
+
+Requirements:
+
+* Allowlisted commands like `["echo", "hello"]` must work on Windows.
+* Security model (allowlist) must remain intact.
+* Behavior must still work on POSIX systems.
+
+Acceptable approaches:
+
+* Detect Windows + `echo` and route through `cmd.exe /c`.
+* Or enable `shell=True` *only* for allowlisted commands, with careful quoting.
+
+Acceptance criteria:
+
+* `ShellToolTest` passes.
+* No broad shell enablement.
+* No policy regression.
+
+---
+
+## 5) Explicit non-goals (for now)
+
+* No new operators.
+* No networking features.
+* No policy expansion beyond what tests require.
+* No refactors unless required to fix correctness issues.
+
+---
+
+## 6) Notes / gotchas
+
+* PowerShell is not bash.
+* Do not paste prompt prefixes into commands.
+* SQLite behaves differently on Windows — treat file locks as fatal.
+* Tests are the source of truth right now.
+* Do not weaken or skip tests.
+
+---
+
+## 7) Definition of done
+
+This phase is complete when:
+
+* `pytest -q` passes on Windows.
+* Queue CLI works with `--db` everywhere.
+* SQLite temp DBs clean up reliably.
+* ShellTool works cross-platform.
+* Repo is stable enough to resume feature work.

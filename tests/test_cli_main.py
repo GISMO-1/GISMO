@@ -48,6 +48,34 @@ class CliMainParserTest(unittest.TestCase):
         self.assertIs(args.handler, cli_main._handle_daemon)
         self.assertTrue(args.once)
 
+    def test_ipc_db_path_before_command(self) -> None:
+        parser = cli_main.build_parser()
+        db_path = "custom.db"
+
+        args = parser.parse_args(["--db", db_path, "ipc", "queue-stats"])
+
+        self.assertEqual(args.command, "ipc")
+        self.assertEqual(args.ipc_command, "queue-stats")
+        self.assertEqual(args.db_path, db_path)
+
+    def test_ipc_db_path_after_subcommand(self) -> None:
+        parser = cli_main.build_parser()
+        db_path = "custom.db"
+
+        enqueue_args = parser.parse_args(
+            ["ipc", "enqueue", "--db", db_path, "echo:", "hello"]
+        )
+        self.assertEqual(enqueue_args.db_path, db_path)
+
+        queue_stats_args = parser.parse_args(["ipc", "queue-stats", "--db", db_path])
+        self.assertEqual(queue_stats_args.db_path, db_path)
+
+        run_show_args = parser.parse_args(["ipc", "run-show", "--db", db_path, "run-1"])
+        self.assertEqual(run_show_args.db_path, db_path)
+
+        serve_args = parser.parse_args(["ipc", "serve", "--db", db_path])
+        self.assertEqual(serve_args.db_path, db_path)
+
     def test_enqueue_and_daemon_share_db_path(self) -> None:
         repo_root = Path(__file__).resolve().parents[1]
         policy_path = str(repo_root / "policy" / "readonly.json")

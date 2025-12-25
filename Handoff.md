@@ -29,6 +29,7 @@
 - Added tests covering run show output and purge-failed safety behavior.
 - Added daemon shutdown signal handling and Windows Task Scheduler install/uninstall CLI helpers.
 - Added optional Windows Task Scheduler startup trigger and improved install error reporting for non-admin defaults.
+- Added Windows Startup folder launcher install/uninstall commands with tests and Task Scheduler access-denied guidance.
 
 ## Next Steps
 - Expand tool catalog and add richer permission policies.
@@ -39,6 +40,7 @@
 - Extend daemon workflows with observability metrics and backoff tuning.
 - Consider additional CLI filters for run/task search and failure triage.
 - Add Windows-specific operational playbooks for Task Scheduler maintenance.
+- Document Windows Startup launcher maintenance steps.
 
 ## Tests
 - `python scripts/verify.py`
@@ -48,3 +50,5 @@
 - Windows daemon task install: `python -m gismo.cli.main daemon install-windows-task --db .gismo/state.db`
 - Optional startup trigger (may require admin): `python -m gismo.cli.main daemon install-windows-task --db .gismo/state.db --on-startup`
 - Windows daemon task uninstall: `python -m gismo.cli.main daemon uninstall-windows-task --name "GISMO Daemon" --yes`
+- Windows startup launcher install: `python -m gismo.cli.main daemon install-windows-startup --db .gismo/state.db`
+- Windows startup launcher uninstall: `python -m gismo.cli.main daemon uninstall-windows-startup --name "GISMO Daemon" --yes`

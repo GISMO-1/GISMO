@@ -188,10 +188,23 @@ python -m gismo.cli.main daemon install-windows-task --db .gismo/state.db --on-s
 
 Note: `--on-startup` may require running PowerShell as Administrator.
 
+If Task Scheduler is blocked by policy, install a per-user Startup launcher instead:
+
+```bash
+python -m gismo.cli.main daemon install-windows-startup --db .gismo/state.db
+python -m gismo.cli.main daemon install-windows-startup --db .gismo/state.db --name "GISMO Daemon" --force
+```
+
 Remove the Windows Task Scheduler entry:
 
 ```bash
 python -m gismo.cli.main daemon uninstall-windows-task --name "GISMO Daemon" --yes
+```
+
+Remove the Windows Startup launcher:
+
+```bash
+python -m gismo.cli.main daemon uninstall-windows-startup --name "GISMO Daemon" --yes
 ```
 
 Inspect queue items (DB flag can be supplied before or after the queue subcommand):

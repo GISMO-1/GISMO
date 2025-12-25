@@ -7,6 +7,7 @@ import getpass
 import os
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 from typing import Iterable
 from xml.sax.saxutils import escape
@@ -19,6 +20,7 @@ class WindowsTaskConfig:
     python_exe: str
     user: str | None = None
     force: bool = False
+    on_startup: bool = False
 
 
 def build_daemon_command(python_exe: str, db_path: str) -> list[str]:
@@ -40,7 +42,7 @@ def install_windows_task(config: WindowsTaskConfig) -> None:
     _ensure_windows()
     command = build_daemon_command(config.python_exe, config.db_path)
     task_user = _resolve_task_user(config.user)
-    task_xml = build_task_xml(command, task_user)
+    task_xml = build_task_xml(command, task_user, on_startup=config.on_startup)
     removal = build_schtasks_delete_args(config.name)
     print(f"Task command: {_format_command(command)}")
     print(f"Remove with: {_format_command(removal)}")
@@ -53,9 +55,15 @@ def uninstall_windows_task(task_name: str) -> None:
     subprocess.run(args, check=True)
 
 
-def build_task_xml(command: list[str], user: str) -> str:
+def build_task_xml(command: list[str], user: str, *, on_startup: bool) -> str:
     command_path, arguments = _split_exec_command(command)
     now = datetime.now(timezone.utc).isoformat()
+    boot_trigger = ""
+    if on_startup:
+        boot_trigger = """
+    <BootTrigger>
+      <Enabled>true</Enabled>
+    </BootTrigger>"""
     return f"""<?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
   <RegistrationInfo>
@@ -63,9 +71,7 @@ def build_task_xml(command: list[str], user: str) -> str:
     <Author>GISMO</Author>
   </RegistrationInfo>
   <Triggers>
-    <BootTrigger>
-      <Enabled>true</Enabled>
-    </BootTrigger>
+{boot_trigger}
     <LogonTrigger>
       <Enabled>true</Enabled>
     </LogonTrigger>
@@ -129,7 +135,21 @@ def _run_schtasks_create(config: WindowsTaskConfig, task_xml: str) -> None:
     xml_path = _write_task_xml(task_xml, Path(config.db_path))
     try:
         args = build_schtasks_create_args(config.name, str(xml_path), config.force)
-        subprocess.run(args, check=True)
+        subprocess.run(args, check=True, capture_output=True, text=True)
+    except subprocess.CalledProcessError as exc:
+        stderr = exc.stderr.strip() if exc.stderr else ""
+        stdout = exc.stdout.strip() if exc.stdout else ""
+        if stderr:
+            print(f"schtasks.exe stderr:\n{stderr}", file=sys.stderr)
+        if stdout:
+            print(f"schtasks.exe stdout:\n{stdout}", file=sys.stderr)
+        hint = (
+            "Try running PowerShell as Administrator."
+            if not config.on_startup
+            else "Re-run without --on-startup."
+        )
+        print(f"Hint: {hint}", file=sys.stderr)
+        raise
     finally:
         xml_path.unlink(missing_ok=True)
 

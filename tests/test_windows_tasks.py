@@ -32,14 +32,20 @@ class WindowsTasksCommandTest(unittest.TestCase):
             ["schtasks.exe", "/Delete", "/TN", "GISMO Daemon", "/F"],
         )
 
-    def test_build_task_xml_includes_triggers_and_restart(self) -> None:
+    def test_build_task_xml_includes_logon_trigger_by_default(self) -> None:
         command = windows_tasks.build_daemon_command("C:\\Python\\python.exe", "state.db")
-        xml = windows_tasks.build_task_xml(command, "ACME\\operator")
-        self.assertIn("<BootTrigger>", xml)
+        xml = windows_tasks.build_task_xml(command, "ACME\\operator", on_startup=False)
+        self.assertNotIn("<BootTrigger>", xml)
         self.assertIn("<LogonTrigger>", xml)
         self.assertIn("<RestartOnFailure>", xml)
         self.assertIn("C:\\Python\\python.exe", xml)
         self.assertIn("-m gismo.cli.main daemon --db state.db", xml)
+
+    def test_build_task_xml_includes_boot_trigger_with_startup_flag(self) -> None:
+        command = windows_tasks.build_daemon_command("C:\\Python\\python.exe", "state.db")
+        xml = windows_tasks.build_task_xml(command, "ACME\\operator", on_startup=True)
+        self.assertIn("<BootTrigger>", xml)
+        self.assertIn("<LogonTrigger>", xml)
 
 
 if __name__ == "__main__":

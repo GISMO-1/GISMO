@@ -2,78 +2,63 @@
 
 **General Intelligent System for Multi-flow Operations**
 
-## What GISMO Is
+---
 
-GISMO is a **persistent AI orchestration core** designed to observe systems, maintain state, delegate tasks, and execute actions across **digital and physical domains** through connected tools and actuators.
+## Overview
+
+GISMO is a **persistent orchestration runtime** designed to **execute, coordinate, and supervise work** across tools, agents, and processes.
 
 GISMO is not a chatbot.
 GISMO is not a personality.
-GISMO is an **operator**.
+GISMO is not a UI product.
 
-Think of GISMO as the **brain and nervous system** of a larger system—capable of coordinating agents, invoking tools, tracking outcomes, and enforcing authority boundaries.
+GISMO is an **operator-grade system core**.
+
+It maintains durable state, enforces authority, executes actions, and exposes a deterministic control plane for managing work.
+
+---
+
+## What GISMO Is
+
+GISMO provides:
+
+* **Persistent state** for tasks, runs, tools, and outcomes
+* **Deterministic execution** via a queue + daemon model
+* **Local IPC control plane** for same-machine control
+* **Supervisor orchestration** for managing IPC + daemon lifecycles
+* **Strict policy-gated tool execution**
+* **Full auditability** of every action taken
+
+GISMO is designed to be embedded inside larger systems as the **execution and coordination layer**.
 
 ---
 
 ## What GISMO Is Not
 
-To avoid ambiguity, GISMO explicitly does **not** aim to be:
+GISMO explicitly does **not** attempt to be:
 
 * A conversational assistant
-* An AGI research project
-* A robotics-first platform
-* A UI-heavy product demo
-* A speculative or philosophical framework
+* A general AI or AGI system
+* A UI-first application
+* A robotics framework
+* A speculative research project
 
-Any functionality that does not serve **orchestration, state, delegation, or execution** is out of scope.
-
----
-
-## Core Capabilities (Target State)
-
-GISMO is designed around the following non-negotiable capabilities:
-
-1. **Persistent State**
-
-   * Long-lived memory of system configuration, tasks, outcomes, and preferences
-   * Explicit tracking of what exists, what is running, and what has failed
-
-2. **Task Orchestration**
-
-   * Break high-level objectives into actionable tasks
-   * Route tasks to appropriate agents or tools
-   * Monitor execution and recover from failure
-
-3. **Delegation via Agents**
-
-   * Spawn specialized agents for bounded tasks
-   * Enforce scopes, permissions, and lifetimes
-   * Reassign or terminate agents as needed
-
-4. **Tool & Actuator Interfaces**
-
-   * Execute real actions via APIs, scripts, services, or physical devices
-   * Treat mobility and robotics as **pluggable actuators**, not core logic
-
-5. **Authority & Safety**
-
-   * All actions are permission-gated
-   * All executions are logged and auditable
-   * No implicit or silent side effects
+Anything that does not serve **orchestration, execution, delegation, or state** is out of scope.
 
 ---
 
 ## Mental Model
 
 ```
-Inputs / Sensors
-       ↓
- ┌─────────────────┐
- │      GISMO      │
- │ Orchestration   │
- │ + State + Rules │
- └─────────────────┘
-    ↓      ↓      ↓
- Agents  Tools  Actuators
+Inputs / Triggers
+        ↓
+ ┌───────────────────┐
+ │       GISMO       │
+ │  State + Rules    │
+ │  Orchestration    │
+ └───────────────────┘
+     ↓        ↓
+   Agents    Tools
 ```
 
 GISMO **does not act directly**.
@@ -81,42 +66,227 @@ It **coordinates systems that act**.
 
 ---
 
-## Design Principles
+## Core Capabilities
 
-* Orchestration before intelligence
-* State before behavior
-* Execution before conversation
-* Simple primitives over complex frameworks
-* Explicit boundaries over implicit magic
+### 1. Persistent State
 
----
+* SQLite-backed state for runs, tasks, queue items, and tool calls
+* Explicit tracking of lifecycle: queued → running → succeeded / failed
+* Idempotent execution with retry semantics
 
-## Initial Scope (MVP)
+### 2. Task Orchestration
 
-The first milestone focuses on **digital-only orchestration**, including:
+* Deterministic task scheduling
+* Dependency-aware execution graphs
+* Failure classification and recovery
 
-* Core state model
-* Task routing and execution pipeline
-* Minimal agent abstraction
-* Tool interface with logging and permissions
+### 3. Headless Execution (Daemon)
 
-No robotics, voice interfaces, or mobility components are included in the initial MVP.
+* Background daemon processes queued work
+* Always policy-enforced
+* Safe to run unattended
 
----
+### 4. Local IPC Control Plane
 
-## Roadmap (High-Level)
+* Same-machine IPC using:
 
-* v0: Core orchestration engine with persistent state
-* v1: Multi-agent delegation and tool execution
-* v2: External system integrations (APIs, services)
-* v3: Optional physical actuators (mobility as plugin)
+  * Unix sockets (POSIX)
+  * Named pipes (Windows)
+* Token-based authentication
+* Full control over:
+
+  * Queue inspection
+  * Daemon pause/resume
+  * Maintenance actions
+
+### 5. Supervisor
+
+* Single command to start IPC + daemon together
+* PID tracking (best-effort metadata)
+* Windows-safe lifecycle handling
+* Designed for long-running environments
+
+### 6. Authority & Safety
+
+* All tool execution is policy-gated
+* Deny-by-default toolpack
+* All actions logged and auditable
+* No silent side effects
 
 ---
 
 ## Status
 
-🚧 Early architecture phase.
-Expect breaking changes until core abstractions stabilize.
+🟢 **Core runtime stabilized**
+
+The following components are complete and working on Windows:
+
+* CLI
+* Queue + daemon
+* IPC control plane
+* Supervisor
+* Windows-safe process, pipe, and shutdown handling
+
+Breaking changes going forward are limited to **higher-level orchestration features**, not the runtime core.
+
+---
+
+## Quickstart
+
+### Requirements
+
+* Python **3.11+**
+* No external dependencies
+
+Activate your virtual environment and verify:
+
+```bash
+python scripts/verify.py
+```
+
+---
+
+## Basic Operator Commands
+
+```bash
+python -m gismo.cli.main run "echo: hello"
+python -m gismo.cli.main run "note: remember this"
+python -m gismo.cli.main run "graph: echo A -> note B -> echo C"
+```
+
+Show a run summary:
+
+```bash
+python -m gismo.cli.main run show <RUN_ID>
+```
+
+---
+
+## Queue & Daemon
+
+Enqueue work:
+
+```bash
+python -m gismo.cli.main enqueue "echo: daemon hello" --db .gismo/state.db
+```
+
+Run the daemon once:
+
+```bash
+python -m gismo.cli.main daemon --once --db .gismo/state.db
+```
+
+Inspect the queue:
+
+```bash
+python -m gismo.cli.main queue stats --db .gismo/state.db
+python -m gismo.cli.main queue list --db .gismo/state.db
+python -m gismo.cli.main queue show <QUEUE_ITEM_ID> --db .gismo/state.db
+```
+
+---
+
+## IPC Control Plane (Local Only)
+
+Set a token (required):
+
+```bash
+export GISMO_IPC_TOKEN="your-token"
+```
+
+Start the IPC server:
+
+```bash
+python -m gismo.cli.main ipc serve --db .gismo/state.db
+```
+
+Control the system:
+
+```bash
+python -m gismo.cli.main ipc ping --db .gismo/state.db
+python -m gismo.cli.main ipc daemon-status --db .gismo/state.db
+python -m gismo.cli.main ipc daemon-pause --db .gismo/state.db
+python -m gismo.cli.main ipc daemon-resume --db .gismo/state.db
+python -m gismo.cli.main ipc enqueue "echo: hello" --db .gismo/state.db
+```
+
+### Windows Note
+
+On Windows, the IPC named pipe is **derived from the database path**.
+You **must** use the same `--db` value for:
+
+* `ipc serve`
+* All IPC client commands
+* `supervise`
+
+---
+
+## Supervisor (Recommended)
+
+Run IPC + daemon together:
+
+```bash
+export GISMO_IPC_TOKEN="your-token"
+python -m gismo.cli.main supervise up --db .gismo/state.db
+```
+
+Check status:
+
+```bash
+python -m gismo.cli.main supervise status --db .gismo/state.db
+```
+
+Stop everything:
+
+```bash
+python -m gismo.cli.main supervise down --db .gismo/state.db
+```
+
+The supervisor reconciles:
+
+* IPC reachability
+* Daemon state
+* PID metadata (best-effort)
+
+---
+
+## Policies
+
+GISMO uses JSON policies to explicitly allow tools.
+
+* `policy/readonly.json` — default if no policy is provided
+* `policy/dev-safe.json` — development allowlist
+
+Example:
+
+```json
+{
+  "allowed_tools": ["echo", "write_note", "run_shell"],
+  "fs": { "base_dir": "." },
+  "shell": {
+    "base_dir": ".",
+    "allowlist": [["git", "status"], ["python", "-m", "unittest", "-v"]]
+  }
+}
+```
+
+---
+
+## Toolpack Safety
+
+* Filesystem access is scoped
+* Shell commands are exact-match allowlisted
+* No implicit networking
+* All executions are logged
+
+---
+
+## Roadmap
+
+* **v0** — Core orchestration runtime ✅
+* **v1** — Multi-agent delegation & advanced workflows (in progress)
+* **v2** — External system integrations
+* **v3** — Optional physical actuators (plugin-based)
 
 ---
 
@@ -125,237 +295,4 @@ Expect breaking changes until core abstractions stabilize.
 Most AI systems **talk**.
 GISMO is built to **operate**.
 
----
-
-## Quickstart
-
-**Python:** 3.11+
-
-Run the demo workflow:
-
-```bash
-python -m gismo.cli.main demo
-```
-
-If `policy/readonly.json` exists and `--policy` is not provided, the CLI defaults to that readonly policy.
-
-Run the demo workflow with a policy:
-
-```bash
-python -m gismo.cli.main demo --policy policy/dev.json
-```
-
-Run the dependency graph demo:
-
-```bash
-python -m gismo.cli.main demo-graph
-```
-
-Run operator commands:
-
-```bash
-python -m gismo.cli.main run "echo: hello"
-python -m gismo.cli.main run "note: remember this"
-python -m gismo.cli.main run "graph: echo A -> note B -> echo C"
-```
-
-Show a detailed run summary:
-
-```bash
-python -m gismo.cli.main run show <RUN_ID>
-```
-
-Run operator commands with a policy:
-
-```bash
-python -m gismo.cli.main run --policy policy/dev.json "echo: hello"
-```
-
-Daemon mode (queue + headless execution):
-
-```bash
-python -m gismo.cli.main enqueue "echo: daemon hello" --db .gismo/state.db
-python -m gismo.cli.main daemon --once --policy policy/readonly.json --db .gismo/state.db
-```
-
-Local IPC control plane (same-machine only, token required):
-
-```bash
-export GISMO_IPC_TOKEN="your-token"
-python -m gismo.cli.main --db .gismo/state.db ipc queue-stats
-python -m gismo.cli.main ipc serve --db .gismo/state.db
-python -m gismo.cli.main ipc enqueue "echo: hello"
-python -m gismo.cli.main ipc ping
-python -m gismo.cli.main ipc queue-stats
-python -m gismo.cli.main ipc daemon-status
-python -m gismo.cli.main ipc daemon-pause
-python -m gismo.cli.main ipc daemon-resume
-python -m gismo.cli.main ipc purge-failed
-python -m gismo.cli.main ipc requeue-stale --older-than-minutes 10 --limit 25
-python -m gismo.cli.main ipc run-show <RUN_ID>
-```
-
-Note: On Windows, the IPC named pipe is derived from the database path. Ensure the
-same `--db` value is used for `ipc serve`, `ipc ...` clients, and `supervise`.
-
-Local supervisor (IPC + daemon in one terminal):
-
-```bash
-export GISMO_IPC_TOKEN="your-token"
-python -m gismo.cli.main supervise up --db .gismo/state.db
-python -m gismo.cli.main supervise status --db .gismo/state.db
-python -m gismo.cli.main supervise down --db .gismo/state.db
-```
-
-Note: `supervise status` reconciles IPC reachability and daemon status with the PID file; the PID file is best-effort metadata only.
-
-Install the Windows Task Scheduler entry for an always-on daemon:
-
-```bash
-python -m gismo.cli.main daemon install-windows-task --db .gismo/state.db
-python -m gismo.cli.main daemon install-windows-task --db .gismo/state.db --name "GISMO Daemon" --force
-python -m gismo.cli.main daemon install-windows-task --db .gismo/state.db --on-startup
-```
-
-Note: `--on-startup` may require running PowerShell as Administrator.
-
-If Task Scheduler is blocked by policy, install a per-user Startup launcher instead:
-
-```bash
-python -m gismo.cli.main daemon install-windows-startup --db .gismo/state.db
-python -m gismo.cli.main daemon install-windows-startup --db .gismo/state.db --name "GISMO Daemon" --force
-```
-
-Remove the Windows Task Scheduler entry:
-
-```bash
-python -m gismo.cli.main daemon uninstall-windows-task --name "GISMO Daemon" --yes
-```
-
-Remove the Windows Startup launcher:
-
-```bash
-python -m gismo.cli.main daemon uninstall-windows-startup --name "GISMO Daemon" --yes
-```
-
-Inspect queue items (DB flag can be supplied before or after the queue subcommand):
-
-```bash
-python -m gismo.cli.main queue stats --db .gismo/state.db
-python -m gismo.cli.main queue list --db .gismo/state.db --limit 10 --json
-python -m gismo.cli.main queue show --db .gismo/state.db <QUEUE_ITEM_ID>
-python -m gismo.cli.main queue purge-failed --db .gismo/state.db
-python -m gismo.cli.main queue purge-failed --db .gismo/state.db --yes
-```
-
-Export a run audit trail as JSONL:
-
-```bash
-python -m gismo.cli.main export --run <RUN_ID> --format jsonl --out exports/<RUN_ID>.jsonl
-python -m gismo.cli.main export --latest --format jsonl
-```
-
-Expected behavior:
-* Creates a run and two tasks (echo, write_note)
-* Echo succeeds immediately
-* write_note fails on first attempt due to permissions, then succeeds after being allowed
-* Outputs a summary of tasks and tool calls
-* Tool execution records retry attempts and idempotency skips in state
-
-## Developer Commands
-
-GISMO is a **Python-only** project. Use the Makefile helpers:
-
-```bash
-make demo
-make demo-graph
-make test
-```
-
-## Validation
-
-Required verification:
-
-```bash
-python scripts/verify.py
-```
-
-Optional checks:
-
-```bash
-make test
-make demo
-make demo-graph
-```
-
-## Policies
-
-* `policy/readonly.json`: default readonly policy if no `--policy` is provided.
-* `policy/dev-safe.json`: dev-safe policy allowing `run_shell` with a minimal allowlist.
-
-## Operator Commands
-
-GISMO supports deterministic operator-like commands that map to tasks and tools. The CLI only allows the tools needed for each command.
-
-* Echo (routes to `echo` tool)
-
-  ```bash
-  python -m gismo.cli.main run "echo: status check"
-  ```
-
-* Note (routes to `write_note` tool)
-
-  ```bash
-  python -m gismo.cli.main run "note: rotating credentials on Friday"
-  ```
-
-* Graph (one-line chain with dependencies)
-
-  ```bash
-  python -m gismo.cli.main run "graph: echo A -> note B -> echo C"
-  ```
-
-## Daemon Mode
-
-Queue commands for headless execution and run the daemon to process them:
-
-```bash
-python -m gismo.cli.main enqueue "echo: daemon hello" --db /var/lib/gismo/gismo.db
-python -m gismo.cli.main daemon --once --policy policy/readonly.json --db /var/lib/gismo/gismo.db
-```
-
-Daemon runs always enforce policies; keep policies least-privilege and explicitly allow only the tools you need.
-
-## Run as a service (systemd)
-
-See [deploy/systemd/README.md](deploy/systemd/README.md) for production-safe systemd units, hardening defaults, and steps to install a dedicated service user with a stable database path.
-
-## Toolpack Policy & Safety
-
-GISMO ships with a minimal local toolpack (filesystem + restricted shell) that is deny-by-default and policy-gated. Policies are JSON files that explicitly allow tools and define safety boundaries.
-If `policy/readonly.json` exists, the CLI will auto-load it unless you pass `--policy` explicitly. Use `--policy policy/dev.json` to opt into the development policy.
-
-Example policy (`policy/dev.json`):
-
-```json
-{
-  "allowed_tools": ["echo", "write_note", "read_file", "write_file", "list_dir", "run_shell"],
-  "fs": { "base_dir": "." },
-  "shell": {
-    "base_dir": ".",
-    "allowlist": [["git", "status"], ["python", "-m", "unittest", "-v"], ["make", "test"]]
-  }
-}
-```
-
-Safety notes:
-* Filesystem tools are restricted to the configured base directory (default is the repo root).
-* Shell commands must be exact allowlist matches and are executed without a shell, with a default timeout.
-* No network calls are added by the built-in toolpack.
-
-## Decisions (v0 scope)
-
-* Core state, task lifecycle, agent execution, and permission gating are implemented with standard library tools.
-* Persistence uses SQLite via the `sqlite3` module for auditability and portability.
-* Tool calls are idempotent by key + normalized input hash, with retry semantics and a failure taxonomy stored in state.
-* Task dependency graphs are persisted on tasks and executed via a scheduler that respects dependency ordering.
+Deterministic. Auditable. Controlled.

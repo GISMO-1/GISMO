@@ -24,6 +24,9 @@
 - Added systemd service templates plus documentation and CLI support for consistent DB paths via --db.
 - Closed SQLite connections deterministically and fixed queue CLI db flag parsing for Windows.
 - Adjusted shell tool execution to support Windows built-in commands via cmd.exe.
+- Added CLI run show summaries with task/tool call output details for operator introspection.
+- Added queue purge-failed CLI command with dry-run confirmation and enriched queue list columns.
+- Added tests covering run show output and purge-failed safety behavior.
 
 ## Next Steps
 - Expand tool catalog and add richer permission policies.
@@ -32,6 +35,7 @@
 - Consider richer operator command validation and error messaging.
 - Add policy-driven examples for operator tasks using the new toolpack.
 - Extend daemon workflows with observability metrics and backoff tuning.
+- Consider additional CLI filters for run/task search and failure triage.
 
 ## Tests
 - `python scripts/verify.py`

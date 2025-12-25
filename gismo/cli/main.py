@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from datetime import datetime
 from pathlib import Path
 
 from gismo.cli.operator import (
@@ -15,7 +16,7 @@ from gismo.cli.operator import (
 from gismo.core.agent import SimpleAgent
 from gismo.core.daemon import run_daemon_loop
 from gismo.core.export import export_latest_run_jsonl, export_run_jsonl
-from gismo.core.models import QueueStatus
+from gismo.core.models import QueueStatus, TaskStatus
 from gismo.core.orchestrator import Orchestrator
 from gismo.core.permissions import PermissionPolicy, load_policy
 from gismo.core.state import StateStore
@@ -32,6 +33,43 @@ def _truncate(text: str, max_len: int) -> str:
     if len(text) <= max_len:
         return text
     return text[: max(0, max_len - 1)] + "…"
+
+def _summarize_value(value: object, max_len: int) -> str:
+    if value is None:
+        return "-"
+    if isinstance(value, str):
+        text = value
+    else:
+        text = json.dumps(value, ensure_ascii=False, sort_keys=True)
+    return _truncate(text, max_len)
+
+
+def _run_status(tasks: list) -> str:
+    if not tasks:
+        return "pending"
+    statuses = {task.status for task in tasks}
+    if TaskStatus.FAILED in statuses:
+        return "failed"
+    if TaskStatus.RUNNING in statuses:
+        return "running"
+    if statuses.issubset({TaskStatus.SUCCEEDED}):
+        return "succeeded"
+    return "pending"
+
+
+def _run_time_bounds(
+    run,
+    tasks,
+    tool_calls,
+) -> tuple[datetime | None, datetime | None]:
+    start_candidates = [run.created_at]
+    start_candidates.extend(task.created_at for task in tasks)
+    start_candidates.extend(call.started_at for call in tool_calls)
+    start_time = min(start_candidates) if start_candidates else None
+    end_candidates = [task.updated_at for task in tasks if task.updated_at]
+    end_candidates.extend(call.finished_at for call in tool_calls if call.finished_at)
+    end_time = max(end_candidates) if end_candidates else None
+    return start_time, end_time
 
 
 def run_demo(db_path: str, policy_path: str | None) -> None:
@@ -204,6 +242,50 @@ def run_operator(db_path: str, command_parts: list[str], policy_path: str | None
     _print_operator_summary(state_store, run.id)
 
 
+def run_show(db_path: str, run_id: str) -> None:
+    state_store = StateStore(db_path)
+    run = state_store.get_run(run_id)
+    if run is None:
+        print(f"Run not found: {run_id}")
+        raise SystemExit(2)
+
+    tasks = list(state_store.list_tasks(run.id))
+    tool_calls = list(state_store.list_tool_calls(run.id))
+    status = _run_status(tasks)
+    start_time, end_time = _run_time_bounds(run, tasks, tool_calls)
+
+    print("=== GISMO Run Summary ===")
+    print(f"Run ID:     {run.id}")
+    print(f"Status:     {status}")
+    print(f"Started:    {_fmt_dt(start_time)}")
+    print(f"Finished:   {_fmt_dt(end_time)}")
+    print("Tasks:")
+    if not tasks:
+        print("  (no tasks)")
+        return
+
+    for task in tasks:
+        print(f"- {task.id} {task.title} [{task.status.value}]")
+        if task.error:
+            print(f"  error: {_summarize_value(task.error, 200)}")
+        if task.output_json:
+            print(f"  output: {_summarize_value(task.output_json, 200)}")
+        task_calls = list(state_store.list_tool_calls_for_task(task.id))
+        if not task_calls:
+            print("  Tool Calls: none")
+            continue
+        print("  Tool Calls:")
+        for call in task_calls:
+            print(
+                f"    - {call.id} tool={call.tool_name} status={call.status.value} "
+                f"started={_fmt_dt(call.started_at)} finished={_fmt_dt(call.finished_at)}"
+            )
+            if call.output_json:
+                print(f"      output: {_summarize_value(call.output_json, 200)}")
+            if call.error:
+                print(f"      error: {_summarize_value(call.error, 200)}")
+
+
 def run_export(
     db_path: str,
     *,
@@ -320,6 +402,11 @@ def _handle_demo_graph(args: argparse.Namespace) -> None:
 
 
 def _handle_run(args: argparse.Namespace) -> None:
+    if args.operator_command and args.operator_command[0] == "show":
+        if len(args.operator_command) != 2:
+            raise ValueError("run show requires a run id")
+        run_show(args.db_path, args.operator_command[1])
+        return
     run_operator(args.db_path, args.operator_command, args.policy)
 
 
@@ -432,16 +519,22 @@ def _handle_queue_list(args: argparse.Namespace) -> None:
 
     print(f"DB: {args.db_path}")
     print(f"Items: {len(items)} (limit={args.limit})")
-    header = f"{'ID':8}  {'STATUS':12}  {'ATT':7}  {'CREATED':20}  {'UPDATED':20}  COMMAND"
+    header = (
+        f"{'ID':8}  {'STATUS':12}  {'ATT':7}  {'CREATED':20}  "
+        f"{'UPDATED':20}  {'LAST ERROR':30}  COMMAND"
+    )
     print(header)
     print("-" * len(header))
-    cmd_width = 200 if args.full else 80
+    cmd_width = 200 if args.full else 60
+    error_width = 80 if args.full else 30
     for it in items:
         att = f"{it.attempt_count}/{it.max_attempts}"
+        last_error = _summarize_value(it.last_error, error_width)
         cmd = it.command_text if args.full else _truncate(it.command_text, cmd_width)
         print(
             f"{it.id[:8]:8}  {it.status.value:12}  {att:7}  "
-            f"{_fmt_dt(it.created_at):20}  {_fmt_dt(it.updated_at):20}  {cmd}"
+            f"{_fmt_dt(it.created_at):20}  {_fmt_dt(it.updated_at):20}  "
+            f"{last_error:{error_width}}  {cmd}"
         )
 
 
@@ -500,6 +593,30 @@ def _handle_queue_show(args: argparse.Namespace) -> None:
     print("Command:")
     print(item.command_text)
 
+
+def _handle_queue_purge_failed(args: argparse.Namespace) -> None:
+    state_store = StateStore(args.db_path)
+    failed_items = state_store.list_queue_items_by_status(QueueStatus.FAILED)
+    if args.yes:
+        deleted = state_store.delete_queue_items_by_status(QueueStatus.FAILED)
+        print(f"Deleted {deleted} failed queue item(s).")
+        return
+
+    print(f"Dry run: would delete {len(failed_items)} failed queue item(s).")
+    if not failed_items:
+        return
+    header = f"{'ID':8}  {'CREATED':20}  {'ATT':7}  {'LAST ERROR':30}  COMMAND"
+    print(header)
+    print("-" * len(header))
+    cmd_width = 80
+    for item in failed_items:
+        att = f"{item.attempt_count}/{item.max_attempts}"
+        last_error = _summarize_value(item.last_error, 30)
+        cmd = _truncate(item.command_text, cmd_width)
+        print(
+            f"{item.id[:8]:8}  {_fmt_dt(item.created_at):20}  {att:7}  "
+            f"{last_error:30}  {cmd}"
+        )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -710,6 +827,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="Output JSON",
     )
     queue_show_parser.set_defaults(handler=_handle_queue_show)
+
+    queue_purge_failed_parser = queue_subparsers.add_parser(
+        "purge-failed",
+        help="Delete FAILED queue items",
+        parents=[db_parent],
+    )
+    queue_purge_failed_parser.add_argument(
+        "--yes",
+        action="store_true",
+        help="Confirm deletion (omit for dry-run)",
+    )
+    queue_purge_failed_parser.set_defaults(handler=_handle_queue_purge_failed)
 
     return parser
 

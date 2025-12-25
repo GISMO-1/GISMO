@@ -784,21 +784,30 @@ def _handle_ipc_run_show(args: argparse.Namespace) -> None:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="GISMO CLI")
+    default_db_path = str(Path(".gismo") / "state.db")
     db_parent = argparse.ArgumentParser(add_help=False)
     db_parent.add_argument(
         "--db",
         "--db-path",
         dest="db_path",
-        default=str(Path(".gismo") / "state.db"),
+        default=default_db_path,
         help="Path to SQLite state database",
     )
+    db_parent_optional = argparse.ArgumentParser(add_help=False)
+    db_parent_optional.add_argument(
+        "--db",
+        "--db-path",
+        dest="db_path",
+        default=argparse.SUPPRESS,
+        help="Path to SQLite state database",
+    )
+    parser = argparse.ArgumentParser(description="GISMO CLI", parents=[db_parent])
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     demo_parser = subparsers.add_parser(
         "demo",
         help="Run the demo workflow",
-        parents=[db_parent],
+        parents=[db_parent_optional],
     )
     demo_parser.add_argument(
         "--policy",
@@ -810,7 +819,7 @@ def build_parser() -> argparse.ArgumentParser:
     demo_graph_parser = subparsers.add_parser(
         "demo-graph",
         help="Run the task graph demo",
-        parents=[db_parent],
+        parents=[db_parent_optional],
     )
     demo_graph_parser.add_argument(
         "--policy",
@@ -822,7 +831,7 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser = subparsers.add_parser(
         "run",
         help="Run an operator command",
-        parents=[db_parent],
+        parents=[db_parent_optional],
     )
     run_parser.add_argument(
         "--policy",
@@ -839,7 +848,7 @@ def build_parser() -> argparse.ArgumentParser:
     export_parser = subparsers.add_parser(
         "export",
         help="Export run audit trail",
-        parents=[db_parent],
+        parents=[db_parent_optional],
     )
     export_parser.add_argument(
         "--policy",
@@ -877,7 +886,7 @@ def build_parser() -> argparse.ArgumentParser:
     enqueue_parser = subparsers.add_parser(
         "enqueue",
         help="Enqueue an operator command",
-        parents=[db_parent],
+        parents=[db_parent_optional],
     )
     enqueue_parser.add_argument(
         "--run",
@@ -901,7 +910,7 @@ def build_parser() -> argparse.ArgumentParser:
     daemon_parser = subparsers.add_parser(
         "daemon",
         help="Run the GISMO daemon loop",
-        parents=[db_parent],
+        parents=[db_parent_optional],
     )
     daemon_parser.add_argument(
         "--policy",
@@ -930,7 +939,7 @@ def build_parser() -> argparse.ArgumentParser:
     daemon_install_parser = daemon_subparsers.add_parser(
         "install-windows-task",
         help="Install a Windows Task Scheduler entry for the daemon",
-        parents=[db_parent],
+        parents=[db_parent_optional],
     )
     daemon_install_parser.add_argument(
         "--name",
@@ -976,7 +985,7 @@ def build_parser() -> argparse.ArgumentParser:
     daemon_install_startup_parser = daemon_subparsers.add_parser(
         "install-windows-startup",
         help="Install a Windows Startup folder entry for the daemon",
-        parents=[db_parent],
+        parents=[db_parent_optional],
     )
     daemon_install_startup_parser.add_argument(
         "--name",
@@ -1020,7 +1029,7 @@ def build_parser() -> argparse.ArgumentParser:
     queue_stats_parser = queue_subparsers.add_parser(
         "stats",
         help="Show queue summary statistics",
-        parents=[db_parent],
+        parents=[db_parent_optional],
     )
     queue_stats_parser.add_argument(
         "--json",
@@ -1032,7 +1041,7 @@ def build_parser() -> argparse.ArgumentParser:
     queue_list_parser = queue_subparsers.add_parser(
         "list",
         help="List queue items",
-        parents=[db_parent],
+        parents=[db_parent_optional],
     )
     queue_list_parser.add_argument(
         "--limit",
@@ -1065,7 +1074,7 @@ def build_parser() -> argparse.ArgumentParser:
     queue_show_parser = queue_subparsers.add_parser(
         "show",
         help="Show a single queue item by id",
-        parents=[db_parent],
+        parents=[db_parent_optional],
     )
     queue_show_parser.add_argument("id", help="Queue item id")
     queue_show_parser.add_argument(
@@ -1078,7 +1087,7 @@ def build_parser() -> argparse.ArgumentParser:
     queue_purge_failed_parser = queue_subparsers.add_parser(
         "purge-failed",
         help="Delete FAILED queue items",
-        parents=[db_parent],
+        parents=[db_parent_optional],
     )
     queue_purge_failed_parser.add_argument(
         "--yes",
@@ -1090,13 +1099,14 @@ def build_parser() -> argparse.ArgumentParser:
     ipc_parser = subparsers.add_parser(
         "ipc",
         help="Local IPC control plane",
+        parents=[db_parent_optional],
     )
     ipc_subparsers = ipc_parser.add_subparsers(dest="ipc_command", required=True)
 
     ipc_serve_parser = ipc_subparsers.add_parser(
         "serve",
         help="Start the IPC server",
-        parents=[db_parent],
+        parents=[db_parent_optional],
     )
     ipc_serve_parser.add_argument(
         "--token",
@@ -1108,6 +1118,7 @@ def build_parser() -> argparse.ArgumentParser:
     ipc_enqueue_parser = ipc_subparsers.add_parser(
         "enqueue",
         help="Enqueue an operator command via IPC",
+        parents=[db_parent_optional],
     )
     ipc_enqueue_parser.add_argument(
         "--token",
@@ -1136,6 +1147,7 @@ def build_parser() -> argparse.ArgumentParser:
     ipc_queue_stats_parser = ipc_subparsers.add_parser(
         "queue-stats",
         help="Show queue summary statistics via IPC",
+        parents=[db_parent_optional],
     )
     ipc_queue_stats_parser.add_argument(
         "--token",
@@ -1147,6 +1159,7 @@ def build_parser() -> argparse.ArgumentParser:
     ipc_run_show_parser = ipc_subparsers.add_parser(
         "run-show",
         help="Show a run summary via IPC",
+        parents=[db_parent_optional],
     )
     ipc_run_show_parser.add_argument(
         "--token",

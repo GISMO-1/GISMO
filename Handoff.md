@@ -31,8 +31,10 @@
 - Added optional Windows Task Scheduler startup trigger and improved install error reporting for non-admin defaults.
 - Added Windows Startup folder launcher install/uninstall commands with tests and Task Scheduler access-denied guidance.
 - Added local IPC control plane (named pipe/Unix socket) with token auth, CLI wiring, and handler tests.
+- Restored global CLI db flag parsing and IPC subcommand support for db path overrides.
 
 ## Next Steps
+- Validate IPC CLI db flag usage on Windows.
 - Expand tool catalog and add richer permission policies.
 - Add query/reporting helpers for audit trails.
 - Extend orchestration tests to cover recovery workflows.

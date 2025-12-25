@@ -36,6 +36,7 @@
 - Added daemon pause state persistence, IPC daemon controls, and queue maintenance IPC actions.
 - Added queue requeue-stale and purge-failed IPC behaviors with coverage tests.
 - Added supervise CLI command to run IPC server and daemon together with PID-based control.
+- Added IPC ping CLI wiring plus supervisor reuse/authorization checks and PID tracking for started children.
 
 ## Next Steps
 - Validate IPC CLI db flag usage on Windows.

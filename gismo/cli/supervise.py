@@ -20,6 +20,8 @@ from gismo.cli import ipc as ipc_cli
 class SupervisorRecord:
     ipc_pid: int
     daemon_pid: int
+    ipc_started: bool
+    daemon_started: bool
     db_path: str
     started_at: str
 
@@ -27,6 +29,8 @@ class SupervisorRecord:
         return {
             "ipc_pid": self.ipc_pid,
             "daemon_pid": self.daemon_pid,
+            "ipc_started": self.ipc_started,
+            "daemon_started": self.daemon_started,
             "db_path": self.db_path,
             "started_at": self.started_at,
         }
@@ -34,8 +38,10 @@ class SupervisorRecord:
     @classmethod
     def from_dict(cls, data: dict[str, object]) -> "SupervisorRecord":
         return cls(
-            ipc_pid=int(data["ipc_pid"]),
-            daemon_pid=int(data["daemon_pid"]),
+            ipc_pid=int(data.get("ipc_pid", 0)),
+            daemon_pid=int(data.get("daemon_pid", 0)),
+            ipc_started=bool(data.get("ipc_started", True)),
+            daemon_started=bool(data.get("daemon_started", True)),
             db_path=str(data["db_path"]),
             started_at=str(data["started_at"]),
         )
@@ -141,6 +147,11 @@ def run_supervise_up(
             return
         pid_path.unlink(missing_ok=True)
 
+    ipc_reachable, ipc_authorized = _probe_ipc_server(token)
+    if ipc_reachable and not ipc_authorized:
+        print("IPC authorization failed. Ensure the supervisor token matches the running IPC server.")
+        raise SystemExit(1)
+
     env = os.environ.copy()
     env["GISMO_IPC_TOKEN"] = token
     env["PYTHONUNBUFFERED"] = "1"
@@ -164,32 +175,47 @@ def run_supervise_up(
         db_path,
     ]
 
-    ipc_proc = process_ops.spawn(ipc_args, env=env)
+    ipc_proc = None
+    ipc_pid = 0
+    ipc_started = False
+    if ipc_reachable and ipc_authorized:
+        print("[supervise] IPC already running; reusing existing server.")
+    else:
+        ipc_proc = process_ops.spawn(ipc_args, env=env)
+        ipc_pid = ipc_proc.pid
+        ipc_started = True
+
     daemon_proc = process_ops.spawn(daemon_args, env=env)
     record = SupervisorRecord(
-        ipc_pid=ipc_proc.pid,
+        ipc_pid=ipc_pid,
         daemon_pid=daemon_proc.pid,
+        ipc_started=ipc_started,
+        daemon_started=True,
         db_path=db_path,
         started_at=datetime.now(timezone.utc).isoformat(),
     )
     save_supervisor_record(pid_path, record)
 
     stop_event = threading.Event()
-    threads = [
-        _start_output_thread(ipc_proc, "[ipc]", stop_event),
-        _start_output_thread(daemon_proc, "[daemon]", stop_event),
-    ]
+    threads = []
+    if ipc_proc is not None:
+        threads.append(_start_output_thread(ipc_proc, "[ipc]", stop_event))
+    threads.append(_start_output_thread(daemon_proc, "[daemon]", stop_event))
 
+    processes = [proc for proc in (ipc_proc, daemon_proc) if proc is not None]
     try:
         while True:
-            if ipc_proc.poll() is not None or daemon_proc.poll() is not None:
+            if not processes:
+                break
+            if any(proc.poll() is not None for proc in processes):
                 break
             time.sleep(0.2)
     except KeyboardInterrupt:
         pass
     finally:
         stop_event.set()
-        _terminate_process(ipc_proc.pid, process_ops)
+        if ipc_proc is not None:
+            _terminate_process(ipc_proc.pid, process_ops)
         _terminate_process(daemon_proc.pid, process_ops)
         pid_path.unlink(missing_ok=True)
         for thread in threads:
@@ -252,8 +278,10 @@ def run_supervise_down(
     if record is None:
         print("not running")
         return
-    _terminate_process(record.ipc_pid, process_ops)
-    _terminate_process(record.daemon_pid, process_ops)
+    if record.ipc_started:
+        _terminate_process(record.ipc_pid, process_ops)
+    if record.daemon_started:
+        _terminate_process(record.daemon_pid, process_ops)
     pid_path.unlink(missing_ok=True)
     print("stopped")
 
@@ -306,3 +334,31 @@ def _fmt_ping(ok: bool, error: str | None) -> str:
     if error:
         return f"error ({error})"
     return "error"
+
+
+def _probe_ipc_server(token: str) -> tuple[bool, bool]:
+    try:
+        response = ipc_cli.parse_ipc_response(ipc_cli.ipc_request("ping", {}, token))
+    except ipc_cli.IPCConnectionError:
+        return False, False
+    if response.ok:
+        return True, True
+    if response.error == "unauthorized":
+        return True, False
+    if response.error == "unsupported_action":
+        return _probe_ipc_fallback(token)
+    return False, False
+
+
+def _probe_ipc_fallback(token: str) -> tuple[bool, bool]:
+    try:
+        response = ipc_cli.parse_ipc_response(
+            ipc_cli.ipc_request("daemon_status", {}, token)
+        )
+    except ipc_cli.IPCConnectionError:
+        return False, False
+    if response.ok:
+        return True, True
+    if response.error == "unauthorized":
+        return True, False
+    return False, False

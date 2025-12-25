@@ -757,6 +757,26 @@ def _handle_ipc_enqueue(args: argparse.Namespace) -> None:
     print(ipc_cli.format_enqueue_output(response.data or {}))
 
 
+def _handle_ipc_ping(args: argparse.Namespace) -> None:
+    try:
+        token = ipc_cli.load_ipc_token(args.token)
+    except ValueError as exc:
+        print(str(exc))
+        raise SystemExit(2) from exc
+    try:
+        response = ipc_cli.parse_ipc_response(ipc_cli.ipc_request("ping", {}, token))
+    except ipc_cli.IPCConnectionError:
+        _print_ipc_connection_error()
+        raise SystemExit(2)
+    if not response.ok:
+        if response.error == "unauthorized":
+            print("IPC unauthorized")
+        else:
+            print(f"IPC error: {response.error or 'unknown error'}")
+        raise SystemExit(2)
+    print(ipc_cli.format_ping_output(response.data or {}))
+
+
 def _handle_ipc_queue_stats(args: argparse.Namespace) -> None:
     try:
         token = ipc_cli.load_ipc_token(args.token)
@@ -1330,6 +1350,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="Operator command string to enqueue",
     )
     ipc_enqueue_parser.set_defaults(handler=_handle_ipc_enqueue)
+
+    ipc_ping_parser = ipc_subparsers.add_parser(
+        "ping",
+        help="Ping the IPC server",
+        parents=[db_parent_optional],
+    )
+    ipc_ping_parser.add_argument(
+        "--token",
+        default=None,
+        help="IPC auth token (or set GISMO_IPC_TOKEN)",
+    )
+    ipc_ping_parser.set_defaults(handler=_handle_ipc_ping)
 
     ipc_queue_stats_parser = ipc_subparsers.add_parser(
         "queue-stats",

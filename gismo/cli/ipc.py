@@ -389,6 +389,11 @@ def format_queue_stats_output(stats: Dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def format_ping_output(data: Dict[str, Any]) -> str:
+    status = data.get("status", "unknown")
+    return f"IPC: {status}"
+
+
 def format_enqueue_output(data: Dict[str, Any]) -> str:
     return f"Enqueued {data['queue_item_id']} status={data['status']}"
 

@@ -159,6 +159,12 @@ python -m gismo.cli.main run "note: remember this"
 python -m gismo.cli.main run "graph: echo A -> note B -> echo C"
 ```
 
+Show a detailed run summary:
+
+```bash
+python -m gismo.cli.main run show <RUN_ID>
+```
+
 Run operator commands with a policy:
 
 ```bash
@@ -178,6 +184,8 @@ Inspect queue items (DB flag can be supplied before or after the queue subcomman
 python -m gismo.cli.main queue stats --db .gismo/state.db
 python -m gismo.cli.main queue list --db .gismo/state.db --limit 10 --json
 python -m gismo.cli.main queue show --db .gismo/state.db <QUEUE_ITEM_ID>
+python -m gismo.cli.main queue purge-failed --db .gismo/state.db
+python -m gismo.cli.main queue purge-failed --db .gismo/state.db --yes
 ```
 
 Export a run audit trail as JSONL:

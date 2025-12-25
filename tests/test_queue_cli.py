@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from gismo.core.state import StateStore
 
 
 def _run_cli(args: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
@@ -102,3 +103,31 @@ def test_queue_show_ambiguous_prefix(repo_root: Path, db_path: Path) -> None:
     else:
         assert "DB:" in sp.stdout
         assert "ID:" in sp.stdout
+
+
+def test_queue_purge_failed_dry_run_and_confirm(repo_root: Path, db_path: Path) -> None:
+    state_store = StateStore(str(db_path))
+    failed_item = state_store.enqueue_command("echo: fail")
+    state_store.mark_queue_item_failed(failed_item.id, "boom", retryable=False)
+    queued_item = state_store.enqueue_command("echo: queued")
+    succeeded_item = state_store.enqueue_command("echo: ok")
+    state_store.mark_queue_item_succeeded(succeeded_item.id)
+
+    dry_run = _run_cli(
+        ["queue", "purge-failed", "--db", str(db_path)],
+        cwd=repo_root,
+    )
+    assert dry_run.returncode == 0, dry_run.stderr
+    assert "Dry run" in dry_run.stdout
+    assert failed_item.id[:8] in dry_run.stdout
+    assert state_store.get_queue_item(failed_item.id) is not None
+
+    confirmed = _run_cli(
+        ["queue", "purge-failed", "--db", str(db_path), "--yes"],
+        cwd=repo_root,
+    )
+    assert confirmed.returncode == 0, confirmed.stderr
+    assert "Deleted 1 failed queue item" in confirmed.stdout
+    assert state_store.get_queue_item(failed_item.id) is None
+    assert state_store.get_queue_item(queued_item.id) is not None
+    assert state_store.get_queue_item(succeeded_item.id) is not None

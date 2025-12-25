@@ -694,6 +694,23 @@ class StateStore:
             rows = connection.execute(sql, (*params, limit)).fetchall()
         return [self._row_to_queue_item(row) for row in rows]
 
+    def list_queue_items_by_status(self, status: QueueStatus) -> list[QueueItem]:
+        with self._connection() as connection:
+            rows = connection.execute(
+                "SELECT * FROM queue_items WHERE status = ? ORDER BY created_at DESC",
+                (status.value,),
+            ).fetchall()
+        return [self._row_to_queue_item(row) for row in rows]
+
+    def delete_queue_items_by_status(self, status: QueueStatus) -> int:
+        with self._connection() as connection:
+            cursor = connection.execute(
+                "DELETE FROM queue_items WHERE status = ?",
+                (status.value,),
+            )
+            connection.commit()
+        return cursor.rowcount
+
     def get_latest_run(self) -> Optional[Run]:
         with self._connection() as connection:
             row = connection.execute(

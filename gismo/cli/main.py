@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
@@ -14,12 +15,23 @@ from gismo.cli.operator import (
 from gismo.core.agent import SimpleAgent
 from gismo.core.daemon import run_daemon_loop
 from gismo.core.export import export_latest_run_jsonl, export_run_jsonl
+from gismo.core.models import QueueStatus
 from gismo.core.orchestrator import Orchestrator
 from gismo.core.permissions import PermissionPolicy, load_policy
 from gismo.core.state import StateStore
 from gismo.core.tools import EchoTool, ToolRegistry, WriteNoteTool
 from gismo.core.toolpacks.fs_tools import FileSystemConfig, ListDirTool, ReadFileTool, WriteFileTool
 from gismo.core.toolpacks.shell_tool import ShellConfig, ShellTool
+
+
+def _fmt_dt(dt) -> str:
+    return dt.isoformat(timespec="seconds") if dt else "-"
+
+
+def _truncate(text: str, max_len: int) -> str:
+    if len(text) <= max_len:
+        return text
+    return text[: max(0, max_len - 1)] + "…"
 
 
 def run_demo(db_path: str, policy_path: str | None) -> None:
@@ -345,6 +357,151 @@ def _handle_daemon(args: argparse.Namespace) -> None:
     )
 
 
+def _handle_queue_stats(args: argparse.Namespace) -> None:
+    state_store = StateStore(args.db_path)
+    stats = state_store.queue_stats()
+
+    if args.json:
+        def _dt(v):
+            return v.isoformat() if v else None
+        out = {
+            "db_path": args.db_path,
+            "total": stats["total"],
+            "by_status": stats["by_status"],
+            "created_at": {
+                "oldest": _dt(stats["created_at"]["oldest"]),
+                "newest": _dt(stats["created_at"]["newest"]),
+            },
+            "updated_at": {
+                "oldest": _dt(stats["updated_at"]["oldest"]),
+                "newest": _dt(stats["updated_at"]["newest"]),
+            },
+            "attempts": stats["attempts"],
+        }
+        print(json.dumps(out, indent=2))
+        return
+
+    print(f"DB: {args.db_path}")
+    print(f"Total: {stats['total']}")
+    print("By status:")
+    for status in QueueStatus:
+        print(f"  {status.value:12} {stats['by_status'].get(status.value, 0)}")
+    print(
+        f"Created: oldest={_fmt_dt(stats['created_at']['oldest'])} "
+        f"newest={_fmt_dt(stats['created_at']['newest'])}"
+    )
+    print(
+        f"Updated: oldest={_fmt_dt(stats['updated_at']['oldest'])} "
+        f"newest={_fmt_dt(stats['updated_at']['newest'])}"
+    )
+    print(
+        f"Attempts: items_with_attempts={stats['attempts']['items_with_attempts']} "
+        f"max_attempt_count={stats['attempts']['max_attempt_count']}"
+    )
+
+
+def _handle_queue_list(args: argparse.Namespace) -> None:
+    state_store = StateStore(args.db_path)
+    status = QueueStatus(args.status) if args.status else None
+    items = state_store.list_queue_items(
+        status=status,
+        limit=args.limit,
+        newest_first=not args.oldest,
+    )
+
+    if args.json:
+        out = []
+        for it in items:
+            out.append(
+                {
+                    "id": it.id,
+                    "run_id": it.run_id,
+                    "status": it.status.value,
+                    "created_at": it.created_at.isoformat(),
+                    "updated_at": it.updated_at.isoformat(),
+                    "started_at": it.started_at.isoformat() if it.started_at else None,
+                    "finished_at": it.finished_at.isoformat() if it.finished_at else None,
+                    "attempt_count": it.attempt_count,
+                    "max_attempts": it.max_attempts,
+                    "last_error": it.last_error,
+                    "command_text": it.command_text,
+                }
+            )
+        print(json.dumps(out, indent=2))
+        return
+
+    print(f"DB: {args.db_path}")
+    print(f"Items: {len(items)} (limit={args.limit})")
+    header = f"{'ID':8}  {'STATUS':12}  {'ATT':7}  {'CREATED':20}  {'UPDATED':20}  COMMAND"
+    print(header)
+    print("-" * len(header))
+    cmd_width = 200 if args.full else 80
+    for it in items:
+        att = f"{it.attempt_count}/{it.max_attempts}"
+        cmd = it.command_text if args.full else _truncate(it.command_text, cmd_width)
+        print(
+            f"{it.id[:8]:8}  {it.status.value:12}  {att:7}  "
+            f"{_fmt_dt(it.created_at):20}  {_fmt_dt(it.updated_at):20}  {cmd}"
+        )
+
+
+def _handle_queue_show(args: argparse.Namespace) -> None:
+    state_store = StateStore(args.db_path)
+
+    matches = state_store.resolve_queue_item_id(args.id)
+    if not matches:
+        print(f"Queue item not found: {args.id}")
+        raise SystemExit(2)
+
+    if len(matches) > 1:
+        print(f"Ambiguous id prefix: {args.id}")
+        print("Matches:")
+        for mid in matches[:10]:
+            print(f"  {mid}")
+        if len(matches) > 10:
+            print(f"  ... ({len(matches) - 10} more)")
+        print("Provide a longer prefix.")
+        raise SystemExit(2)
+
+    item = state_store.get_queue_item(matches[0])
+    if item is None:
+        print(f"Queue item not found: {args.id}")
+        raise SystemExit(2)
+
+    if args.json:
+        out = {
+            "id": item.id,
+            "run_id": item.run_id,
+            "status": item.status.value,
+            "created_at": item.created_at.isoformat(),
+            "updated_at": item.updated_at.isoformat(),
+            "started_at": item.started_at.isoformat() if item.started_at else None,
+            "finished_at": item.finished_at.isoformat() if item.finished_at else None,
+            "attempt_count": item.attempt_count,
+            "max_attempts": item.max_attempts,
+            "last_error": item.last_error,
+            "command_text": item.command_text,
+        }
+        print(json.dumps(out, indent=2))
+        return
+
+    print(f"DB: {args.db_path}")
+    print(f"ID:         {item.id}")
+    print(f"Run ID:     {item.run_id or '-'}")
+    print(f"Status:     {item.status.value}")
+    print(f"Created:    {_fmt_dt(item.created_at)}")
+    print(f"Updated:    {_fmt_dt(item.updated_at)}")
+    print(f"Started:    {_fmt_dt(item.started_at)}")
+    print(f"Finished:   {_fmt_dt(item.finished_at)}")
+    print(f"Attempts:   {item.attempt_count}/{item.max_attempts}")
+    if item.last_error:
+        print("Last error:")
+        print(item.last_error)
+    print("Command:")
+    print(item.command_text)
+
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="GISMO CLI")
     db_parent = argparse.ArgumentParser(add_help=False)
@@ -356,6 +513,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Path to SQLite state database",
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
+
     demo_parser = subparsers.add_parser(
         "demo",
         help="Run the demo workflow",
@@ -367,6 +525,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Path to a JSON policy file",
     )
     demo_parser.set_defaults(handler=_handle_demo)
+
     demo_graph_parser = subparsers.add_parser(
         "demo-graph",
         help="Run the task graph demo",
@@ -378,6 +537,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Path to a JSON policy file",
     )
     demo_graph_parser.set_defaults(handler=_handle_demo_graph)
+
     run_parser = subparsers.add_parser(
         "run",
         help="Run an operator command",
@@ -394,6 +554,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Operator command string (echo:, note:, or graph:)",
     )
     run_parser.set_defaults(handler=_handle_run)
+
     export_parser = subparsers.add_parser(
         "export",
         help="Export run audit trail",
@@ -431,6 +592,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Redact file contents, shell output, and large tool outputs",
     )
     export_parser.set_defaults(handler=_handle_export)
+
     enqueue_parser = subparsers.add_parser(
         "enqueue",
         help="Enqueue an operator command",
@@ -454,6 +616,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Operator command string to enqueue",
     )
     enqueue_parser.set_defaults(handler=_handle_enqueue)
+
     daemon_parser = subparsers.add_parser(
         "daemon",
         help="Run the GISMO daemon loop",
@@ -482,6 +645,69 @@ def build_parser() -> argparse.ArgumentParser:
         help="Requeue IN_PROGRESS items older than this many seconds",
     )
     daemon_parser.set_defaults(handler=_handle_daemon)
+
+    queue_parser = subparsers.add_parser(
+        "queue",
+        help="Inspect the queue (stats, list, show)",
+        parents=[db_parent],
+    )
+    queue_subparsers = queue_parser.add_subparsers(dest="queue_command", required=True)
+
+    queue_stats_parser = queue_subparsers.add_parser(
+        "stats",
+        help="Show queue summary statistics",
+    )
+    queue_stats_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Output JSON",
+    )
+    queue_stats_parser.set_defaults(handler=_handle_queue_stats)
+
+    queue_list_parser = queue_subparsers.add_parser(
+        "list",
+        help="List queue items",
+    )
+    queue_list_parser.add_argument(
+        "--limit",
+        type=int,
+        default=25,
+        help="Maximum number of items to list (default: 25)",
+    )
+    queue_list_parser.add_argument(
+        "--status",
+        choices=[s.value for s in QueueStatus],
+        help="Filter by status",
+    )
+    queue_list_parser.add_argument(
+        "--oldest",
+        action="store_true",
+        help="Sort oldest-first (default: newest-first)",
+    )
+    queue_list_parser.add_argument(
+        "--full",
+        action="store_true",
+        help="Do not truncate command text",
+    )
+    queue_list_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Output JSON",
+    )
+    queue_list_parser.set_defaults(handler=_handle_queue_list)
+
+    queue_show_parser = queue_subparsers.add_parser(
+        "show",
+        help="Show a single queue item by id",
+    )
+    queue_show_parser.add_argument("id", help="Queue item id")
+    queue_show_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Output JSON",
+    )
+    queue_show_parser.set_defaults(handler=_handle_queue_show)
+
     return parser
 
 

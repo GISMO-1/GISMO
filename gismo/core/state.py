@@ -575,6 +575,117 @@ class StateStore:
             return None
         return self._row_to_queue_item(row)
 
+    def resolve_queue_item_id(self, item_id_or_prefix: str) -> list[str]:
+        """Resolve an id or id prefix to matching queue item ids (0..n).
+
+        - If an exact id match exists, returns [id].
+        - Otherwise returns up to 50 ids that start with the prefix, newest-first.
+        """
+        value = (item_id_or_prefix or "").strip()
+        if not value:
+            return []
+
+        with self._connect() as connection:
+            exact = connection.execute(
+                "SELECT id FROM queue_items WHERE id = ?",
+                (value,),
+            ).fetchone()
+            if exact is not None:
+                return [exact["id"]]
+
+            rows = connection.execute(
+                "SELECT id FROM queue_items WHERE id LIKE ? ORDER BY created_at DESC LIMIT 50",
+                (value + "%",),
+            ).fetchall()
+
+        return [row["id"] for row in rows]
+
+    def queue_stats(self) -> Dict[str, Any]:
+        """Return summary statistics for queue_items."""
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT status, COUNT(*) AS count FROM queue_items GROUP BY status"
+            ).fetchall()
+
+            total_row = connection.execute("SELECT COUNT(*) AS c FROM queue_items").fetchone()
+            total = int(total_row["c"]) if total_row else 0
+
+            range_row = connection.execute(
+                """
+                SELECT
+                    MIN(created_at) AS oldest_created_at,
+                    MAX(created_at) AS newest_created_at,
+                    MIN(updated_at) AS oldest_updated_at,
+                    MAX(updated_at) AS newest_updated_at
+                FROM queue_items
+                """
+            ).fetchone()
+
+            attempts_row = connection.execute(
+                """
+                SELECT
+                    SUM(CASE WHEN attempt_count > 0 THEN 1 ELSE 0 END) AS items_with_attempts,
+                    MAX(attempt_count) AS max_attempt_count
+                FROM queue_items
+                """
+            ).fetchone()
+
+        counts: Dict[str, int] = {row["status"]: int(row["count"]) for row in rows}
+        for status in QueueStatus:
+            counts.setdefault(status.value, 0)
+
+        def _maybe_parse(value: Optional[str]) -> Optional[datetime]:
+            return _parse_dt(value) if value else None
+
+        payload: Dict[str, Any] = {
+            "total": total,
+            "by_status": counts,
+            "created_at": {
+                "oldest": _maybe_parse(range_row["oldest_created_at"]) if range_row else None,
+                "newest": _maybe_parse(range_row["newest_created_at"]) if range_row else None,
+            },
+            "updated_at": {
+                "oldest": _maybe_parse(range_row["oldest_updated_at"]) if range_row else None,
+                "newest": _maybe_parse(range_row["newest_updated_at"]) if range_row else None,
+            },
+            "attempts": {
+                "items_with_attempts": int(attempts_row["items_with_attempts"] or 0)
+                if attempts_row
+                else 0,
+                "max_attempt_count": int(attempts_row["max_attempt_count"] or 0)
+                if attempts_row
+                else 0,
+            },
+        }
+        return payload
+
+    def list_queue_items(
+        self,
+        status: Optional[QueueStatus] = None,
+        limit: int = 25,
+        newest_first: bool = True,
+    ) -> list[QueueItem]:
+        """List queue items with optional filtering."""
+        if limit <= 0:
+            raise ValueError("limit must be > 0")
+
+        where = ""
+        params: tuple[Any, ...] = ()
+        if status is not None:
+            where = "WHERE status = ?"
+            params = (status.value,)
+
+        order = "DESC" if newest_first else "ASC"
+        sql = f"""
+            SELECT * FROM queue_items
+            {where}
+            ORDER BY created_at {order}
+            LIMIT ?
+        """
+        with self._connect() as connection:
+            rows = connection.execute(sql, (*params, limit)).fetchall()
+        return [self._row_to_queue_item(row) for row in rows]
+
     def get_latest_run(self) -> Optional[Run]:
         with self._connect() as connection:
             row = connection.execute(
@@ -622,9 +733,7 @@ class StateStore:
             title=row["title"],
             description=row["description"],
             status=TaskStatus(row["status"]),
-            depends_on=json.loads(row["depends_on_json"])
-            if row["depends_on_json"]
-            else [],
+            depends_on=json.loads(row["depends_on_json"]) if row["depends_on_json"] else [],
             idempotency_key=row["idempotency_key"],
             input_hash=row["input_hash"],
             created_at=_parse_dt(row["created_at"]),
@@ -632,9 +741,7 @@ class StateStore:
             input_json=json.loads(row["input_json"]),
             output_json=json.loads(row["output_json"]) if row["output_json"] else None,
             error=row["error"],
-            failure_type=FailureType(row["failure_type"])
-            if row["failure_type"]
-            else FailureType.NONE,
+            failure_type=FailureType(row["failure_type"]) if row["failure_type"] else FailureType.NONE,
             status_reason=row["status_reason"],
         )
         return task
@@ -660,9 +767,7 @@ class StateStore:
             status=ToolCallStatus(row["status"]),
             error=row["error"],
             attempt_number=row["attempt_number"],
-            failure_type=FailureType(row["failure_type"])
-            if row["failure_type"]
-            else FailureType.NONE,
+            failure_type=FailureType(row["failure_type"]) if row["failure_type"] else FailureType.NONE,
         )
         return tool_call
 

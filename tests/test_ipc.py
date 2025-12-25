@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+from unittest import mock
 
 from gismo.cli import ipc as ipc_cli
 from gismo.core.state import StateStore
@@ -92,6 +93,11 @@ class IpcHandlerTest(unittest.TestCase):
         self.assertEqual(data["run"]["id"], run.id)
         self.assertIn("tasks", data)
         self.assertIn("tool_calls", data)
+
+    def test_ipc_request_wraps_connection_error(self) -> None:
+        with mock.patch.object(ipc_cli, "_connect", side_effect=FileNotFoundError()):
+            with self.assertRaises(ipc_cli.IPCConnectionError):
+                ipc_cli.ipc_request("queue_stats", {}, self.token)
 
 
 if __name__ == "__main__":

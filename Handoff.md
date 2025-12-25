@@ -32,9 +32,11 @@
 - Added Windows Startup folder launcher install/uninstall commands with tests and Task Scheduler access-denied guidance.
 - Added local IPC control plane (named pipe/Unix socket) with token auth, CLI wiring, and handler tests.
 - Restored global CLI db flag parsing and IPC subcommand support for db path overrides.
+- Added IPC client connection error handling with friendly CLI messaging and tests.
 
 ## Next Steps
 - Validate IPC CLI db flag usage on Windows.
+- Validate IPC client connection errors on Windows named pipes.
 - Expand tool catalog and add richer permission policies.
 - Add query/reporting helpers for audit trails.
 - Extend orchestration tests to cover recovery workflows.

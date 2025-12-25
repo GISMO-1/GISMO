@@ -718,6 +718,11 @@ def _handle_ipc_serve(args: argparse.Namespace) -> None:
     ipc_cli.serve_ipc(args.db_path, token)
 
 
+def _print_ipc_connection_error() -> None:
+    print("IPC server not running. Start it with: python -m gismo.cli.main ipc serve")
+    print("Ensure GISMO_IPC_TOKEN matches on server and client.")
+
+
 def _handle_ipc_enqueue(args: argparse.Namespace) -> None:
     command_text = " ".join(args.operator_command).strip()
     if not command_text:
@@ -727,17 +732,21 @@ def _handle_ipc_enqueue(args: argparse.Namespace) -> None:
     except ValueError as exc:
         print(str(exc))
         raise SystemExit(2) from exc
-    response = ipc_cli.parse_ipc_response(
-        ipc_cli.ipc_request(
-            "enqueue",
-            {
-                "command": command_text,
-                "run_id": args.run_id,
-                "max_attempts": args.max_attempts,
-            },
-            token,
+    try:
+        response = ipc_cli.parse_ipc_response(
+            ipc_cli.ipc_request(
+                "enqueue",
+                {
+                    "command": command_text,
+                    "run_id": args.run_id,
+                    "max_attempts": args.max_attempts,
+                },
+                token,
+            )
         )
-    )
+    except ipc_cli.IPCConnectionError:
+        _print_ipc_connection_error()
+        raise SystemExit(2)
     if not response.ok:
         if response.error == "unauthorized":
             print("IPC unauthorized")
@@ -753,7 +762,11 @@ def _handle_ipc_queue_stats(args: argparse.Namespace) -> None:
     except ValueError as exc:
         print(str(exc))
         raise SystemExit(2) from exc
-    response = ipc_cli.parse_ipc_response(ipc_cli.ipc_request("queue_stats", {}, token))
+    try:
+        response = ipc_cli.parse_ipc_response(ipc_cli.ipc_request("queue_stats", {}, token))
+    except ipc_cli.IPCConnectionError:
+        _print_ipc_connection_error()
+        raise SystemExit(2)
     if not response.ok:
         if response.error == "unauthorized":
             print("IPC unauthorized")
@@ -769,9 +782,13 @@ def _handle_ipc_run_show(args: argparse.Namespace) -> None:
     except ValueError as exc:
         print(str(exc))
         raise SystemExit(2) from exc
-    response = ipc_cli.parse_ipc_response(
-        ipc_cli.ipc_request("run_show", {"run_id": args.run_id}, token)
-    )
+    try:
+        response = ipc_cli.parse_ipc_response(
+            ipc_cli.ipc_request("run_show", {"run_id": args.run_id}, token)
+        )
+    except ipc_cli.IPCConnectionError:
+        _print_ipc_connection_error()
+        raise SystemExit(2)
     if not response.ok:
         if response.error == "unauthorized":
             print("IPC unauthorized")

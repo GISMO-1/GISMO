@@ -1,8 +1,13 @@
+import argparse
+import contextlib
+import io
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from gismo.cli import main as cli_main
+from gismo.cli import ipc as ipc_cli
 from gismo.core.models import QueueStatus
 from gismo.core.state import StateStore
 
@@ -98,6 +103,28 @@ class CliMainParserTest(unittest.TestCase):
             item = state_store.get_queue_item(queue_item_id)
             assert item is not None
             self.assertEqual(item.status, QueueStatus.SUCCEEDED)
+
+    def test_ipc_queue_stats_connection_error(self) -> None:
+        args = argparse.Namespace(token="secret-token")
+        with mock.patch.object(
+            ipc_cli,
+            "ipc_request",
+            side_effect=ipc_cli.IPCConnectionError("connection failed"),
+        ):
+            buffer = io.StringIO()
+            with contextlib.redirect_stdout(buffer):
+                with self.assertRaises(SystemExit) as exc:
+                    cli_main._handle_ipc_queue_stats(args)
+            self.assertEqual(exc.exception.code, 2)
+            output = buffer.getvalue().strip().splitlines()
+            self.assertEqual(
+                output[0],
+                "IPC server not running. Start it with: python -m gismo.cli.main ipc serve",
+            )
+            self.assertEqual(
+                output[1],
+                "Ensure GISMO_IPC_TOKEN matches on server and client.",
+            )
 
 
 if __name__ == "__main__":

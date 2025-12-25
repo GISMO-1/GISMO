@@ -183,7 +183,10 @@ Install the Windows Task Scheduler entry for an always-on daemon:
 ```bash
 python -m gismo.cli.main daemon install-windows-task --db .gismo/state.db
 python -m gismo.cli.main daemon install-windows-task --db .gismo/state.db --name "GISMO Daemon" --force
+python -m gismo.cli.main daemon install-windows-task --db .gismo/state.db --on-startup
 ```
+
+Note: `--on-startup` may require running PowerShell as Administrator.
 
 Remove the Windows Task Scheduler entry:
 

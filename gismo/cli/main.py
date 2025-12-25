@@ -370,6 +370,7 @@ def run_daemon_install_windows_task(
     python_exe: str,
     user: str | None,
     force: bool,
+    on_startup: bool,
 ) -> None:
     config = WindowsTaskConfig(
         name=name,
@@ -377,6 +378,7 @@ def run_daemon_install_windows_task(
         python_exe=python_exe,
         user=user,
         force=force,
+        on_startup=on_startup,
     )
     install_windows_task(config)
 
@@ -478,6 +480,7 @@ def _handle_daemon_install_windows_task(args: argparse.Namespace) -> None:
         python_exe=args.python,
         user=args.user,
         force=args.force,
+        on_startup=args.on_startup,
     )
 
 
@@ -828,6 +831,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--force",
         action="store_true",
         help="Overwrite task if it already exists",
+    )
+    daemon_install_parser.add_argument(
+        "--on-startup",
+        action="store_true",
+        help="Also trigger at system startup (may require Administrator)",
     )
     daemon_install_parser.set_defaults(handler=_handle_daemon_install_windows_task)
     daemon_uninstall_parser = daemon_subparsers.add_parser(

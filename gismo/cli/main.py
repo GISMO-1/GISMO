@@ -800,6 +800,111 @@ def _handle_ipc_run_show(args: argparse.Namespace) -> None:
     print(ipc_cli.format_run_show_output(response.data or {}))
 
 
+def _handle_ipc_daemon_status(args: argparse.Namespace) -> None:
+    try:
+        token = ipc_cli.load_ipc_token(args.token)
+    except ValueError as exc:
+        print(str(exc))
+        raise SystemExit(2) from exc
+    try:
+        response = ipc_cli.parse_ipc_response(ipc_cli.ipc_request("daemon_status", {}, token))
+    except ipc_cli.IPCConnectionError:
+        _print_ipc_connection_error()
+        raise SystemExit(2)
+    if not response.ok:
+        if response.error == "unauthorized":
+            print("IPC unauthorized")
+        else:
+            print(f"IPC error: {response.error or 'unknown error'}")
+        raise SystemExit(2)
+    print(ipc_cli.format_daemon_status_output(response.data or {}))
+
+
+def _handle_ipc_daemon_pause(args: argparse.Namespace) -> None:
+    try:
+        token = ipc_cli.load_ipc_token(args.token)
+    except ValueError as exc:
+        print(str(exc))
+        raise SystemExit(2) from exc
+    try:
+        response = ipc_cli.parse_ipc_response(ipc_cli.ipc_request("daemon_pause", {}, token))
+    except ipc_cli.IPCConnectionError:
+        _print_ipc_connection_error()
+        raise SystemExit(2)
+    if not response.ok:
+        if response.error == "unauthorized":
+            print("IPC unauthorized")
+        else:
+            print(f"IPC error: {response.error or 'unknown error'}")
+        raise SystemExit(2)
+    print(ipc_cli.format_daemon_pause_output(response.data or {}))
+
+
+def _handle_ipc_daemon_resume(args: argparse.Namespace) -> None:
+    try:
+        token = ipc_cli.load_ipc_token(args.token)
+    except ValueError as exc:
+        print(str(exc))
+        raise SystemExit(2) from exc
+    try:
+        response = ipc_cli.parse_ipc_response(ipc_cli.ipc_request("daemon_resume", {}, token))
+    except ipc_cli.IPCConnectionError:
+        _print_ipc_connection_error()
+        raise SystemExit(2)
+    if not response.ok:
+        if response.error == "unauthorized":
+            print("IPC unauthorized")
+        else:
+            print(f"IPC error: {response.error or 'unknown error'}")
+        raise SystemExit(2)
+    print(ipc_cli.format_daemon_resume_output(response.data or {}))
+
+
+def _handle_ipc_purge_failed(args: argparse.Namespace) -> None:
+    try:
+        token = ipc_cli.load_ipc_token(args.token)
+    except ValueError as exc:
+        print(str(exc))
+        raise SystemExit(2) from exc
+    try:
+        response = ipc_cli.parse_ipc_response(
+            ipc_cli.ipc_request("queue_purge_failed", {}, token)
+        )
+    except ipc_cli.IPCConnectionError:
+        _print_ipc_connection_error()
+        raise SystemExit(2)
+    if not response.ok:
+        if response.error == "unauthorized":
+            print("IPC unauthorized")
+        else:
+            print(f"IPC error: {response.error or 'unknown error'}")
+        raise SystemExit(2)
+    print(ipc_cli.format_queue_purge_failed_output(response.data or {}))
+
+
+def _handle_ipc_requeue_stale(args: argparse.Namespace) -> None:
+    try:
+        token = ipc_cli.load_ipc_token(args.token)
+    except ValueError as exc:
+        print(str(exc))
+        raise SystemExit(2) from exc
+    payload = {"older_than_minutes": args.older_than_minutes, "limit": args.limit}
+    try:
+        response = ipc_cli.parse_ipc_response(
+            ipc_cli.ipc_request("queue_requeue_stale", payload, token)
+        )
+    except ipc_cli.IPCConnectionError:
+        _print_ipc_connection_error()
+        raise SystemExit(2)
+    if not response.ok:
+        if response.error == "unauthorized":
+            print("IPC unauthorized")
+        else:
+            print(f"IPC error: {response.error or 'unknown error'}")
+        raise SystemExit(2)
+    print(ipc_cli.format_queue_requeue_stale_output(response.data or {}))
+
+
 def build_parser() -> argparse.ArgumentParser:
     default_db_path = str(Path(".gismo") / "state.db")
     db_parent = argparse.ArgumentParser(add_help=False)
@@ -1172,6 +1277,78 @@ def build_parser() -> argparse.ArgumentParser:
         help="IPC auth token (or set GISMO_IPC_TOKEN)",
     )
     ipc_queue_stats_parser.set_defaults(handler=_handle_ipc_queue_stats)
+
+    ipc_daemon_status_parser = ipc_subparsers.add_parser(
+        "daemon-status",
+        help="Show daemon status via IPC",
+        parents=[db_parent_optional],
+    )
+    ipc_daemon_status_parser.add_argument(
+        "--token",
+        default=None,
+        help="IPC auth token (or set GISMO_IPC_TOKEN)",
+    )
+    ipc_daemon_status_parser.set_defaults(handler=_handle_ipc_daemon_status)
+
+    ipc_daemon_pause_parser = ipc_subparsers.add_parser(
+        "daemon-pause",
+        help="Pause daemon processing via IPC",
+        parents=[db_parent_optional],
+    )
+    ipc_daemon_pause_parser.add_argument(
+        "--token",
+        default=None,
+        help="IPC auth token (or set GISMO_IPC_TOKEN)",
+    )
+    ipc_daemon_pause_parser.set_defaults(handler=_handle_ipc_daemon_pause)
+
+    ipc_daemon_resume_parser = ipc_subparsers.add_parser(
+        "daemon-resume",
+        help="Resume daemon processing via IPC",
+        parents=[db_parent_optional],
+    )
+    ipc_daemon_resume_parser.add_argument(
+        "--token",
+        default=None,
+        help="IPC auth token (or set GISMO_IPC_TOKEN)",
+    )
+    ipc_daemon_resume_parser.set_defaults(handler=_handle_ipc_daemon_resume)
+
+    ipc_purge_failed_parser = ipc_subparsers.add_parser(
+        "purge-failed",
+        help="Delete failed queue items via IPC",
+        parents=[db_parent_optional],
+    )
+    ipc_purge_failed_parser.add_argument(
+        "--token",
+        default=None,
+        help="IPC auth token (or set GISMO_IPC_TOKEN)",
+    )
+    ipc_purge_failed_parser.set_defaults(handler=_handle_ipc_purge_failed)
+
+    ipc_requeue_stale_parser = ipc_subparsers.add_parser(
+        "requeue-stale",
+        help="Requeue stale in-progress items via IPC",
+        parents=[db_parent_optional],
+    )
+    ipc_requeue_stale_parser.add_argument(
+        "--older-than-minutes",
+        type=int,
+        required=True,
+        help="Requeue items older than this many minutes",
+    )
+    ipc_requeue_stale_parser.add_argument(
+        "--limit",
+        type=int,
+        default=100,
+        help="Maximum number of stale items to requeue",
+    )
+    ipc_requeue_stale_parser.add_argument(
+        "--token",
+        default=None,
+        help="IPC auth token (or set GISMO_IPC_TOKEN)",
+    )
+    ipc_requeue_stale_parser.set_defaults(handler=_handle_ipc_requeue_stale)
 
     ipc_run_show_parser = ipc_subparsers.add_parser(
         "run-show",

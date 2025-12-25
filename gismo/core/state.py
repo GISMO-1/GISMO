@@ -111,7 +111,23 @@ class StateStore:
                 )
                 """
             )
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS daemon_control (
+                    id INTEGER PRIMARY KEY CHECK (id = 1),
+                    paused INTEGER NOT NULL DEFAULT 0,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
             self._ensure_columns(connection)
+            cursor.execute(
+                """
+                INSERT OR IGNORE INTO daemon_control (id, paused, updated_at)
+                VALUES (1, 0, ?)
+                """,
+                (_utc_now().isoformat(),),
+            )
             connection.commit()
 
     def _ensure_columns(self, connection: sqlite3.Connection) -> None:
@@ -572,6 +588,92 @@ class StateStore:
                 updated += 1
             connection.commit()
         return updated
+
+    def requeue_stale_in_progress_queue(
+        self,
+        older_than_seconds: int,
+        limit: int | None = None,
+        *,
+        now: datetime | None = None,
+    ) -> int:
+        if older_than_seconds <= 0:
+            raise ValueError("older_than_seconds must be > 0")
+        if limit is not None and limit <= 0:
+            raise ValueError("limit must be > 0")
+        current_time = now or _utc_now()
+        threshold = current_time.timestamp() - older_than_seconds
+        updated = 0
+        with self._connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM queue_items
+                WHERE status = ? AND started_at IS NOT NULL
+                ORDER BY started_at ASC
+                """,
+                (QueueStatus.IN_PROGRESS.value,),
+            ).fetchall()
+            for row in rows:
+                if limit is not None and updated >= limit:
+                    break
+                started_at = _parse_dt(row["started_at"]).timestamp()
+                if started_at >= threshold:
+                    continue
+                connection.execute(
+                    """
+                    UPDATE queue_items
+                    SET status = ?, updated_at = ?, attempt_count = ?, last_error = ?,
+                        started_at = NULL
+                    WHERE id = ?
+                    """,
+                    (
+                        QueueStatus.QUEUED.value,
+                        current_time.isoformat(),
+                        row["attempt_count"] + 1,
+                        "Requeued stale in-progress item.",
+                        row["id"],
+                    ),
+                )
+                updated += 1
+            connection.commit()
+        return updated
+
+    def get_daemon_paused(self) -> bool:
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT paused FROM daemon_control WHERE id = 1",
+            ).fetchone()
+            if row is None:
+                connection.execute(
+                    """
+                    INSERT INTO daemon_control (id, paused, updated_at)
+                    VALUES (1, 0, ?)
+                    """,
+                    (_utc_now().isoformat(),),
+                )
+                connection.commit()
+                return False
+            return bool(row["paused"])
+
+    def set_daemon_paused(self, paused: bool) -> None:
+        now = _utc_now().isoformat()
+        with self._connection() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE daemon_control
+                SET paused = ?, updated_at = ?
+                WHERE id = 1
+                """,
+                (1 if paused else 0, now),
+            )
+            if cursor.rowcount == 0:
+                connection.execute(
+                    """
+                    INSERT INTO daemon_control (id, paused, updated_at)
+                    VALUES (1, ?, ?)
+                    """,
+                    (1 if paused else 0, now),
+                )
+            connection.commit()
 
     def get_queue_item(self, item_id: str) -> Optional[QueueItem]:
         with self._connection() as connection:

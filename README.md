@@ -185,6 +185,7 @@ export GISMO_IPC_TOKEN="your-token"
 python -m gismo.cli.main --db .gismo/state.db ipc queue-stats
 python -m gismo.cli.main ipc serve --db .gismo/state.db
 python -m gismo.cli.main ipc enqueue "echo: hello"
+python -m gismo.cli.main ipc ping
 python -m gismo.cli.main ipc queue-stats
 python -m gismo.cli.main ipc daemon-status
 python -m gismo.cli.main ipc daemon-pause

@@ -164,5 +164,82 @@ class IpcEndpointTest(unittest.TestCase):
         )
 
 
+class IpcServeTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tempdir = tempfile.TemporaryDirectory()
+        self.db_path = f"{self.tempdir.name}/state.db"
+
+    def tearDown(self) -> None:
+        self.tempdir.cleanup()
+
+    def test_serve_ipc_stops_on_keyboard_interrupt(self) -> None:
+        listener = self._run_serve_with_listener([KeyboardInterrupt()])
+        self.assertTrue(listener.closed)
+
+    def test_serve_ipc_stops_on_assertion_error_when_allowed(self) -> None:
+        listener = self._run_serve_with_listener(
+            [AssertionError("boom")],
+            allow_accept_error=True,
+        )
+        self.assertTrue(listener.closed)
+
+    def test_serve_ipc_stops_on_oserror_when_allowed(self) -> None:
+        listener = self._run_serve_with_listener(
+            [OSError("operation aborted")],
+            allow_accept_error=True,
+        )
+        self.assertTrue(listener.closed)
+
+    def _run_serve_with_listener(
+        self,
+        exceptions: list[BaseException],
+        *,
+        allow_accept_error: bool = False,
+    ) -> "FakeListener":
+        listener = FakeListener(exceptions)
+        endpoint = ipc_cli.IPCEndpoint("ignored", "AF_PIPE")
+        with mock.patch.object(ipc_cli, "Listener", return_value=listener):
+            with mock.patch.object(ipc_cli, "ipc_endpoint", return_value=endpoint):
+                if allow_accept_error:
+                    with mock.patch.object(
+                        ipc_cli,
+                        "_should_exit_on_accept_error",
+                        return_value=True,
+                    ):
+                        ipc_cli.serve_ipc(self.db_path, "token")
+                else:
+                    ipc_cli.serve_ipc(self.db_path, "token")
+        return listener
+
+
+class FakeListener:
+    def __init__(self, exceptions: list[BaseException]):
+        self.exceptions = list(exceptions)
+        self.closed = False
+
+    def accept(self):
+        exc = self.exceptions.pop(0)
+        raise exc
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class IpcAcceptErrorTest(unittest.TestCase):
+    def test_should_exit_on_accept_error_windows_assertion(self) -> None:
+        self.assertTrue(
+            ipc_cli._should_exit_on_accept_error(AssertionError("boom"), "nt")
+        )
+        self.assertFalse(
+            ipc_cli._should_exit_on_accept_error(AssertionError("boom"), "posix")
+        )
+
+    def test_should_exit_on_accept_error_windows_oserror(self) -> None:
+        oserr = OSError("operation aborted")
+        oserr.winerror = 995
+        self.assertTrue(ipc_cli._should_exit_on_accept_error(oserr, "nt"))
+        self.assertFalse(ipc_cli._should_exit_on_accept_error(oserr, "posix"))
+
+
 if __name__ == "__main__":
     unittest.main()

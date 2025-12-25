@@ -254,6 +254,17 @@ def _log_request(request_id: str, action: str | None, caller: str | None) -> Non
     )
 
 
+def _should_exit_on_accept_error(exc: BaseException, os_name: str) -> bool:
+    if os_name != "nt":
+        return False
+    if isinstance(exc, AssertionError):
+        return True
+    if isinstance(exc, OSError):
+        winerror = getattr(exc, "winerror", None)
+        return winerror in {995, 10038}
+    return False
+
+
 def serve_ipc(db_path: str, token: str) -> None:
     endpoint = ipc_endpoint(db_path)
     socket_path = Path(endpoint.address) if endpoint.family == "AF_UNIX" else None
@@ -277,13 +288,20 @@ def serve_ipc(db_path: str, token: str) -> None:
         )
         raise SystemExit(1) from None
     state_store = StateStore(db_path)
+    stopped = False
 
     try:
         while True:
             try:
                 conn = listener.accept()
             except KeyboardInterrupt:
+                stopped = True
                 break
+            except (AssertionError, OSError) as exc:
+                if _should_exit_on_accept_error(exc, os.name):
+                    stopped = True
+                    break
+                raise
             with conn:
                 try:
                     raw = conn.recv_bytes()
@@ -304,6 +322,8 @@ def serve_ipc(db_path: str, token: str) -> None:
         listener.close()
         if socket_path is not None and socket_path.exists() and socket_path.is_socket():
             socket_path.unlink()
+        if stopped:
+            LOGGER.info("ipc_server_stopped")
 
 
 def ipc_request(

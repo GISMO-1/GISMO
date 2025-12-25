@@ -1,3 +1,5 @@
+import contextlib
+import io
 import tempfile
 import unittest
 from pathlib import Path
@@ -50,6 +52,7 @@ class SupervisePidFileTest(unittest.TestCase):
             ipc_pid=1001,
             daemon_pid=1002,
             ipc_started=True,
+            ipc_reused=False,
             daemon_started=False,
             db_path=".gismo/state.db",
             started_at="2024-01-01T00:00:00Z",
@@ -73,6 +76,7 @@ class SuperviseStatusTest(unittest.TestCase):
             ipc_pid=2001,
             daemon_pid=2002,
             ipc_started=True,
+            ipc_reused=False,
             daemon_started=True,
             db_path="state.db",
             started_at="2024-01-02T00:00:00Z",
@@ -111,6 +115,7 @@ class SuperviseUpTest(unittest.TestCase):
         self.assertIn("daemon", process_ops.spawn_calls[0])
         saved_record = save_mock.call_args.args[1]
         self.assertFalse(saved_record.ipc_started)
+        self.assertTrue(saved_record.ipc_reused)
         self.assertTrue(saved_record.daemon_started)
 
     def test_ipc_unauthorized_fails_cleanly(self) -> None:
@@ -156,7 +161,91 @@ class SuperviseUpTest(unittest.TestCase):
                     )
         saved_record = save_mock.call_args.args[1]
         self.assertTrue(saved_record.ipc_started)
+        self.assertFalse(saved_record.ipc_reused)
         self.assertTrue(saved_record.daemon_started)
+
+
+class SuperviseStatusOutputTest(unittest.TestCase):
+    def test_status_reports_running_when_ipc_reachable(self) -> None:
+        record = supervise_cli.SupervisorRecord(
+            ipc_pid=0,
+            daemon_pid=0,
+            ipc_started=False,
+            ipc_reused=True,
+            daemon_started=True,
+            db_path="state.db",
+            started_at="2024-01-03T00:00:00Z",
+        )
+        ping_response = {
+            "ok": True,
+            "request_id": "ping-1",
+            "data": {"status": "ok"},
+            "error": None,
+        }
+        daemon_response = {
+            "ok": True,
+            "request_id": "daemon-1",
+            "data": {"paused": False},
+            "error": None,
+        }
+        with tempfile.TemporaryDirectory() as tempdir:
+            pid_path = Path(tempdir) / "supervise.json"
+            supervise_cli.save_supervisor_record(pid_path, record)
+            with mock.patch(
+                "gismo.cli.supervise.ipc_cli.ipc_request",
+                side_effect=[ping_response, daemon_response],
+            ):
+                buffer = io.StringIO()
+                with contextlib.redirect_stdout(buffer):
+                    supervise_cli.run_supervise_status(
+                        "token",
+                        db_path="state.db",
+                        pid_path=pid_path,
+                        process_ops=FakeProcessOps(),
+                    )
+        output = buffer.getvalue()
+        self.assertIn("ipc_status: running (observed: ping)", output)
+        self.assertIn("daemon_status: running", output)
+
+    def test_status_reports_paused_from_ipc(self) -> None:
+        record = supervise_cli.SupervisorRecord(
+            ipc_pid=1234,
+            daemon_pid=5678,
+            ipc_started=True,
+            ipc_reused=False,
+            daemon_started=True,
+            db_path="state.db",
+            started_at="2024-01-04T00:00:00Z",
+        )
+        ping_response = {
+            "ok": True,
+            "request_id": "ping-2",
+            "data": {"status": "ok"},
+            "error": None,
+        }
+        daemon_response = {
+            "ok": True,
+            "request_id": "daemon-2",
+            "data": {"paused": True},
+            "error": None,
+        }
+        with tempfile.TemporaryDirectory() as tempdir:
+            pid_path = Path(tempdir) / "supervise.json"
+            supervise_cli.save_supervisor_record(pid_path, record)
+            with mock.patch(
+                "gismo.cli.supervise.ipc_cli.ipc_request",
+                side_effect=[ping_response, daemon_response],
+            ):
+                buffer = io.StringIO()
+                with contextlib.redirect_stdout(buffer):
+                    supervise_cli.run_supervise_status(
+                        "token",
+                        db_path="state.db",
+                        pid_path=pid_path,
+                        process_ops=FakeProcessOps(),
+                    )
+        output = buffer.getvalue()
+        self.assertIn("daemon_status: paused", output)
 
 
 if __name__ == "__main__":

@@ -37,12 +37,14 @@
 - Added queue requeue-stale and purge-failed IPC behaviors with coverage tests.
 - Added supervise CLI command to run IPC server and daemon together with PID-based control.
 - Added IPC ping CLI wiring plus supervisor reuse/authorization checks and PID tracking for started children.
+- Reconciled supervise status against IPC reachability and daemon status with Windows-safe PID checks.
 
 ## Next Steps
 - Validate IPC CLI db flag usage on Windows.
 - Validate IPC client connection errors on Windows named pipes.
 - Validate IPC daemon pause/resume behavior in long-running deployments.
 - Validate supervise up/down behavior on Windows named pipes and terminal restarts.
+- Validate supervise status output on Windows when IPC is running outside supervise.
 - Expand tool catalog and add richer permission policies.
 - Add query/reporting helpers for audit trails.
 - Extend orchestration tests to cover recovery workflows.

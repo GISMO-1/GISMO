@@ -204,6 +204,8 @@ python -m gismo.cli.main supervise status --db .gismo/state.db
 python -m gismo.cli.main supervise down --db .gismo/state.db
 ```
 
+Note: `supervise status` reconciles IPC reachability and daemon status with the PID file; the PID file is best-effort metadata only.
+
 Install the Windows Task Scheduler entry for an always-on daemon:
 
 ```bash

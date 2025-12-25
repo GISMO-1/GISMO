@@ -1,6 +1,7 @@
 """Supervisor helpers for running IPC + daemon together."""
 from __future__ import annotations
 
+import ctypes
 import json
 import os
 import signal
@@ -11,6 +12,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from ctypes import wintypes
 from typing import Protocol
 
 from gismo.cli import ipc as ipc_cli
@@ -21,6 +23,7 @@ class SupervisorRecord:
     ipc_pid: int
     daemon_pid: int
     ipc_started: bool
+    ipc_reused: bool
     daemon_started: bool
     db_path: str
     started_at: str
@@ -30,6 +33,7 @@ class SupervisorRecord:
             "ipc_pid": self.ipc_pid,
             "daemon_pid": self.daemon_pid,
             "ipc_started": self.ipc_started,
+            "ipc_reused": self.ipc_reused,
             "daemon_started": self.daemon_started,
             "db_path": self.db_path,
             "started_at": self.started_at,
@@ -41,6 +45,7 @@ class SupervisorRecord:
             ipc_pid=int(data.get("ipc_pid", 0)),
             daemon_pid=int(data.get("daemon_pid", 0)),
             ipc_started=bool(data.get("ipc_started", True)),
+            ipc_reused=bool(data.get("ipc_reused", False)),
             daemon_started=bool(data.get("daemon_started", True)),
             db_path=str(data["db_path"]),
             started_at=str(data["started_at"]),
@@ -85,6 +90,8 @@ class DefaultProcessOps:
     def is_running(self, pid: int) -> bool:
         if pid <= 0:
             return False
+        if os.name == "nt":
+            return _windows_is_running(pid)
         try:
             os.kill(pid, 0)
         except PermissionError:
@@ -94,9 +101,15 @@ class DefaultProcessOps:
         return True
 
     def terminate(self, pid: int) -> None:
+        if os.name == "nt":
+            _windows_terminate(pid)
+            return
         os.kill(pid, signal.SIGTERM)
 
     def kill(self, pid: int) -> None:
+        if os.name == "nt":
+            _windows_terminate(pid)
+            return
         sig = signal.SIGKILL if hasattr(signal, "SIGKILL") else signal.SIGTERM
         os.kill(pid, sig)
 
@@ -178,8 +191,10 @@ def run_supervise_up(
     ipc_proc = None
     ipc_pid = 0
     ipc_started = False
+    ipc_reused = False
     if ipc_reachable and ipc_authorized:
         print("[supervise] IPC already running; reusing existing server.")
+        ipc_reused = True
     else:
         ipc_proc = process_ops.spawn(ipc_args, env=env)
         ipc_pid = ipc_proc.pid
@@ -190,6 +205,7 @@ def run_supervise_up(
         ipc_pid=ipc_pid,
         daemon_pid=daemon_proc.pid,
         ipc_started=ipc_started,
+        ipc_reused=ipc_reused,
         daemon_started=True,
         db_path=db_path,
         started_at=datetime.now(timezone.utc).isoformat(),
@@ -232,18 +248,22 @@ def run_supervise_status(
     process_ops = process_ops or DefaultProcessOps()
     pid_path = pid_path or default_pid_path()
     record = load_supervisor_record(pid_path)
-    if record is None:
-        print("not running")
-        return
-    status = summarize_supervisor_status(record, process_ops)
+    status = (
+        summarize_supervisor_status(record, process_ops)
+        if record is not None
+        else SupervisorProcessStatus(ipc_running=False, daemon_running=False)
+    )
+    pid_suffix = "" if record is not None else " (missing)"
     lines = [
         "GISMO supervise status",
-        f"pid_file: {pid_path}",
-        f"db_path: {record.db_path}",
-        f"ipc_pid: {record.ipc_pid} ({_fmt_running(status.ipc_running)})",
-        f"daemon_pid: {record.daemon_pid} ({_fmt_running(status.daemon_running)})",
+        f"pid_file: {pid_path}{pid_suffix}",
+        f"db_path: {record.db_path if record is not None else (db_path or 'unknown')}",
+        f"ipc_pid: {_fmt_pid(record, 'ipc_pid')} ({_fmt_pid_running(record, status.ipc_running)})",
+        f"daemon_pid: {_fmt_pid(record, 'daemon_pid')} ({_fmt_pid_running(record, status.daemon_running)})",
     ]
-    if db_path and db_path != record.db_path:
+    if record is not None:
+        lines.append(f"ipc_reused: {record.ipc_reused}")
+    if db_path and record is not None and db_path != record.db_path:
         lines.append(f"db_path_mismatch: requested={db_path}")
     ipc_reachable = False
     ipc_error = None
@@ -255,6 +275,7 @@ def run_supervise_status(
     except ipc_cli.IPCConnectionError:
         ipc_error = "connection_failed"
     lines.append(f"ipc_ping: {_fmt_ping(ipc_reachable, ipc_error)}")
+    lines.append(_fmt_ipc_status(ipc_reachable, status.ipc_running))
     if ipc_reachable:
         daemon_status = ipc_cli.parse_ipc_response(
             ipc_cli.ipc_request("daemon_status", {}, token)
@@ -262,8 +283,12 @@ def run_supervise_status(
         if daemon_status.ok:
             paused = bool(daemon_status.data and daemon_status.data.get("paused"))
             lines.append(f"daemon_paused: {paused}")
+            lines.append(_fmt_daemon_status(paused))
         else:
             lines.append(f"daemon_paused: error ({daemon_status.error})")
+            lines.append(f"daemon_status: error ({daemon_status.error})")
+    else:
+        lines.append(_fmt_daemon_status(None))
     print("\n".join(lines))
 
 
@@ -324,10 +349,6 @@ def _start_output_thread(
     return thread
 
 
-def _fmt_running(value: bool) -> str:
-    return "running" if value else "stopped"
-
-
 def _fmt_ping(ok: bool, error: str | None) -> str:
     if ok:
         return "ok"
@@ -362,3 +383,53 @@ def _probe_ipc_fallback(token: str) -> tuple[bool, bool]:
     if response.error == "unauthorized":
         return True, False
     return False, False
+
+
+def _fmt_pid(record: SupervisorRecord | None, field: str) -> str:
+    if record is None:
+        return "0"
+    return str(getattr(record, field))
+
+
+def _fmt_pid_running(record: SupervisorRecord | None, running: bool) -> str:
+    if record is None:
+        return "pid_file_missing"
+    return f"pid_file_running={running}"
+
+
+def _fmt_ipc_status(ipc_reachable: bool, pid_running: bool) -> str:
+    if ipc_reachable:
+        return "ipc_status: running (observed: ping)"
+    return f"ipc_status: unknown (unreachable; pid_file_running={pid_running})"
+
+
+def _fmt_daemon_status(paused: bool | None) -> str:
+    if paused is None:
+        return "daemon_status: unknown (ipc_unreachable)"
+    return "daemon_status: paused" if paused else "daemon_status: running"
+
+
+def _windows_is_running(pid: int) -> bool:
+    access = 0x1000  # PROCESS_QUERY_LIMITED_INFORMATION
+    handle = ctypes.windll.kernel32.OpenProcess(access, False, pid)
+    if not handle:
+        return False
+    try:
+        exit_code = wintypes.DWORD()
+        if not ctypes.windll.kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
+            return False
+        return exit_code.value == 259  # STILL_ACTIVE
+    finally:
+        ctypes.windll.kernel32.CloseHandle(handle)
+
+
+def _windows_terminate(pid: int) -> None:
+    access = 0x0001  # PROCESS_TERMINATE
+    handle = ctypes.windll.kernel32.OpenProcess(access, False, pid)
+    if not handle:
+        raise OSError("process not found")
+    try:
+        if not ctypes.windll.kernel32.TerminateProcess(handle, 1):
+            raise OSError("terminate failed")
+    finally:
+        ctypes.windll.kernel32.CloseHandle(handle)

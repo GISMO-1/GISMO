@@ -13,6 +13,7 @@ from gismo.cli.operator import (
     parse_command,
     required_tools,
 )
+from gismo.cli.windows_tasks import WindowsTaskConfig, install_windows_task, uninstall_windows_task
 from gismo.core.agent import SimpleAgent
 from gismo.core.daemon import run_daemon_loop
 from gismo.core.export import export_latest_run_jsonl, export_run_jsonl
@@ -33,6 +34,7 @@ def _truncate(text: str, max_len: int) -> str:
     if len(text) <= max_len:
         return text
     return text[: max(0, max_len - 1)] + "…"
+
 
 def _summarize_value(value: object, max_len: int) -> str:
     if value is None:
@@ -362,6 +364,31 @@ def run_daemon(
     )
 
 
+def run_daemon_install_windows_task(
+    name: str,
+    db_path: str,
+    python_exe: str,
+    user: str | None,
+    force: bool,
+) -> None:
+    config = WindowsTaskConfig(
+        name=name,
+        db_path=db_path,
+        python_exe=python_exe,
+        user=user,
+        force=force,
+    )
+    install_windows_task(config)
+
+
+def run_daemon_uninstall_windows_task(name: str, *, yes: bool) -> None:
+    if not yes:
+        print(f"Dry run: would remove task \"{name}\".")
+        print("Re-run with --yes to confirm removal.")
+        return
+    uninstall_windows_task(name)
+
+
 def _print_operator_summary(state_store: StateStore, run_id: str) -> None:
     print("=== GISMO Operator Summary ===")
     print(f"Run: {run_id}")
@@ -442,6 +469,20 @@ def _handle_daemon(args: argparse.Namespace) -> None:
         once=args.once,
         requeue_stale_seconds=args.requeue_stale_seconds,
     )
+
+
+def _handle_daemon_install_windows_task(args: argparse.Namespace) -> None:
+    run_daemon_install_windows_task(
+        name=args.name,
+        db_path=args.db_path,
+        python_exe=args.python,
+        user=args.user,
+        force=args.force,
+    )
+
+
+def _handle_daemon_uninstall_windows_task(args: argparse.Namespace) -> None:
+    run_daemon_uninstall_windows_task(args.name, yes=args.yes)
 
 
 def _handle_queue_stats(args: argparse.Namespace) -> None:
@@ -762,6 +803,48 @@ def build_parser() -> argparse.ArgumentParser:
         help="Requeue IN_PROGRESS items older than this many seconds",
     )
     daemon_parser.set_defaults(handler=_handle_daemon)
+    daemon_subparsers = daemon_parser.add_subparsers(dest="daemon_command")
+    daemon_install_parser = daemon_subparsers.add_parser(
+        "install-windows-task",
+        help="Install a Windows Task Scheduler entry for the daemon",
+        parents=[db_parent],
+    )
+    daemon_install_parser.add_argument(
+        "--name",
+        default="GISMO Daemon",
+        help="Task Scheduler task name",
+    )
+    daemon_install_parser.add_argument(
+        "--python",
+        default=sys.executable,
+        help="Python executable to run the daemon",
+    )
+    daemon_install_parser.add_argument(
+        "--user",
+        default=None,
+        help="Optional Windows username for the task (defaults to current user)",
+    )
+    daemon_install_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Overwrite task if it already exists",
+    )
+    daemon_install_parser.set_defaults(handler=_handle_daemon_install_windows_task)
+    daemon_uninstall_parser = daemon_subparsers.add_parser(
+        "uninstall-windows-task",
+        help="Remove the Windows Task Scheduler entry for the daemon",
+    )
+    daemon_uninstall_parser.add_argument(
+        "--name",
+        default="GISMO Daemon",
+        help="Task Scheduler task name",
+    )
+    daemon_uninstall_parser.add_argument(
+        "--yes",
+        action="store_true",
+        help="Confirm removal (required to delete the task)",
+    )
+    daemon_uninstall_parser.set_defaults(handler=_handle_daemon_uninstall_windows_task)
 
     queue_parser = subparsers.add_parser(
         "queue",

@@ -27,6 +27,7 @@
 - Added CLI run show summaries with task/tool call output details for operator introspection.
 - Added queue purge-failed CLI command with dry-run confirmation and enriched queue list columns.
 - Added tests covering run show output and purge-failed safety behavior.
+- Added daemon shutdown signal handling and Windows Task Scheduler install/uninstall CLI helpers.
 
 ## Next Steps
 - Expand tool catalog and add richer permission policies.
@@ -36,9 +37,12 @@
 - Add policy-driven examples for operator tasks using the new toolpack.
 - Extend daemon workflows with observability metrics and backoff tuning.
 - Consider additional CLI filters for run/task search and failure triage.
+- Add Windows-specific operational playbooks for Task Scheduler maintenance.
 
 ## Tests
 - `python scripts/verify.py`
 
 ## Notes
 - Validation is Python-only; do not run cargo/npm checks.
+- Windows daemon task install: `python -m gismo.cli.main daemon install-windows-task --db .gismo/state.db`
+- Windows daemon task uninstall: `python -m gismo.cli.main daemon uninstall-windows-task --name "GISMO Daemon" --yes`

@@ -41,6 +41,20 @@ class IPCResponse:
 LOGGER = logging.getLogger(__name__)
 
 
+class IPCConnectionError(RuntimeError):
+    """Raised when the IPC client cannot connect to the server."""
+
+
+def _connection_error_types() -> tuple[type[BaseException], ...]:
+    if os.name == "nt":
+        return (FileNotFoundError, OSError, EOFError)
+    return (FileNotFoundError, ConnectionRefusedError, OSError, EOFError)
+
+
+def _connect(endpoint: IPCEndpoint) -> Client:
+    return Client(endpoint.address, family=endpoint.family)
+
+
 def default_ipc_endpoint() -> IPCEndpoint:
     if os.name == "nt":
         return IPCEndpoint(r"\\.\pipe\gismo-ipc", "AF_PIPE")
@@ -240,9 +254,12 @@ def ipc_request(action: str, args: Dict[str, Any], token: str) -> Dict[str, Any]
         "action": action,
         "args": args,
     }
-    with Client(endpoint.address, family=endpoint.family) as conn:
-        conn.send_bytes(json.dumps(request).encode("utf-8"))
-        response_raw = conn.recv_bytes()
+    try:
+        with _connect(endpoint) as conn:
+            conn.send_bytes(json.dumps(request).encode("utf-8"))
+            response_raw = conn.recv_bytes()
+    except _connection_error_types() as exc:
+        raise IPCConnectionError("IPC connection failed") from exc
     payload = _parse_json_payload(response_raw)
     if payload is None:
         raise ValueError("Invalid IPC response")

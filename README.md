@@ -194,6 +194,15 @@ python -m gismo.cli.main ipc requeue-stale --older-than-minutes 10 --limit 25
 python -m gismo.cli.main ipc run-show <RUN_ID>
 ```
 
+Local supervisor (IPC + daemon in one terminal):
+
+```bash
+export GISMO_IPC_TOKEN="your-token"
+python -m gismo.cli.main supervise up --db .gismo/state.db
+python -m gismo.cli.main supervise status --db .gismo/state.db
+python -m gismo.cli.main supervise down --db .gismo/state.db
+```
+
 Install the Windows Task Scheduler entry for an always-on daemon:
 
 ```bash

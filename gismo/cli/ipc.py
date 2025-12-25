@@ -166,6 +166,9 @@ def handle_ipc_request(
             data = _serialize_queue_stats(stats)
             data["db_path"] = state_store.db_path
             return IPCResponse(True, request_id, data, None).to_dict()
+        if action == "ping":
+            data = {"status": "ok"}
+            return IPCResponse(True, request_id, data, None).to_dict()
         if action == "daemon_status":
             data = {"paused": state_store.get_daemon_paused()}
             return IPCResponse(True, request_id, data, None).to_dict()

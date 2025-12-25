@@ -30,9 +30,17 @@ class StateStore:
         connection.row_factory = sqlite3.Row
         return connection
 
+    @contextmanager
+    def _connection(self) -> Iterable[sqlite3.Connection]:
+        connection = self._connect()
+        try:
+            yield connection
+        finally:
+            connection.close()
+
     def _init_db(self) -> None:
         Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
-        with self._connect() as connection:
+        with self._connection() as connection:
             cursor = connection.cursor()
             cursor.execute(
                 """
@@ -184,7 +192,7 @@ class StateStore:
 
     def create_run(self, label: str, metadata: Optional[Dict[str, Any]] = None) -> Run:
         run = Run(label=label, metadata_json=metadata or {})
-        with self._connect() as connection:
+        with self._connection() as connection:
             connection.execute(
                 "INSERT INTO runs (id, created_at, label, metadata_json) VALUES (?, ?, ?, ?)",
                 (
@@ -216,7 +224,7 @@ class StateStore:
             idempotency_key=idempotency_key,
             input_hash=input_hash,
         )
-        with self._connect() as connection:
+        with self._connection() as connection:
             connection.execute(
                 """
                 INSERT INTO tasks (
@@ -249,7 +257,7 @@ class StateStore:
 
     def update_task(self, task: Task, connection: Optional[sqlite3.Connection] = None) -> None:
         if connection is None:
-            with self._connect() as connection:
+            with self._connection() as connection:
                 self.update_task(task, connection=connection)
                 connection.commit()
                 return
@@ -281,7 +289,7 @@ class StateStore:
         connection: Optional[sqlite3.Connection] = None,
     ) -> None:
         if connection is None:
-            with self._connect() as connection:
+            with self._connection() as connection:
                 self.record_tool_call(tool_call, connection=connection)
                 connection.commit()
                 return
@@ -314,7 +322,7 @@ class StateStore:
         connection: Optional[sqlite3.Connection] = None,
     ) -> None:
         if connection is None:
-            with self._connect() as connection:
+            with self._connection() as connection:
                 self.update_tool_call(tool_call, connection=connection)
                 connection.commit()
                 return
@@ -335,7 +343,7 @@ class StateStore:
         )
 
     def list_tasks(self, run_id: str) -> Iterable[Task]:
-        with self._connect() as connection:
+        with self._connection() as connection:
             rows = connection.execute(
                 "SELECT * FROM tasks WHERE run_id = ? ORDER BY created_at",
                 (run_id,),
@@ -346,7 +354,7 @@ class StateStore:
         if not task_ids:
             return []
         placeholders = ",".join("?" for _ in task_ids)
-        with self._connect() as connection:
+        with self._connection() as connection:
             rows = connection.execute(
                 f"SELECT * FROM tasks WHERE id IN ({placeholders})",
                 tuple(task_ids),
@@ -354,7 +362,7 @@ class StateStore:
         return [self._row_to_task(row) for row in rows]
 
     def list_tool_calls(self, run_id: str) -> Iterable[ToolCall]:
-        with self._connect() as connection:
+        with self._connection() as connection:
             rows = connection.execute(
                 "SELECT * FROM tool_calls WHERE run_id = ? ORDER BY started_at",
                 (run_id,),
@@ -362,7 +370,7 @@ class StateStore:
         return [self._row_to_tool_call(row) for row in rows]
 
     def list_tool_calls_for_task(self, task_id: str) -> Iterable[ToolCall]:
-        with self._connect() as connection:
+        with self._connection() as connection:
             rows = connection.execute(
                 "SELECT * FROM tool_calls WHERE task_id = ? ORDER BY started_at",
                 (task_id,),
@@ -370,7 +378,7 @@ class StateStore:
         return [self._row_to_tool_call(row) for row in rows]
 
     def get_run(self, run_id: str) -> Optional[Run]:
-        with self._connect() as connection:
+        with self._connection() as connection:
             row = connection.execute(
                 "SELECT * FROM runs WHERE id = ?",
                 (run_id,),
@@ -392,7 +400,7 @@ class StateStore:
             run_id=run_id,
             max_attempts=max_attempts,
         )
-        with self._connect() as connection:
+        with self._connection() as connection:
             connection.execute(
                 """
                 INSERT INTO queue_items (
@@ -466,7 +474,7 @@ class StateStore:
 
     def mark_queue_item_succeeded(self, item_id: str) -> None:
         now = _utc_now().isoformat()
-        with self._connect() as connection:
+        with self._connection() as connection:
             connection.execute(
                 """
                 UPDATE queue_items
@@ -483,7 +491,7 @@ class StateStore:
             return
         now = _utc_now().isoformat()
         if retryable and item.attempt_count < item.max_attempts:
-            with self._connect() as connection:
+            with self._connection() as connection:
                 connection.execute(
                     """
                     UPDATE queue_items
@@ -501,7 +509,7 @@ class StateStore:
                 )
                 connection.commit()
             return
-        with self._connect() as connection:
+        with self._connection() as connection:
             connection.execute(
                 """
                 UPDATE queue_items
@@ -515,7 +523,7 @@ class StateStore:
     def requeue_stale_in_progress(self, older_than_seconds: int = 600) -> int:
         threshold = _utc_now().timestamp() - older_than_seconds
         updated = 0
-        with self._connect() as connection:
+        with self._connection() as connection:
             rows = connection.execute(
                 """
                 SELECT * FROM queue_items
@@ -566,7 +574,7 @@ class StateStore:
         return updated
 
     def get_queue_item(self, item_id: str) -> Optional[QueueItem]:
-        with self._connect() as connection:
+        with self._connection() as connection:
             row = connection.execute(
                 "SELECT * FROM queue_items WHERE id = ?",
                 (item_id,),
@@ -585,7 +593,7 @@ class StateStore:
         if not value:
             return []
 
-        with self._connect() as connection:
+        with self._connection() as connection:
             exact = connection.execute(
                 "SELECT id FROM queue_items WHERE id = ?",
                 (value,),
@@ -602,7 +610,7 @@ class StateStore:
 
     def queue_stats(self) -> Dict[str, Any]:
         """Return summary statistics for queue_items."""
-        with self._connect() as connection:
+        with self._connection() as connection:
             rows = connection.execute(
                 "SELECT status, COUNT(*) AS count FROM queue_items GROUP BY status"
             ).fetchall()
@@ -682,12 +690,12 @@ class StateStore:
             ORDER BY created_at {order}
             LIMIT ?
         """
-        with self._connect() as connection:
+        with self._connection() as connection:
             rows = connection.execute(sql, (*params, limit)).fetchall()
         return [self._row_to_queue_item(row) for row in rows]
 
     def get_latest_run(self) -> Optional[Run]:
-        with self._connect() as connection:
+        with self._connection() as connection:
             row = connection.execute(
                 "SELECT * FROM runs ORDER BY created_at DESC LIMIT 1",
             ).fetchone()
@@ -702,7 +710,7 @@ class StateStore:
     ) -> Optional[Task]:
         if not idempotency_key:
             return None
-        with self._connect() as connection:
+        with self._connection() as connection:
             row = connection.execute(
                 """
                 SELECT * FROM tasks
@@ -717,7 +725,7 @@ class StateStore:
         return self._row_to_task(row)
 
     def get_task(self, task_id: str) -> Optional[Task]:
-        with self._connect() as connection:
+        with self._connection() as connection:
             row = connection.execute(
                 "SELECT * FROM tasks WHERE id = ?",
                 (task_id,),

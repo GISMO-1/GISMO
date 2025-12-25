@@ -1,6 +1,7 @@
 """Restricted shell tool for safe local execution."""
 from __future__ import annotations
 
+import os
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -46,8 +47,12 @@ class ShellTool(Tool):
         else:
             cwd = resolve_within_base(self._config.base_dir, cwd_input)
 
+        run_command = command
+        if os.name == "nt":
+            run_command = ["cmd", "/c", *command]
+
         result = subprocess.run(
-            command,
+            run_command,
             cwd=str(cwd),
             capture_output=True,
             text=True,

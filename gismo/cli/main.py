@@ -13,7 +13,12 @@ from gismo.cli.operator import (
     parse_command,
     required_tools,
 )
+from gismo.cli.windows_startup import (
+    install_windows_startup_launcher,
+    uninstall_windows_startup_launcher,
+)
 from gismo.cli.windows_tasks import WindowsTaskConfig, install_windows_task, uninstall_windows_task
+from gismo.cli.windows_utils import quote_windows_arg
 from gismo.core.agent import SimpleAgent
 from gismo.core.daemon import run_daemon_loop
 from gismo.core.export import export_latest_run_jsonl, export_run_jsonl
@@ -391,6 +396,33 @@ def run_daemon_uninstall_windows_task(name: str, *, yes: bool) -> None:
     uninstall_windows_task(name)
 
 
+def run_daemon_install_windows_startup(
+    name: str,
+    db_path: str,
+    python_exe: str,
+    *,
+    force: bool,
+) -> None:
+    launcher_path = install_windows_startup_launcher(
+        name=name,
+        db_path=db_path,
+        python_exe=python_exe,
+        force=force,
+    )
+    print(f"Startup launcher: {launcher_path}")
+    python_arg = quote_windows_arg(python_exe)
+    print(
+        "Remove with: "
+        f"{python_arg} -m gismo.cli.main daemon uninstall-windows-startup --name \"{name}\" --yes"
+    )
+
+
+def run_daemon_uninstall_windows_startup(name: str, *, yes: bool) -> None:
+    launcher_path = uninstall_windows_startup_launcher(name, yes=yes)
+    if yes:
+        print(f"Removed startup launcher: {launcher_path}")
+
+
 def _print_operator_summary(state_store: StateStore, run_id: str) -> None:
     print("=== GISMO Operator Summary ===")
     print(f"Run: {run_id}")
@@ -486,6 +518,19 @@ def _handle_daemon_install_windows_task(args: argparse.Namespace) -> None:
 
 def _handle_daemon_uninstall_windows_task(args: argparse.Namespace) -> None:
     run_daemon_uninstall_windows_task(args.name, yes=args.yes)
+
+
+def _handle_daemon_install_windows_startup(args: argparse.Namespace) -> None:
+    run_daemon_install_windows_startup(
+        name=args.name,
+        db_path=args.db_path,
+        python_exe=args.python,
+        force=args.force,
+    )
+
+
+def _handle_daemon_uninstall_windows_startup(args: argparse.Namespace) -> None:
+    run_daemon_uninstall_windows_startup(args.name, yes=args.yes)
 
 
 def _handle_queue_stats(args: argparse.Namespace) -> None:
@@ -853,6 +898,42 @@ def build_parser() -> argparse.ArgumentParser:
         help="Confirm removal (required to delete the task)",
     )
     daemon_uninstall_parser.set_defaults(handler=_handle_daemon_uninstall_windows_task)
+    daemon_install_startup_parser = daemon_subparsers.add_parser(
+        "install-windows-startup",
+        help="Install a Windows Startup folder entry for the daemon",
+        parents=[db_parent],
+    )
+    daemon_install_startup_parser.add_argument(
+        "--name",
+        default="GISMO Daemon",
+        help="Startup launcher base name",
+    )
+    daemon_install_startup_parser.add_argument(
+        "--python",
+        default=sys.executable,
+        help="Python executable to run the daemon",
+    )
+    daemon_install_startup_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Overwrite launcher if it already exists",
+    )
+    daemon_install_startup_parser.set_defaults(handler=_handle_daemon_install_windows_startup)
+    daemon_uninstall_startup_parser = daemon_subparsers.add_parser(
+        "uninstall-windows-startup",
+        help="Remove the Windows Startup folder entry for the daemon",
+    )
+    daemon_uninstall_startup_parser.add_argument(
+        "--name",
+        default="GISMO Daemon",
+        help="Startup launcher base name",
+    )
+    daemon_uninstall_startup_parser.add_argument(
+        "--yes",
+        action="store_true",
+        help="Confirm removal (required to delete the launcher)",
+    )
+    daemon_uninstall_startup_parser.set_defaults(handler=_handle_daemon_uninstall_windows_startup)
 
     queue_parser = subparsers.add_parser(
         "queue",

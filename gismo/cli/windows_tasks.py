@@ -12,6 +12,7 @@ import tempfile
 from typing import Iterable
 from xml.sax.saxutils import escape
 
+from gismo.cli.windows_utils import quote_windows_arg
 
 @dataclass(frozen=True)
 class WindowsTaskConfig:
@@ -139,6 +140,14 @@ def _run_schtasks_create(config: WindowsTaskConfig, task_xml: str) -> None:
     except subprocess.CalledProcessError as exc:
         stderr = exc.stderr.strip() if exc.stderr else ""
         stdout = exc.stdout.strip() if exc.stdout else ""
+        combined = f"{stderr}\n{stdout}".lower()
+        if "access is denied" in combined:
+            print("Task Scheduler install blocked by permissions/policy.", file=sys.stderr)
+            print(
+                "Suggestion: re-run as Administrator or use install-windows-startup.",
+                file=sys.stderr,
+            )
+            return
         if stderr:
             print(f"schtasks.exe stderr:\n{stderr}", file=sys.stderr)
         if stdout:
@@ -165,18 +174,9 @@ def _split_exec_command(command: list[str]) -> tuple[str, str]:
     if not command:
         raise ValueError("Command cannot be empty")
     command_path = command[0]
-    arguments = " ".join(_quote_windows_arg(arg) for arg in command[1:])
+    arguments = " ".join(quote_windows_arg(arg) for arg in command[1:])
     return command_path, arguments
 
 
-def _quote_windows_arg(value: str) -> str:
-    if not value:
-        return "\"\""
-    if any(ch in value for ch in (" ", "\t", "\"")):
-        escaped = value.replace("\"", "\\\"")
-        return f"\"{escaped}\""
-    return value
-
-
 def _format_command(args: Iterable[str]) -> str:
-    return " ".join(_quote_windows_arg(arg) for arg in args)
+    return " ".join(quote_windows_arg(arg) for arg in args)

@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any, Dict
 
 from gismo.cli.operator import parse_command
-from gismo.core.models import QueueStatus, TaskStatus
+from gismo.core.models import DaemonHeartbeat, QueueStatus, TaskStatus
 from gismo.core.state import StateStore
 
 
@@ -37,6 +37,13 @@ class IPCResponse:
             "data": self.data,
             "error": self.error,
         }
+
+
+@dataclass(frozen=True)
+class DaemonHeartbeatStatus:
+    daemon_running: bool
+    heartbeat_age_seconds: int | None
+    stale_heartbeat: bool
 
 
 LOGGER = logging.getLogger(__name__)
@@ -151,6 +158,30 @@ def _serialize_run_show(state_store: StateStore, run_id: str) -> Dict[str, Any] 
     }
 
 
+def interpret_daemon_heartbeat(
+    heartbeat: DaemonHeartbeat | None,
+    *,
+    now: datetime | None = None,
+    stale_seconds: int = 30,
+) -> DaemonHeartbeatStatus:
+    if heartbeat is None:
+        return DaemonHeartbeatStatus(
+            daemon_running=False,
+            heartbeat_age_seconds=None,
+            stale_heartbeat=False,
+        )
+    current_time = now or datetime.now(timezone.utc)
+    age_seconds = int((current_time - heartbeat.last_seen).total_seconds())
+    if age_seconds < 0:
+        age_seconds = 0
+    stale = age_seconds > stale_seconds
+    return DaemonHeartbeatStatus(
+        daemon_running=not stale,
+        heartbeat_age_seconds=age_seconds,
+        stale_heartbeat=stale,
+    )
+
+
 def handle_ipc_request(
     request: Dict[str, Any],
     expected_token: str,
@@ -188,7 +219,14 @@ def handle_ipc_request(
             data = {"status": "ok"}
             return IPCResponse(True, request_id, data, None).to_dict()
         if action == "daemon_status":
-            data = {"paused": state_store.get_daemon_paused()}
+            heartbeat = state_store.get_daemon_heartbeat()
+            status = interpret_daemon_heartbeat(heartbeat)
+            data = {
+                "paused": state_store.get_daemon_paused(),
+                "daemon_running": status.daemon_running,
+                "heartbeat_age_seconds": status.heartbeat_age_seconds,
+                "stale_heartbeat": status.stale_heartbeat,
+            }
             return IPCResponse(True, request_id, data, None).to_dict()
         if action == "daemon_pause":
             state_store.set_daemon_paused(True)
@@ -451,9 +489,19 @@ def format_enqueue_output(data: Dict[str, Any]) -> str:
 
 
 def format_daemon_status_output(data: Dict[str, Any]) -> str:
-    paused = data.get("paused", False)
-    state = "paused" if paused else "running"
-    return f"Daemon status: {state}"
+    paused = bool(data.get("paused", False))
+    daemon_running = bool(data.get("daemon_running", False))
+    heartbeat_age = data.get("heartbeat_age_seconds")
+    stale = bool(data.get("stale_heartbeat", False))
+    if paused:
+        state = "paused"
+    elif daemon_running:
+        state = "running"
+    else:
+        state = "stopped"
+    heartbeat = f"{heartbeat_age}s" if heartbeat_age is not None else "unknown"
+    stale_note = " (stale)" if stale else ""
+    return f"Daemon status: {state} (heartbeat_age={heartbeat}{stale_note})"
 
 
 def format_daemon_pause_output(data: Dict[str, Any]) -> str:

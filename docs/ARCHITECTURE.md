@@ -151,6 +151,16 @@ State is **explicit and authoritative**.
 
 ---
 
+### Daemon Heartbeat
+
+The daemon persists a **heartbeat** row in SQLite at a fixed interval.
+
+* Captures the daemon PID, start time, and last-seen timestamp
+* Serves as the authoritative health signal for status checks
+* Complements PID files, which are best-effort metadata
+
+---
+
 ## Execution Model
 
 ### Task Graph Scheduling Rules

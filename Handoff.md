@@ -41,6 +41,8 @@
 - Derived Windows IPC pipe names from the database path and aligned supervise/IPC client discovery.
 - Added Windows IPC endpoint unit coverage and supervise db-path probe validation.
 - Hardened IPC accept shutdown handling with Windows-specific error guards and coverage tests.
+- Added daemon heartbeat persistence, IPC status enrichment, and supervise health interpretation.
+- Documented heartbeat status semantics and operator guidance.
 
 ## Next Steps
 - Validate IPC CLI db flag usage on Windows.
@@ -59,6 +61,7 @@
 - Add Windows-specific operational playbooks for Task Scheduler maintenance.
 - Document Windows Startup launcher maintenance steps.
 - Consider IPC integration tests over the real transport layer.
+- Validate heartbeat freshness thresholds on long-running daemons.
 
 ## Tests
 - `python scripts/verify.py`

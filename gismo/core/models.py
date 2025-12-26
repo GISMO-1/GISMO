@@ -136,3 +136,11 @@ class QueueItem:
     attempt_count: int = 0
     max_attempts: int = 3
     last_error: Optional[str] = None
+
+
+@dataclass
+class DaemonHeartbeat:
+    pid: int
+    started_at: datetime
+    last_seen: datetime
+    version: Optional[str] = None

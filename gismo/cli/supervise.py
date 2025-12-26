@@ -284,9 +284,25 @@ def run_supervise_status(
             ipc_cli.ipc_request("daemon_status", {}, token, db_path_for_ipc)
         )
         if daemon_status.ok:
-            paused = bool(daemon_status.data and daemon_status.data.get("paused"))
+            data = daemon_status.data or {}
+            paused = bool(data.get("paused"))
+            daemon_running = bool(data.get("daemon_running", False))
+            heartbeat_age = data.get("heartbeat_age_seconds")
+            stale_heartbeat = bool(data.get("stale_heartbeat", False))
             lines.append(f"daemon_paused: {paused}")
-            lines.append(_fmt_daemon_status(paused))
+            lines.append(f"daemon_running: {daemon_running}")
+            lines.append(
+                f"heartbeat_age_seconds: {heartbeat_age if heartbeat_age is not None else 'unknown'}"
+            )
+            lines.append(f"stale_heartbeat: {stale_heartbeat}")
+            lines.append(
+                _fmt_daemon_status(
+                    paused,
+                    daemon_running=daemon_running,
+                    stale_heartbeat=stale_heartbeat,
+                    pid_running=status.daemon_running,
+                )
+            )
         else:
             lines.append(f"daemon_paused: error ({daemon_status.error})")
             lines.append(f"daemon_status: error ({daemon_status.error})")
@@ -408,10 +424,22 @@ def _fmt_ipc_status(ipc_reachable: bool, pid_running: bool) -> str:
     return f"ipc_status: unknown (unreachable; pid_file_running={pid_running})"
 
 
-def _fmt_daemon_status(paused: bool | None) -> str:
+def _fmt_daemon_status(
+    paused: bool | None,
+    *,
+    daemon_running: bool = False,
+    stale_heartbeat: bool = False,
+    pid_running: bool = False,
+) -> str:
     if paused is None:
         return "daemon_status: unknown (ipc_unreachable)"
-    return "daemon_status: paused" if paused else "daemon_status: running"
+    if stale_heartbeat and pid_running:
+        return "daemon_status: possibly stale/hung"
+    if paused:
+        return "daemon_status: paused"
+    if daemon_running:
+        return "daemon_status: running"
+    return "daemon_status: stopped"
 
 
 def _windows_is_running(pid: int) -> bool:

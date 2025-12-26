@@ -207,7 +207,12 @@ class SuperviseStatusOutputTest(unittest.TestCase):
         daemon_response = {
             "ok": True,
             "request_id": "daemon-1",
-            "data": {"paused": False},
+            "data": {
+                "paused": False,
+                "daemon_running": True,
+                "heartbeat_age_seconds": 5,
+                "stale_heartbeat": False,
+            },
             "error": None,
         }
         with tempfile.TemporaryDirectory() as tempdir:
@@ -227,6 +232,9 @@ class SuperviseStatusOutputTest(unittest.TestCase):
                     )
         output = buffer.getvalue()
         self.assertIn("ipc_status: running (observed: ping)", output)
+        self.assertIn("daemon_running: True", output)
+        self.assertIn("heartbeat_age_seconds: 5", output)
+        self.assertIn("stale_heartbeat: False", output)
         self.assertIn("daemon_status: running", output)
 
     def test_status_reports_paused_from_ipc(self) -> None:
@@ -248,7 +256,12 @@ class SuperviseStatusOutputTest(unittest.TestCase):
         daemon_response = {
             "ok": True,
             "request_id": "daemon-2",
-            "data": {"paused": True},
+            "data": {
+                "paused": True,
+                "daemon_running": True,
+                "heartbeat_age_seconds": 4,
+                "stale_heartbeat": False,
+            },
             "error": None,
         }
         with tempfile.TemporaryDirectory() as tempdir:
@@ -267,6 +280,9 @@ class SuperviseStatusOutputTest(unittest.TestCase):
                         process_ops=FakeProcessOps(),
                     )
         output = buffer.getvalue()
+        self.assertIn("daemon_running: True", output)
+        self.assertIn("heartbeat_age_seconds: 4", output)
+        self.assertIn("stale_heartbeat: False", output)
         self.assertIn("daemon_status: paused", output)
 
 

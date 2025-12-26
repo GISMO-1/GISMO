@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, Optional
 
 from gismo.core.models import (
+    DaemonHeartbeat,
     FailureType,
     QueueItem,
     QueueStatus,
@@ -117,6 +118,17 @@ class StateStore:
                     id INTEGER PRIMARY KEY CHECK (id = 1),
                     paused INTEGER NOT NULL DEFAULT 0,
                     updated_at TEXT NOT NULL
+                )
+                """
+            )
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS daemon_heartbeat (
+                    id INTEGER PRIMARY KEY CHECK (id = 1),
+                    pid INTEGER NOT NULL,
+                    started_at TEXT NOT NULL,
+                    last_seen TEXT NOT NULL,
+                    version TEXT
                 )
                 """
             )
@@ -672,6 +684,50 @@ class StateStore:
                     VALUES (1, ?, ?)
                     """,
                     (1 if paused else 0, now),
+                )
+            connection.commit()
+
+    def get_daemon_heartbeat(self) -> Optional[DaemonHeartbeat]:
+        with self._connection() as connection:
+            row = connection.execute(
+                """
+                SELECT pid, started_at, last_seen, version
+                FROM daemon_heartbeat
+                WHERE id = 1
+                """
+            ).fetchone()
+        if row is None:
+            return None
+        return DaemonHeartbeat(
+            pid=int(row["pid"]),
+            started_at=_parse_dt(row["started_at"]),
+            last_seen=_parse_dt(row["last_seen"]),
+            version=row["version"],
+        )
+
+    def set_daemon_heartbeat(
+        self,
+        pid: int,
+        started_at: datetime,
+        last_seen: datetime,
+        version: str | None,
+    ) -> None:
+        with self._connection() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE daemon_heartbeat
+                SET pid = ?, started_at = ?, last_seen = ?, version = ?
+                WHERE id = 1
+                """,
+                (pid, started_at.isoformat(), last_seen.isoformat(), version),
+            )
+            if cursor.rowcount == 0:
+                connection.execute(
+                    """
+                    INSERT INTO daemon_heartbeat (id, pid, started_at, last_seen, version)
+                    VALUES (1, ?, ?, ?, ?)
+                    """,
+                    (pid, started_at.isoformat(), last_seen.isoformat(), version),
                 )
             connection.commit()
 

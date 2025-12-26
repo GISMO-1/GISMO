@@ -5,6 +5,8 @@ import signal
 import sqlite3
 import time
 import threading
+import os
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -20,6 +22,7 @@ from gismo.core.toolpacks.shell_tool import ShellConfig, ShellTool
 
 
 RegistryFactory = Callable[[StateStore, PermissionPolicy], ToolRegistry]
+HEARTBEAT_INTERVAL_SECONDS = 10.0
 
 
 def run_daemon_loop(
@@ -31,17 +34,31 @@ def run_daemon_loop(
     repo_root = Path(__file__).resolve().parents[2]
     stop_event = threading.Event()
     _register_shutdown_handlers(stop_event)
-    while not stop_event.is_set():
-        if state.get_daemon_paused():
-            stop_event.wait(sleep_seconds)
-            continue
-        item = state.claim_next_queue_item()
-        if item is None:
-            if once:
-                return
-            stop_event.wait(sleep_seconds)
-            continue
-        _execute_queue_item(state, item, policy_path, repo_root)
+    pid = os.getpid()
+    started_at = datetime.now(timezone.utc)
+    state.set_daemon_heartbeat(pid, started_at, started_at, version=None)
+    heartbeat_thread = _start_heartbeat_thread(
+        state,
+        pid=pid,
+        started_at=started_at,
+        stop_event=stop_event,
+        interval_seconds=HEARTBEAT_INTERVAL_SECONDS,
+    )
+    try:
+        while not stop_event.is_set():
+            if state.get_daemon_paused():
+                stop_event.wait(sleep_seconds)
+                continue
+            item = state.claim_next_queue_item()
+            if item is None:
+                if once:
+                    break
+                stop_event.wait(sleep_seconds)
+                continue
+            _execute_queue_item(state, item, policy_path, repo_root)
+    finally:
+        stop_event.set()
+        heartbeat_thread.join(timeout=1.0)
 
 
 def _execute_queue_item(
@@ -207,3 +224,21 @@ def _register_shutdown_handlers(stop_event: threading.Event) -> None:
         if sig is None:
             continue
         signal.signal(sig, _handle_signal)
+
+
+def _start_heartbeat_thread(
+    state: StateStore,
+    *,
+    pid: int,
+    started_at: datetime,
+    stop_event: threading.Event,
+    interval_seconds: float,
+) -> threading.Thread:
+    def _runner() -> None:
+        while not stop_event.wait(interval_seconds):
+            now = datetime.now(timezone.utc)
+            state.set_daemon_heartbeat(pid, started_at, now, version=None)
+
+    thread = threading.Thread(target=_runner, daemon=True)
+    thread.start()
+    return thread

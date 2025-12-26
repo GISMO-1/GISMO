@@ -1,9 +1,11 @@
 import re
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from unittest import mock
 
 from gismo.cli import ipc as ipc_cli
+from gismo.core.models import DaemonHeartbeat
 from gismo.core.state import StateStore
 
 
@@ -149,6 +151,19 @@ class IpcHandlerTest(unittest.TestCase):
         data = response["data"]
         assert data is not None
         self.assertEqual(data["status"], "ok")
+
+    def test_daemon_heartbeat_marks_stale_when_old(self) -> None:
+        now = datetime.now(timezone.utc)
+        heartbeat = DaemonHeartbeat(
+            pid=999,
+            started_at=now - timedelta(minutes=5),
+            last_seen=now - timedelta(seconds=45),
+            version=None,
+        )
+        status = ipc_cli.interpret_daemon_heartbeat(heartbeat, now=now, stale_seconds=30)
+        self.assertFalse(status.daemon_running)
+        self.assertEqual(status.heartbeat_age_seconds, 45)
+        self.assertTrue(status.stale_heartbeat)
 
 
 class IpcEndpointTest(unittest.TestCase):

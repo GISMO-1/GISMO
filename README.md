@@ -247,6 +247,7 @@ The supervisor reconciles:
 * IPC reachability
 * Daemon state
 * PID metadata (best-effort)
+* Heartbeat freshness (source of truth)
 
 ---
 

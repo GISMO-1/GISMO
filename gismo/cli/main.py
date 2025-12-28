@@ -381,6 +381,7 @@ def run_maintain(
     interval_seconds: float,
     stale_minutes: int,
     once: bool,
+    dry_run: bool,
 ) -> None:
     if stale_minutes < 0:
         raise ValueError("stale_minutes must be >= 0")
@@ -389,8 +390,20 @@ def run_maintain(
     state_store = StateStore(db_path)
 
     def _run_iteration() -> None:
-        summary = run_maintenance_iteration(state_store, stale_minutes=stale_minutes)
-        if summary.requeued_count:
+        summary = run_maintenance_iteration(
+            state_store,
+            stale_minutes=stale_minutes,
+            dry_run=dry_run,
+        )
+        if dry_run:
+            if summary.requeued_ids:
+                print(
+                    "maintain: dry-run would requeue "
+                    f"{len(summary.requeued_ids)} stale items (stale_minutes={stale_minutes})"
+                )
+            else:
+                print(f"maintain: dry-run no stale items (stale_minutes={stale_minutes})")
+        elif summary.requeued_count:
             print(
                 "maintain: requeued "
                 f"{summary.requeued_count} stale items (stale_minutes={stale_minutes})"
@@ -553,6 +566,7 @@ def _handle_maintain(args: argparse.Namespace) -> None:
         interval_seconds=args.interval_seconds,
         stale_minutes=args.stale_minutes,
         once=args.once,
+        dry_run=args.dry_run,
     )
 
 
@@ -782,7 +796,11 @@ def _handle_ipc_serve(args: argparse.Namespace) -> None:
 
 
 def _print_ipc_connection_error() -> None:
-    print("IPC server not running. Start it with: python -m gismo.cli.main ipc serve")
+    print(
+        "IPC server unreachable. Start it with: "
+        "python -m gismo.cli.main ipc serve --db .gismo/state.db "
+        "or run: python -m gismo.cli.main supervise up --db .gismo/state.db"
+    )
     print("Ensure GISMO_IPC_TOKEN matches on server and client.")
 
 
@@ -1083,6 +1101,10 @@ def _handle_supervise_down(_args: argparse.Namespace) -> None:
     supervise_cli.run_supervise_down()
 
 
+def _handle_recover(_args: argparse.Namespace) -> None:
+    supervise_cli.run_supervise_recover()
+
+
 def build_parser() -> argparse.ArgumentParser:
     default_db_path = str(Path(".gismo") / "state.db")
     db_parent = argparse.ArgumentParser(add_help=False)
@@ -1344,6 +1366,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Run a single maintenance iteration and exit",
     )
     maintain_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Report stale items without requeueing",
+    )
+    maintain_parser.add_argument(
         "--interval-seconds",
         type=float,
         default=30.0,
@@ -1398,6 +1425,44 @@ def build_parser() -> argparse.ArgumentParser:
         parents=[db_parent_optional],
     )
     supervise_down_parser.set_defaults(handler=_handle_supervise_down)
+
+    up_alias_parser = subparsers.add_parser(
+        "up",
+        help="Alias for supervise up",
+        parents=[db_parent_optional],
+    )
+    up_alias_parser.add_argument(
+        "--token",
+        default=None,
+        help="IPC auth token (or set GISMO_IPC_TOKEN)",
+    )
+    up_alias_parser.set_defaults(handler=_handle_supervise_up)
+
+    status_alias_parser = subparsers.add_parser(
+        "status",
+        help="Alias for supervise status",
+        parents=[db_parent_optional],
+    )
+    status_alias_parser.add_argument(
+        "--token",
+        default=None,
+        help="IPC auth token (or set GISMO_IPC_TOKEN)",
+    )
+    status_alias_parser.set_defaults(handler=_handle_supervise_status)
+
+    down_alias_parser = subparsers.add_parser(
+        "down",
+        help="Alias for supervise down",
+        parents=[db_parent_optional],
+    )
+    down_alias_parser.set_defaults(handler=_handle_supervise_down)
+
+    recover_parser = subparsers.add_parser(
+        "recover",
+        help="Stop supervised processes and remove stale supervisor state",
+        parents=[db_parent_optional],
+    )
+    recover_parser.set_defaults(handler=_handle_recover)
 
     queue_parser = subparsers.add_parser(
         "queue",

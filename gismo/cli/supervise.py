@@ -156,7 +156,10 @@ def run_supervise_up(
     if existing is not None:
         status = summarize_supervisor_status(existing, process_ops)
         if status.ipc_running or status.daemon_running:
-            print("Supervisor already running.")
+            print(
+                "Supervisor already running "
+                f"(ipc_running={status.ipc_running}, daemon_running={status.daemon_running})."
+            )
             return
         pid_path.unlink(missing_ok=True)
 
@@ -328,6 +331,49 @@ def run_supervise_down(
         _terminate_process(record.daemon_pid, process_ops)
     pid_path.unlink(missing_ok=True)
     print("stopped")
+
+
+def run_supervise_recover(
+    *,
+    pid_path: Path | None = None,
+    process_ops: ProcessOps | None = None,
+) -> None:
+    process_ops = process_ops or DefaultProcessOps()
+    pid_path = pid_path or default_pid_path()
+    if not pid_path.exists():
+        print(f"recover: no supervisor pid file found at {pid_path}")
+        return
+    try:
+        record = load_supervisor_record(pid_path)
+    except ValueError:
+        pid_path.unlink(missing_ok=True)
+        print(f"recover: removed invalid supervisor pid file at {pid_path}")
+        return
+    if record is None:
+        print(f"recover: no supervisor pid file found at {pid_path}")
+        return
+
+    status = summarize_supervisor_status(record, process_ops)
+    if record.ipc_started and record.ipc_pid:
+        if status.ipc_running:
+            _terminate_process(record.ipc_pid, process_ops)
+            print(f"recover: stopped ipc pid {record.ipc_pid}")
+        else:
+            print(f"recover: ipc pid {record.ipc_pid} not running")
+    else:
+        print("recover: no supervised ipc process to stop")
+
+    if record.daemon_started and record.daemon_pid:
+        if status.daemon_running:
+            _terminate_process(record.daemon_pid, process_ops)
+            print(f"recover: stopped daemon pid {record.daemon_pid}")
+        else:
+            print(f"recover: daemon pid {record.daemon_pid} not running")
+    else:
+        print("recover: no supervised daemon process to stop")
+
+    pid_path.unlink(missing_ok=True)
+    print(f"recover: removed supervisor pid file at {pid_path}")
 
 
 def _terminate_process(pid: int, process_ops: ProcessOps, timeout_seconds: float = 5.0) -> None:

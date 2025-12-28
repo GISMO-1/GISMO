@@ -333,8 +333,8 @@ def serve_ipc(db_path: str, token: str) -> None:
         print(
             "IPC listener failed to bind. "
             f"Address={endpoint.address}. "
-            "If a stale IPC server or pipe collision exists, run "
-            "`python -m gismo.cli.main supervise down` and retry."
+            "Another IPC server may already be running or a stale pipe exists. "
+            "Run `python -m gismo.cli.main recover` and retry."
         )
         raise SystemExit(1) from None
     state_store = StateStore(db_path)

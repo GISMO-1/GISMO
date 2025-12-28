@@ -192,11 +192,13 @@ Cancellation requests for in-progress items are best-effort; the daemon checks b
 
 ### Maintenance loop
 
-Requeue stale in-progress queue items with the local maintenance loop:
+Requeue stale in-progress queue items with the local maintenance loop. Use
+`--stale-minutes 0` to treat any in-progress item as stale immediately:
 
 ```bash
 python -m gismo.cli.main maintain --db .gismo/state.db --once
 python -m gismo.cli.main maintain --db .gismo/state.db --interval-seconds 30 --stale-minutes 10
+python -m gismo.cli.main maintain --db .gismo/state.db --once --stale-minutes 0
 ```
 
 ---

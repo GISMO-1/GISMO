@@ -46,6 +46,7 @@
 - Hardened queue reliability with SQLite WAL/busy_timeout, per-item timeouts, retries with backoff, and cancellation support (CLI + IPC) plus new coverage tests.
 - Hardened docs and CLI messaging to use PowerShell-safe placeholders and added Windows guidance.
 - Added a maintenance CLI loop to requeue stale in-progress items, with SQLite audit events and operator docs.
+- Allowed maintain to treat stale-minutes=0 as immediate requeue with updated docs and coverage.
 
 ## Next Steps
 - Validate IPC CLI db flag usage on Windows.
@@ -70,7 +71,6 @@
 
 ## Tests
 - `python scripts/verify.py`
-- `rg -n "<[A-Za-z0-9_-]+>" README.md docs Handoff.md`
 
 ## Notes
 - Validation is Python-only; do not run cargo/npm checks.

@@ -382,8 +382,8 @@ def run_maintain(
     stale_minutes: int,
     once: bool,
 ) -> None:
-    if stale_minutes <= 0:
-        raise ValueError("stale_minutes must be > 0")
+    if stale_minutes < 0:
+        raise ValueError("stale_minutes must be >= 0")
     if interval_seconds <= 0 and not once:
         raise ValueError("interval_seconds must be > 0")
     state_store = StateStore(db_path)
@@ -1353,7 +1353,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--stale-minutes",
         type=int,
         default=10,
-        help="Requeue IN_PROGRESS items older than this many minutes",
+        help="Requeue IN_PROGRESS items older than this many minutes (0 = immediate)",
     )
     maintain_parser.set_defaults(handler=_handle_maintain)
 

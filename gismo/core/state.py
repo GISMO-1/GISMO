@@ -795,8 +795,8 @@ class StateStore:
         *,
         now: datetime | None = None,
     ) -> int:
-        if older_than_seconds <= 0:
-            raise ValueError("older_than_seconds must be > 0")
+        if older_than_seconds < 0:
+            raise ValueError("older_than_seconds must be >= 0")
         if limit is not None and limit <= 0:
             raise ValueError("limit must be > 0")
         current_time = now or _utc_now()
@@ -863,8 +863,8 @@ class StateStore:
         *,
         now: datetime | None = None,
     ) -> list[str]:
-        if older_than_seconds <= 0:
-            raise ValueError("older_than_seconds must be > 0")
+        if older_than_seconds < 0:
+            raise ValueError("older_than_seconds must be >= 0")
         if limit is not None and limit <= 0:
             raise ValueError("limit must be > 0")
         current_time = now or _utc_now()

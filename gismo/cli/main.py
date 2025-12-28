@@ -1128,7 +1128,7 @@ def build_parser() -> argparse.ArgumentParser:
     export_parser.add_argument(
         "--out",
         default=None,
-        help="Output file path (defaults to exports/<run_id>.jsonl)",
+        help="Output file path (defaults to exports/RUN_ID.jsonl)",
     )
     export_parser.add_argument(
         "--redact",

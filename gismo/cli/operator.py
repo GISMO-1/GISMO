@@ -54,7 +54,7 @@ def parse_command(command: str) -> Dict[str, Any]:
             step_match = re.match(r"(?i)^(echo|note)\s+(.+)$", raw_step)
             if not step_match:
                 raise ValueError(
-                    f"Invalid graph step '{raw_step}'. Expected 'echo <text>' or 'note <text>'."
+                    f"Invalid graph step '{raw_step}'. Expected 'echo TEXT' or 'note TEXT'."
                 )
             verb = step_match.group(1).lower()
             payload = step_match.group(2).strip()

@@ -19,8 +19,8 @@ class MaintenanceSummary:
 
 
 def run_maintenance_iteration(state_store: StateStore, stale_minutes: int) -> MaintenanceSummary:
-    if stale_minutes <= 0:
-        raise ValueError("stale_minutes must be > 0")
+    if stale_minutes < 0:
+        raise ValueError("stale_minutes must be >= 0")
     now = datetime.now(timezone.utc)
     older_than_seconds = stale_minutes * 60
     stale_ids = state_store.list_stale_in_progress_queue_ids(

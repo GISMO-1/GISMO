@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -25,6 +26,7 @@ from gismo.core.agent import SimpleAgent
 from gismo.core.daemon import run_daemon_loop
 from gismo.core.export import export_latest_run_jsonl, export_run_jsonl
 from gismo.core.models import QueueStatus, TaskStatus
+from gismo.core.maintenance import run_maintenance_iteration
 from gismo.core.orchestrator import Orchestrator
 from gismo.core.permissions import PermissionPolicy, load_policy
 from gismo.core.state import StateStore
@@ -373,6 +375,41 @@ def run_daemon(
     )
 
 
+def run_maintain(
+    db_path: str,
+    *,
+    interval_seconds: float,
+    stale_minutes: int,
+    once: bool,
+) -> None:
+    if stale_minutes <= 0:
+        raise ValueError("stale_minutes must be > 0")
+    if interval_seconds <= 0 and not once:
+        raise ValueError("interval_seconds must be > 0")
+    state_store = StateStore(db_path)
+
+    def _run_iteration() -> None:
+        summary = run_maintenance_iteration(state_store, stale_minutes=stale_minutes)
+        if summary.requeued_count:
+            print(
+                "maintain: requeued "
+                f"{summary.requeued_count} stale items (stale_minutes={stale_minutes})"
+            )
+        else:
+            print(f"maintain: no stale items (stale_minutes={stale_minutes})")
+
+    if once:
+        _run_iteration()
+        return
+
+    try:
+        while True:
+            _run_iteration()
+            time.sleep(interval_seconds)
+    except KeyboardInterrupt:
+        print("maintain: stopped")
+
+
 def run_daemon_install_windows_task(
     name: str,
     db_path: str,
@@ -507,6 +544,15 @@ def _handle_daemon(args: argparse.Namespace) -> None:
         sleep_seconds=args.sleep,
         once=args.once,
         requeue_stale_seconds=args.requeue_stale_seconds,
+    )
+
+
+def _handle_maintain(args: argparse.Namespace) -> None:
+    run_maintain(
+        args.db_path,
+        interval_seconds=args.interval_seconds,
+        stale_minutes=args.stale_minutes,
+        once=args.once,
     )
 
 
@@ -1286,6 +1332,30 @@ def build_parser() -> argparse.ArgumentParser:
         help="Confirm removal (required to delete the launcher)",
     )
     daemon_uninstall_startup_parser.set_defaults(handler=_handle_daemon_uninstall_windows_startup)
+
+    maintain_parser = subparsers.add_parser(
+        "maintain",
+        help="Run the queue maintenance loop",
+        parents=[db_parent_optional],
+    )
+    maintain_parser.add_argument(
+        "--once",
+        action="store_true",
+        help="Run a single maintenance iteration and exit",
+    )
+    maintain_parser.add_argument(
+        "--interval-seconds",
+        type=float,
+        default=30.0,
+        help="Sleep interval between maintenance iterations",
+    )
+    maintain_parser.add_argument(
+        "--stale-minutes",
+        type=int,
+        default=10,
+        help="Requeue IN_PROGRESS items older than this many minutes",
+    )
+    maintain_parser.set_defaults(handler=_handle_maintain)
 
     supervise_parser = subparsers.add_parser(
         "supervise",

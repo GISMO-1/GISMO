@@ -190,6 +190,15 @@ python -m gismo.cli.main queue cancel QUEUE_ITEM_ID --db .gismo/state.db
 
 Cancellation requests for in-progress items are best-effort; the daemon checks between steps.
 
+### Maintenance loop
+
+Requeue stale in-progress queue items with the local maintenance loop:
+
+```bash
+python -m gismo.cli.main maintain --db .gismo/state.db --once
+python -m gismo.cli.main maintain --db .gismo/state.db --interval-seconds 30 --stale-minutes 10
+```
+
 ---
 
 ## IPC Control Plane (Local Only)

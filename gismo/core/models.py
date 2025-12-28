@@ -143,6 +143,16 @@ class QueueItem:
 
 
 @dataclass
+class Event:
+    actor: str
+    event_type: str
+    message: str
+    json_payload: Optional[Dict[str, Any]] = None
+    id: str = field(default_factory=lambda: str(uuid4()))
+    ts: datetime = field(default_factory=_utc_now)
+
+
+@dataclass
 class DaemonHeartbeat:
     pid: int
     started_at: datetime

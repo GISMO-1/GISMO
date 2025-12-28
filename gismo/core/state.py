@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, Optional
 
@@ -29,7 +29,18 @@ class StateStore:
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.db_path)
         connection.row_factory = sqlite3.Row
+        self._apply_pragmas(connection)
         return connection
+
+    def _apply_pragmas(self, connection: sqlite3.Connection) -> None:
+        try:
+            connection.execute("PRAGMA journal_mode=WAL")
+        except sqlite3.Error:
+            pass
+        try:
+            connection.execute("PRAGMA busy_timeout = 5000")
+        except sqlite3.Error:
+            pass
 
     @contextmanager
     def _connection(self) -> Iterable[sqlite3.Connection]:
@@ -108,6 +119,10 @@ class StateStore:
                     finished_at TEXT,
                     attempt_count INTEGER NOT NULL DEFAULT 0,
                     max_attempts INTEGER NOT NULL DEFAULT 3,
+                    max_retries INTEGER NOT NULL DEFAULT 3,
+                    next_attempt_at TEXT,
+                    timeout_seconds INTEGER NOT NULL DEFAULT 300,
+                    cancel_requested INTEGER NOT NULL DEFAULT 0,
                     last_error TEXT
                 )
                 """
@@ -182,6 +197,25 @@ class StateStore:
             "max_attempts",
             "INTEGER NOT NULL DEFAULT 3",
         )
+        self._ensure_column(
+            connection,
+            "queue_items",
+            "max_retries",
+            "INTEGER NOT NULL DEFAULT 3",
+        )
+        self._ensure_column(connection, "queue_items", "next_attempt_at", "TEXT")
+        self._ensure_column(
+            connection,
+            "queue_items",
+            "timeout_seconds",
+            "INTEGER NOT NULL DEFAULT 300",
+        )
+        self._ensure_column(
+            connection,
+            "queue_items",
+            "cancel_requested",
+            "INTEGER NOT NULL DEFAULT 0",
+        )
         self._ensure_column(connection, "queue_items", "last_error", "TEXT")
         self._ensure_column(connection, "queue_items", "started_at", "TEXT")
         self._ensure_column(connection, "queue_items", "finished_at", "TEXT")
@@ -190,6 +224,21 @@ class StateStore:
         self._ensure_column(connection, "queue_items", "status", "TEXT NOT NULL")
         self._ensure_column(connection, "queue_items", "created_at", "TEXT NOT NULL")
         self._ensure_column(connection, "queue_items", "updated_at", "TEXT NOT NULL")
+        self._sync_queue_retry_columns(connection)
+
+    def _sync_queue_retry_columns(self, connection: sqlite3.Connection) -> None:
+        columns = {
+            row["name"]
+            for row in connection.execute("PRAGMA table_info(queue_items)").fetchall()
+        }
+        if "max_attempts" in columns and "max_retries" in columns:
+            connection.execute(
+                """
+                UPDATE queue_items
+                SET max_retries = max_attempts
+                WHERE max_attempts IS NOT NULL
+                """
+            )
 
     def _ensure_column(
         self,
@@ -419,22 +468,29 @@ class StateStore:
         self,
         command_text: str,
         run_id: Optional[str] = None,
-        max_attempts: int = 3,
+        max_retries: int = 3,
+        timeout_seconds: int = 300,
     ) -> QueueItem:
         if not command_text or not command_text.strip():
             raise ValueError("command_text must be a non-empty string")
+        if max_retries < 0:
+            raise ValueError("max_retries must be >= 0")
+        if timeout_seconds <= 0:
+            raise ValueError("timeout_seconds must be > 0")
         item = QueueItem(
             command_text=command_text.strip(),
             run_id=run_id,
-            max_attempts=max_attempts,
+            max_retries=max_retries,
+            timeout_seconds=timeout_seconds,
         )
         with self._connection() as connection:
             connection.execute(
                 """
                 INSERT INTO queue_items (
                     id, run_id, command_text, status, created_at, updated_at,
-                    started_at, finished_at, attempt_count, max_attempts, last_error
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    started_at, finished_at, attempt_count, max_attempts, max_retries,
+                    next_attempt_at, timeout_seconds, cancel_requested, last_error
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     item.id,
@@ -446,7 +502,11 @@ class StateStore:
                     item.started_at.isoformat() if item.started_at else None,
                     item.finished_at.isoformat() if item.finished_at else None,
                     item.attempt_count,
-                    item.max_attempts,
+                    item.max_retries,
+                    item.max_retries,
+                    item.next_attempt_at.isoformat() if item.next_attempt_at else None,
+                    item.timeout_seconds,
+                    1 if item.cancel_requested else 0,
                     item.last_error,
                 ),
             )
@@ -458,24 +518,26 @@ class StateStore:
         connection.row_factory = sqlite3.Row
         try:
             connection.execute("BEGIN IMMEDIATE")
+            now = _utc_now().isoformat()
             row = connection.execute(
                 """
                 SELECT * FROM queue_items
                 WHERE status = ?
+                  AND cancel_requested = 0
+                  AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
                 ORDER BY created_at
                 LIMIT 1
                 """,
-                (QueueStatus.QUEUED.value,),
+                (QueueStatus.QUEUED.value, now),
             ).fetchone()
             if row is None:
                 connection.commit()
                 return None
-            now = _utc_now().isoformat()
             updated = connection.execute(
                 """
                 UPDATE queue_items
-                SET status = ?, started_at = ?, updated_at = ?
-                WHERE id = ? AND status = ?
+                SET status = ?, started_at = ?, updated_at = ?, finished_at = NULL
+                WHERE id = ? AND status = ? AND cancel_requested = 0
                 """,
                 (
                     QueueStatus.IN_PROGRESS.value,
@@ -506,7 +568,7 @@ class StateStore:
             connection.execute(
                 """
                 UPDATE queue_items
-                SET status = ?, updated_at = ?, finished_at = ?
+                SET status = ?, updated_at = ?, finished_at = ?, next_attempt_at = NULL
                 WHERE id = ?
                 """,
                 (QueueStatus.SUCCEEDED.value, now, now, item_id),
@@ -518,13 +580,14 @@ class StateStore:
         if item is None:
             return
         now = _utc_now().isoformat()
-        if retryable and item.attempt_count < item.max_attempts:
+        if retryable and item.attempt_count < item.max_retries:
+            next_attempt = _utc_now() + _retry_backoff(item.attempt_count + 1)
             with self._connection() as connection:
                 connection.execute(
                     """
                     UPDATE queue_items
                     SET status = ?, updated_at = ?, attempt_count = ?, last_error = ?,
-                        started_at = NULL
+                        started_at = NULL, finished_at = ?, next_attempt_at = ?
                     WHERE id = ?
                     """,
                     (
@@ -532,6 +595,8 @@ class StateStore:
                         now,
                         item.attempt_count + 1,
                         error,
+                        now,
+                        next_attempt.isoformat(),
                         item_id,
                     ),
                 )
@@ -541,12 +606,65 @@ class StateStore:
             connection.execute(
                 """
                 UPDATE queue_items
-                SET status = ?, updated_at = ?, finished_at = ?, last_error = ?
+                SET status = ?, updated_at = ?, finished_at = ?, last_error = ?,
+                    next_attempt_at = NULL
                 WHERE id = ?
                 """,
                 (QueueStatus.FAILED.value, now, now, error, item_id),
             )
             connection.commit()
+
+    def mark_queue_item_cancelled(self, item_id: str, reason: str | None = None) -> None:
+        now = _utc_now().isoformat()
+        with self._connection() as connection:
+            connection.execute(
+                """
+                UPDATE queue_items
+                SET status = ?, updated_at = ?, finished_at = ?, last_error = ?,
+                    cancel_requested = 1, next_attempt_at = NULL
+                WHERE id = ?
+                """,
+                (QueueStatus.CANCELLED.value, now, now, reason, item_id),
+            )
+            connection.commit()
+
+    def request_queue_item_cancel(self, item_id: str) -> Optional[QueueItem]:
+        item = self.get_queue_item(item_id)
+        if item is None:
+            return None
+        now = _utc_now().isoformat()
+        if item.status in {QueueStatus.SUCCEEDED, QueueStatus.FAILED, QueueStatus.CANCELLED}:
+            return item
+        if item.status == QueueStatus.QUEUED:
+            with self._connection() as connection:
+                connection.execute(
+                    """
+                    UPDATE queue_items
+                    SET status = ?, updated_at = ?, finished_at = ?, last_error = ?,
+                        cancel_requested = 1, next_attempt_at = NULL
+                    WHERE id = ?
+                    """,
+                    (
+                        QueueStatus.CANCELLED.value,
+                        now,
+                        now,
+                        "Cancellation requested before execution.",
+                        item_id,
+                    ),
+                )
+                connection.commit()
+            return self.get_queue_item(item_id)
+        with self._connection() as connection:
+            connection.execute(
+                """
+                UPDATE queue_items
+                SET cancel_requested = 1, updated_at = ?
+                WHERE id = ?
+                """,
+                (now, item_id),
+            )
+            connection.commit()
+        return self.get_queue_item(item_id)
 
     def requeue_stale_in_progress(self, older_than_seconds: int = 600) -> int:
         threshold = _utc_now().timestamp() - older_than_seconds
@@ -565,13 +683,13 @@ class StateStore:
                 if started_at >= threshold:
                     continue
                 attempt_count = row["attempt_count"]
-                max_attempts = row["max_attempts"]
-                if attempt_count < max_attempts:
+                max_retries = row["max_retries"]
+                if attempt_count < max_retries:
                     connection.execute(
                         """
                         UPDATE queue_items
                         SET status = ?, updated_at = ?, attempt_count = ?, last_error = ?,
-                            started_at = NULL
+                            started_at = NULL, next_attempt_at = ?
                         WHERE id = ?
                         """,
                         (
@@ -579,6 +697,7 @@ class StateStore:
                             now,
                             attempt_count + 1,
                             "Requeued stale in-progress item.",
+                            now,
                             row["id"],
                         ),
                     )
@@ -586,14 +705,15 @@ class StateStore:
                     connection.execute(
                         """
                         UPDATE queue_items
-                        SET status = ?, updated_at = ?, finished_at = ?, last_error = ?
+                        SET status = ?, updated_at = ?, finished_at = ?, last_error = ?,
+                            next_attempt_at = NULL
                         WHERE id = ?
                         """,
                         (
                             QueueStatus.FAILED.value,
                             now,
                             now,
-                            "Exceeded max attempts after stale in-progress.",
+                            "Exceeded max retries after stale in-progress.",
                             row["id"],
                         ),
                     )
@@ -630,21 +750,41 @@ class StateStore:
                 started_at = _parse_dt(row["started_at"]).timestamp()
                 if started_at >= threshold:
                     continue
-                connection.execute(
-                    """
-                    UPDATE queue_items
-                    SET status = ?, updated_at = ?, attempt_count = ?, last_error = ?,
-                        started_at = NULL
-                    WHERE id = ?
-                    """,
-                    (
-                        QueueStatus.QUEUED.value,
-                        current_time.isoformat(),
-                        row["attempt_count"] + 1,
-                        "Requeued stale in-progress item.",
-                        row["id"],
-                    ),
-                )
+                attempt_count = row["attempt_count"]
+                max_retries = row["max_retries"]
+                if attempt_count < max_retries:
+                    connection.execute(
+                        """
+                        UPDATE queue_items
+                        SET status = ?, updated_at = ?, attempt_count = ?, last_error = ?,
+                            started_at = NULL, next_attempt_at = ?
+                        WHERE id = ?
+                        """,
+                        (
+                            QueueStatus.QUEUED.value,
+                            current_time.isoformat(),
+                            attempt_count + 1,
+                            "Requeued stale in-progress item.",
+                            current_time.isoformat(),
+                            row["id"],
+                        ),
+                    )
+                else:
+                    connection.execute(
+                        """
+                        UPDATE queue_items
+                        SET status = ?, updated_at = ?, finished_at = ?, last_error = ?,
+                            next_attempt_at = NULL
+                        WHERE id = ?
+                        """,
+                        (
+                            QueueStatus.FAILED.value,
+                            current_time.isoformat(),
+                            current_time.isoformat(),
+                            "Exceeded max retries after stale in-progress.",
+                            row["id"],
+                        ),
+                    )
                 updated += 1
             connection.commit()
         return updated
@@ -955,6 +1095,9 @@ class StateStore:
         return tool_call
 
     def _row_to_queue_item(self, row: sqlite3.Row) -> QueueItem:
+        max_retries = row["max_retries"] if "max_retries" in row.keys() else None
+        if max_retries is None:
+            max_retries = row["max_attempts"]
         return QueueItem(
             id=row["id"],
             run_id=row["run_id"],
@@ -965,7 +1108,14 @@ class StateStore:
             started_at=_parse_dt(row["started_at"]) if row["started_at"] else None,
             finished_at=_parse_dt(row["finished_at"]) if row["finished_at"] else None,
             attempt_count=row["attempt_count"],
-            max_attempts=row["max_attempts"],
+            max_retries=max_retries,
+            next_attempt_at=_parse_dt(row["next_attempt_at"])
+            if row["next_attempt_at"]
+            else None,
+            timeout_seconds=row["timeout_seconds"] if "timeout_seconds" in row.keys() else 300,
+            cancel_requested=bool(row["cancel_requested"])
+            if "cancel_requested" in row.keys()
+            else False,
             last_error=row["last_error"],
         )
 
@@ -976,3 +1126,10 @@ def _parse_dt(value: str) -> datetime:
 
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _retry_backoff(attempt_count: int) -> timedelta:
+    if attempt_count <= 0:
+        return timedelta(seconds=0)
+    backoff_seconds = min(60, 2 ** (attempt_count - 1))
+    return timedelta(seconds=backoff_seconds)

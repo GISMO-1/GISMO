@@ -95,7 +95,13 @@ class CliMainParserTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = str(Path(tmpdir) / "state.db")
 
-            cli_main.run_enqueue(db_path, "echo: systemd", run_id=None, max_attempts=1)
+            cli_main.run_enqueue(
+                db_path,
+                "echo: systemd",
+                run_id=None,
+                max_retries=1,
+                timeout_seconds=300,
+            )
             cli_main.run_daemon(
                 db_path,
                 policy_path,

@@ -43,6 +43,7 @@
 - Hardened IPC accept shutdown handling with Windows-specific error guards and coverage tests.
 - Added daemon heartbeat persistence, IPC status enrichment, and supervise health interpretation.
 - Documented heartbeat status semantics and operator guidance.
+- Hardened queue reliability with SQLite WAL/busy_timeout, per-item timeouts, retries with backoff, and cancellation support (CLI + IPC) plus new coverage tests.
 
 ## Next Steps
 - Validate IPC CLI db flag usage on Windows.
@@ -62,6 +63,7 @@
 - Document Windows Startup launcher maintenance steps.
 - Consider IPC integration tests over the real transport layer.
 - Validate heartbeat freshness thresholds on long-running daemons.
+- Validate queue timeouts, retries, and cancellation flows on Windows PowerShell.
 
 ## Tests
 - `python scripts/verify.py`

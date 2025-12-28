@@ -342,13 +342,15 @@ def run_enqueue(
     command_text: str,
     *,
     run_id: str | None,
-    max_attempts: int,
+    max_retries: int,
+    timeout_seconds: int,
 ) -> None:
     state_store = StateStore(db_path)
     item = state_store.enqueue_command(
         command_text=command_text,
         run_id=run_id,
-        max_attempts=max_attempts,
+        max_retries=max_retries,
+        timeout_seconds=timeout_seconds,
     )
     print(f"Enqueued {item.id} status={item.status.value}")
 
@@ -493,7 +495,8 @@ def _handle_enqueue(args: argparse.Namespace) -> None:
         args.db_path,
         command_text,
         run_id=args.run_id,
-        max_attempts=args.max_attempts,
+        max_retries=args.max_retries,
+        timeout_seconds=args.timeout_seconds,
     )
 
 
@@ -600,7 +603,13 @@ def _handle_queue_list(args: argparse.Namespace) -> None:
                     "started_at": it.started_at.isoformat() if it.started_at else None,
                     "finished_at": it.finished_at.isoformat() if it.finished_at else None,
                     "attempt_count": it.attempt_count,
-                    "max_attempts": it.max_attempts,
+                    "max_attempts": it.max_retries,
+                    "max_retries": it.max_retries,
+                    "next_attempt_at": it.next_attempt_at.isoformat()
+                    if it.next_attempt_at
+                    else None,
+                    "timeout_seconds": it.timeout_seconds,
+                    "cancel_requested": it.cancel_requested,
                     "last_error": it.last_error,
                     "command_text": it.command_text,
                 }
@@ -619,7 +628,7 @@ def _handle_queue_list(args: argparse.Namespace) -> None:
     cmd_width = 200 if args.full else 60
     error_width = 80 if args.full else 30
     for it in items:
-        att = f"{it.attempt_count}/{it.max_attempts}"
+        att = f"{it.attempt_count}/{it.max_retries}"
         last_error = _summarize_value(it.last_error, error_width)
         cmd = it.command_text if args.full else _truncate(it.command_text, cmd_width)
         print(
@@ -662,7 +671,13 @@ def _handle_queue_show(args: argparse.Namespace) -> None:
             "started_at": item.started_at.isoformat() if item.started_at else None,
             "finished_at": item.finished_at.isoformat() if item.finished_at else None,
             "attempt_count": item.attempt_count,
-            "max_attempts": item.max_attempts,
+            "max_attempts": item.max_retries,
+            "max_retries": item.max_retries,
+            "next_attempt_at": item.next_attempt_at.isoformat()
+            if item.next_attempt_at
+            else None,
+            "timeout_seconds": item.timeout_seconds,
+            "cancel_requested": item.cancel_requested,
             "last_error": item.last_error,
             "command_text": item.command_text,
         }
@@ -677,7 +692,7 @@ def _handle_queue_show(args: argparse.Namespace) -> None:
     print(f"Updated:    {_fmt_dt(item.updated_at)}")
     print(f"Started:    {_fmt_dt(item.started_at)}")
     print(f"Finished:   {_fmt_dt(item.finished_at)}")
-    print(f"Attempts:   {item.attempt_count}/{item.max_attempts}")
+    print(f"Attempts:   {item.attempt_count}/{item.max_retries}")
     if item.last_error:
         print("Last error:")
         print(item.last_error)
@@ -701,7 +716,7 @@ def _handle_queue_purge_failed(args: argparse.Namespace) -> None:
     print("-" * len(header))
     cmd_width = 80
     for item in failed_items:
-        att = f"{item.attempt_count}/{item.max_attempts}"
+        att = f"{item.attempt_count}/{item.max_retries}"
         last_error = _summarize_value(item.last_error, 30)
         cmd = _truncate(item.command_text, cmd_width)
         print(
@@ -741,7 +756,8 @@ def _handle_ipc_enqueue(args: argparse.Namespace) -> None:
                 {
                     "command": command_text,
                     "run_id": args.run_id,
-                    "max_attempts": args.max_attempts,
+                    "max_retries": args.max_retries,
+                    "timeout_seconds": args.timeout_seconds,
                 },
                 token,
                 getattr(args, "db_path", None),
@@ -757,6 +773,50 @@ def _handle_ipc_enqueue(args: argparse.Namespace) -> None:
             print(f"IPC error: {response.error or 'unknown error'}")
         raise SystemExit(2)
     print(ipc_cli.format_enqueue_output(response.data or {}))
+
+
+def _handle_queue_cancel(args: argparse.Namespace) -> None:
+    state_store = StateStore(args.db_path)
+    item = state_store.request_queue_item_cancel(args.id)
+    if item is None:
+        print(f"Queue item not found: {args.id}")
+        raise SystemExit(2)
+    if item.status == QueueStatus.CANCELLED:
+        print(f"Cancelled queue item {item.id}.")
+        return
+    if item.status == QueueStatus.IN_PROGRESS:
+        print(f"Cancel requested for in-progress queue item {item.id}.")
+        return
+    print(f"Queue item already completed: {item.id} status={item.status.value}.")
+
+
+def _handle_ipc_queue_cancel(args: argparse.Namespace) -> None:
+    try:
+        token = ipc_cli.load_ipc_token(args.token)
+    except ValueError as exc:
+        print(str(exc))
+        raise SystemExit(2) from exc
+    try:
+        response = ipc_cli.parse_ipc_response(
+            ipc_cli.ipc_request(
+                "queue_cancel",
+                {"queue_item_id": args.id},
+                token,
+                getattr(args, "db_path", None),
+            )
+        )
+    except ipc_cli.IPCConnectionError:
+        _print_ipc_connection_error()
+        raise SystemExit(2)
+    if not response.ok:
+        if response.error == "unauthorized":
+            print("IPC unauthorized")
+        elif response.error == "not_found":
+            print(f"Queue item not found: {args.id}")
+        else:
+            print(f"IPC error: {response.error or 'unknown error'}")
+        raise SystemExit(2)
+    print(ipc_cli.format_queue_cancel_output(response.data or {}))
 
 
 def _handle_ipc_ping(args: argparse.Namespace) -> None:
@@ -1089,10 +1149,24 @@ def build_parser() -> argparse.ArgumentParser:
         help="Optional existing run ID to attach tasks to",
     )
     enqueue_parser.add_argument(
-        "--max-attempts",
+        "--retries",
         type=int,
         default=3,
-        help="Maximum attempts for this queue item",
+        dest="max_retries",
+        help="Maximum retries for this queue item",
+    )
+    enqueue_parser.add_argument(
+        "--max-attempts",
+        type=int,
+        dest="max_retries",
+        help="Alias for --retries (maximum attempts for this queue item)",
+    )
+    enqueue_parser.add_argument(
+        "--timeout",
+        type=int,
+        default=300,
+        dest="timeout_seconds",
+        help="Timeout in seconds for this queue item (default: 300)",
     )
     enqueue_parser.add_argument(
         "operator_command",
@@ -1332,6 +1406,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     queue_purge_failed_parser.set_defaults(handler=_handle_queue_purge_failed)
 
+    queue_cancel_parser = queue_subparsers.add_parser(
+        "cancel",
+        help="Request cancellation for a queue item",
+        parents=[db_parent_optional],
+    )
+    queue_cancel_parser.add_argument("id", help="Queue item id")
+    queue_cancel_parser.set_defaults(handler=_handle_queue_cancel)
+
     ipc_parser = subparsers.add_parser(
         "ipc",
         help="Local IPC control plane",
@@ -1368,10 +1450,24 @@ def build_parser() -> argparse.ArgumentParser:
         help="Optional existing run ID to attach tasks to",
     )
     ipc_enqueue_parser.add_argument(
-        "--max-attempts",
+        "--retries",
         type=int,
         default=3,
-        help="Maximum attempts for this queue item",
+        dest="max_retries",
+        help="Maximum retries for this queue item",
+    )
+    ipc_enqueue_parser.add_argument(
+        "--max-attempts",
+        type=int,
+        dest="max_retries",
+        help="Alias for --retries (maximum attempts for this queue item)",
+    )
+    ipc_enqueue_parser.add_argument(
+        "--timeout",
+        type=int,
+        default=300,
+        dest="timeout_seconds",
+        help="Timeout in seconds for this queue item (default: 300)",
     )
     ipc_enqueue_parser.add_argument(
         "operator_command",
@@ -1475,6 +1571,19 @@ def build_parser() -> argparse.ArgumentParser:
         help="IPC auth token (or set GISMO_IPC_TOKEN)",
     )
     ipc_requeue_stale_parser.set_defaults(handler=_handle_ipc_requeue_stale)
+
+    ipc_queue_cancel_parser = ipc_subparsers.add_parser(
+        "queue-cancel",
+        help="Request cancellation for a queue item via IPC",
+        parents=[db_parent_optional],
+    )
+    ipc_queue_cancel_parser.add_argument(
+        "--token",
+        default=None,
+        help="IPC auth token (or set GISMO_IPC_TOKEN)",
+    )
+    ipc_queue_cancel_parser.add_argument("id", help="Queue item id")
+    ipc_queue_cancel_parser.set_defaults(handler=_handle_ipc_queue_cancel)
 
     ipc_run_show_parser = ipc_subparsers.add_parser(
         "run-show",

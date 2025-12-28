@@ -110,6 +110,7 @@ class IpcHandlerTest(unittest.TestCase):
             "daemon_resume",
             "queue_purge_failed",
             "queue_requeue_stale",
+            "queue_cancel",
         ]
         for action in actions:
             with self.subTest(action=action):
@@ -164,6 +165,23 @@ class IpcHandlerTest(unittest.TestCase):
         self.assertFalse(status.daemon_running)
         self.assertEqual(status.heartbeat_age_seconds, 45)
         self.assertTrue(status.stale_heartbeat)
+
+    def test_queue_cancel_updates_status(self) -> None:
+        item = self.state_store.enqueue_command("echo: cancel")
+        response = ipc_cli.handle_ipc_request(
+            {
+                "action": "queue_cancel",
+                "token": self.token,
+                "args": {"queue_item_id": item.id},
+            },
+            expected_token=self.token,
+            state_store=self.state_store,
+        )
+        self.assertTrue(response["ok"])
+        data = response["data"]
+        assert data is not None
+        self.assertEqual(data["queue_item_id"], item.id)
+        self.assertEqual(data["status"], "CANCELLED")
 
 
 class IpcEndpointTest(unittest.TestCase):

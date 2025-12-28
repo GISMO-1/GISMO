@@ -10,6 +10,7 @@ from typing import Any, Dict, Iterable, Optional
 
 from gismo.core.models import (
     DaemonHeartbeat,
+    Event,
     FailureType,
     QueueItem,
     QueueStatus,
@@ -147,6 +148,18 @@ class StateStore:
                 )
                 """
             )
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS events (
+                    id TEXT PRIMARY KEY,
+                    ts TEXT NOT NULL,
+                    actor TEXT NOT NULL,
+                    event_type TEXT NOT NULL,
+                    message TEXT NOT NULL,
+                    json_payload TEXT
+                )
+                """
+            )
             self._ensure_columns(connection)
             cursor.execute(
                 """
@@ -225,6 +238,60 @@ class StateStore:
         self._ensure_column(connection, "queue_items", "created_at", "TEXT NOT NULL")
         self._ensure_column(connection, "queue_items", "updated_at", "TEXT NOT NULL")
         self._sync_queue_retry_columns(connection)
+
+    def record_event(
+        self,
+        actor: str,
+        event_type: str,
+        message: str,
+        json_payload: Optional[Dict[str, Any]] = None,
+        connection: Optional[sqlite3.Connection] = None,
+    ) -> Event:
+        if connection is None:
+            with self._connection() as connection:
+                event = self.record_event(
+                    actor,
+                    event_type,
+                    message,
+                    json_payload,
+                    connection=connection,
+                )
+                connection.commit()
+                return event
+
+        event = Event(
+            actor=actor,
+            event_type=event_type,
+            message=message,
+            json_payload=json_payload,
+        )
+        connection.execute(
+            """
+            INSERT INTO events (id, ts, actor, event_type, message, json_payload)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                event.id,
+                event.ts.isoformat(),
+                event.actor,
+                event.event_type,
+                event.message,
+                json.dumps(event.json_payload)
+                if event.json_payload is not None
+                else None,
+            ),
+        )
+        return event
+
+    def list_events(self, limit: int = 100) -> list[Event]:
+        if limit <= 0:
+            raise ValueError("limit must be > 0")
+        with self._connection() as connection:
+            rows = connection.execute(
+                "SELECT * FROM events ORDER BY ts DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return [self._row_to_event(row) for row in rows]
 
     def _sync_queue_retry_columns(self, connection: sqlite3.Connection) -> None:
         columns = {
@@ -789,6 +856,39 @@ class StateStore:
             connection.commit()
         return updated
 
+    def list_stale_in_progress_queue_ids(
+        self,
+        older_than_seconds: int,
+        limit: int | None = None,
+        *,
+        now: datetime | None = None,
+    ) -> list[str]:
+        if older_than_seconds <= 0:
+            raise ValueError("older_than_seconds must be > 0")
+        if limit is not None and limit <= 0:
+            raise ValueError("limit must be > 0")
+        current_time = now or _utc_now()
+        threshold = current_time.timestamp() - older_than_seconds
+        stale_ids: list[str] = []
+        with self._connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT id, started_at
+                FROM queue_items
+                WHERE status = ? AND started_at IS NOT NULL
+                ORDER BY started_at ASC
+                """,
+                (QueueStatus.IN_PROGRESS.value,),
+            ).fetchall()
+        for row in rows:
+            if limit is not None and len(stale_ids) >= limit:
+                break
+            started_at = _parse_dt(row["started_at"]).timestamp()
+            if started_at >= threshold:
+                continue
+            stale_ids.append(row["id"])
+        return stale_ids
+
     def get_daemon_paused(self) -> bool:
         with self._connection() as connection:
             row = connection.execute(
@@ -1117,6 +1217,16 @@ class StateStore:
             if "cancel_requested" in row.keys()
             else False,
             last_error=row["last_error"],
+        )
+
+    def _row_to_event(self, row: sqlite3.Row) -> Event:
+        return Event(
+            id=row["id"],
+            ts=_parse_dt(row["ts"]),
+            actor=row["actor"],
+            event_type=row["event_type"],
+            message=row["message"],
+            json_payload=json.loads(row["json_payload"]) if row["json_payload"] else None,
         )
 
 

@@ -45,6 +45,7 @@
 - Documented heartbeat status semantics and operator guidance.
 - Hardened queue reliability with SQLite WAL/busy_timeout, per-item timeouts, retries with backoff, and cancellation support (CLI + IPC) plus new coverage tests.
 - Hardened docs and CLI messaging to use PowerShell-safe placeholders and added Windows guidance.
+- Added a maintenance CLI loop to requeue stale in-progress items, with SQLite audit events and operator docs.
 
 ## Next Steps
 - Validate IPC CLI db flag usage on Windows.
@@ -65,6 +66,7 @@
 - Consider IPC integration tests over the real transport layer.
 - Validate heartbeat freshness thresholds on long-running daemons.
 - Validate queue timeouts, retries, and cancellation flows on Windows PowerShell.
+- Validate maintain loop behavior on Windows scheduled runs and verify audit event retention.
 
 ## Tests
 - `python scripts/verify.py`

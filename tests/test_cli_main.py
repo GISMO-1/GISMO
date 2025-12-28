@@ -53,6 +53,14 @@ class CliMainParserTest(unittest.TestCase):
         self.assertIs(args.handler, cli_main._handle_daemon)
         self.assertTrue(args.once)
 
+    def test_maintain_subcommand_routes_to_maintain(self) -> None:
+        parser = cli_main.build_parser()
+        args = parser.parse_args(["maintain", "--once"])
+
+        self.assertEqual(args.command, "maintain")
+        self.assertIs(args.handler, cli_main._handle_maintain)
+        self.assertTrue(args.once)
+
     def test_ipc_db_path_before_command(self) -> None:
         parser = cli_main.build_parser()
         db_path = "custom.db"

@@ -1,6 +1,7 @@
 """Daemon loop for executing queued operator commands."""
 from __future__ import annotations
 
+import concurrent.futures
 import signal
 import sqlite3
 import time
@@ -69,53 +70,119 @@ def _execute_queue_item(
     *,
     registry_factory: Optional[RegistryFactory] = None,
 ) -> None:
+    if _cancel_requested(state, item.id):
+        state.mark_queue_item_cancelled(item.id, "Cancellation requested before execution.")
+        return
+    timeout_seconds = max(1, int(item.timeout_seconds))
     try:
-        policy, plan, normalized = _load_policy_and_plan(policy_path, repo_root, item.command_text)
-        registry = (registry_factory or build_registry)(state, policy)
-        agent = SimpleAgent(registry=registry)
-        orchestrator = Orchestrator(
-            state_store=state,
-            registry=registry,
-            policy=policy,
-            agent=agent,
+        _run_queue_item_with_timeout(
+            state,
+            item,
+            policy_path,
+            repo_root,
+            timeout_seconds=timeout_seconds,
+            registry_factory=registry_factory,
         )
-
-        run_id = _resolve_run_id(state, item, normalized)
-        created_tasks = []
-        previous_task_id = None
-        for index, step in enumerate(plan["steps"]):
-            tool_name = step["tool_name"]
-            tool_input = step["input_json"]
-            idempotency_key = make_idempotency_key(step, normalized, index)
-            depends_on = [previous_task_id] if plan["mode"] == "graph" and previous_task_id else None
-            task = state.create_task(
-                run_id=run_id,
-                title=step["title"],
-                description="Daemon queue step",
-                input_json={"tool": tool_name, "payload": tool_input},
-                depends_on=depends_on,
-                idempotency_key=idempotency_key,
-            )
-            created_tasks.append(task)
-            previous_task_id = task.id
-
-        if plan["mode"] == "single":
-            task = created_tasks[0]
-            result = orchestrator.run_tool(
-                run_id,
-                task,
-                task.input_json["tool"],
-                task.input_json["payload"],
-            )
-            _raise_on_failed_tasks([result])
-        else:
-            results = orchestrator.run_task_graph(run_id)
-            _raise_on_failed_tasks(list(results.values()))
-
-        state.mark_queue_item_succeeded(item.id)
+    except concurrent.futures.TimeoutError:
+        message = f"Task timed out after {timeout_seconds}s"
+        state.mark_queue_item_failed(item.id, message, retryable=True)
     except Exception as exc:  # noqa: BLE001
         retryable = _is_retryable_queue_error(exc)
         state.mark_queue_item_failed(item.id, _safe_error_message(exc), retryable=retryable)
+    else:
+        if _cancel_requested(state, item.id):
+            state.mark_queue_item_cancelled(item.id, "Cancellation requested during execution.")
+            return
+        state.mark_queue_item_succeeded(item.id)
+
+
+def _run_queue_item_with_timeout(
+    state: StateStore,
+    item: QueueItem,
+    policy_path: str | None,
+    repo_root: Path,
+    *,
+    timeout_seconds: int,
+    registry_factory: Optional[RegistryFactory],
+) -> None:
+    errors: list[BaseException] = []
+
+    def _runner() -> None:
+        try:
+            _run_queue_item_plan(
+                state,
+                item,
+                policy_path,
+                repo_root,
+                registry_factory=registry_factory,
+            )
+        except BaseException as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    thread = threading.Thread(target=_runner, daemon=True)
+    thread.start()
+    thread.join(timeout=timeout_seconds)
+    if thread.is_alive():
+        raise concurrent.futures.TimeoutError()
+    if errors:
+        raise errors[0]
+
+
+def _run_queue_item_plan(
+    state: StateStore,
+    item: QueueItem,
+    policy_path: str | None,
+    repo_root: Path,
+    *,
+    registry_factory: Optional[RegistryFactory],
+) -> None:
+    policy, plan, normalized = _load_policy_and_plan(policy_path, repo_root, item.command_text)
+    registry = (registry_factory or build_registry)(state, policy)
+    agent = SimpleAgent(registry=registry)
+    orchestrator = Orchestrator(
+        state_store=state,
+        registry=registry,
+        policy=policy,
+        agent=agent,
+    )
+
+    run_id = _resolve_run_id(state, item, normalized)
+    created_tasks = []
+    previous_task_id = None
+    for index, step in enumerate(plan["steps"]):
+        tool_name = step["tool_name"]
+        tool_input = step["input_json"]
+        idempotency_key = make_idempotency_key(step, normalized, index)
+        depends_on = [previous_task_id] if plan["mode"] == "graph" and previous_task_id else None
+        task = state.create_task(
+            run_id=run_id,
+            title=step["title"],
+            description="Daemon queue step",
+            input_json={"tool": tool_name, "payload": tool_input},
+            depends_on=depends_on,
+            idempotency_key=idempotency_key,
+        )
+        created_tasks.append(task)
+        previous_task_id = task.id
+
+    cancel_check = lambda: _cancel_requested(state, item.id)
+
+    if plan["mode"] == "single":
+        if cancel_check():
+            return
+        task = created_tasks[0]
+        result = orchestrator.run_tool(
+            run_id,
+            task,
+            task.input_json["tool"],
+            task.input_json["payload"],
+        )
+        _raise_on_failed_tasks([result])
+    else:
+        results = orchestrator.run_task_graph(run_id, should_cancel=cancel_check)
+        if cancel_check():
+            return
+        _raise_on_failed_tasks(list(results.values()))
 
 
 def _resolve_run_id(state: StateStore, item: QueueItem, normalized_command: str) -> str:
@@ -174,6 +241,13 @@ def _is_retryable_queue_error(exc: BaseException) -> bool:
 def _safe_error_message(exc: BaseException) -> str:
     message = str(exc)
     return message or exc.__class__.__name__
+
+
+def _cancel_requested(state: StateStore, item_id: str) -> bool:
+    item = state.get_queue_item(item_id)
+    if item is None:
+        return False
+    return bool(item.cancel_requested)
 
 
 def _resolve_default_policy_path(policy_path: str | None, repo_root: Path) -> tuple[str | None, bool]:

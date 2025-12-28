@@ -107,6 +107,35 @@ class StateStoreTest(unittest.TestCase):
             assert updated is not None
             self.assertGreater(updated.last_seen, heartbeat.last_seen)
 
+    def test_sqlite_pragmas_are_applied(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = str(Path(tmpdir) / "state.db")
+            state_store = StateStore(db_path)
+            with state_store._connection() as connection:  # pylint: disable=protected-access
+                journal = connection.execute("PRAGMA journal_mode").fetchone()[0]
+                busy_timeout = connection.execute("PRAGMA busy_timeout").fetchone()[0]
+            self.assertIn(str(journal).lower(), {"wal", "wal2"})
+            self.assertEqual(int(busy_timeout), 5000)
+
+    def test_next_attempt_at_blocks_claim(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = str(Path(tmpdir) / "state.db")
+            state_store = StateStore(db_path)
+            item = state_store.enqueue_command("echo: later")
+            future_time = datetime.now(timezone.utc) + timedelta(minutes=5)
+            with state_store._connection() as connection:  # pylint: disable=protected-access
+                connection.execute(
+                    """
+                    UPDATE queue_items
+                    SET next_attempt_at = ?
+                    WHERE id = ?
+                    """,
+                    (future_time.isoformat(), item.id),
+                )
+                connection.commit()
+            claimed = state_store.claim_next_queue_item()
+            self.assertIsNone(claimed)
+
 
 if __name__ == "__main__":
     unittest.main()

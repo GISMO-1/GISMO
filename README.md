@@ -168,6 +168,7 @@ Enqueue work:
 
 ```bash
 python -m gismo.cli.main enqueue "echo: daemon hello" --db .gismo/state.db
+python -m gismo.cli.main enqueue --timeout 30 --retries 2 "echo: daemon hello" --db .gismo/state.db
 ```
 
 Run the daemon once:
@@ -182,7 +183,10 @@ Inspect the queue:
 python -m gismo.cli.main queue stats --db .gismo/state.db
 python -m gismo.cli.main queue list --db .gismo/state.db
 python -m gismo.cli.main queue show <QUEUE_ITEM_ID> --db .gismo/state.db
+python -m gismo.cli.main queue cancel <QUEUE_ITEM_ID> --db .gismo/state.db
 ```
+
+Cancellation requests for in-progress items are best-effort; the daemon checks between steps.
 
 ---
 
@@ -208,6 +212,8 @@ python -m gismo.cli.main ipc daemon-status --db .gismo/state.db
 python -m gismo.cli.main ipc daemon-pause --db .gismo/state.db
 python -m gismo.cli.main ipc daemon-resume --db .gismo/state.db
 python -m gismo.cli.main ipc enqueue "echo: hello" --db .gismo/state.db
+python -m gismo.cli.main ipc enqueue --timeout 30 --retries 2 "echo: hello" --db .gismo/state.db
+python -m gismo.cli.main ipc queue-cancel <QUEUE_ITEM_ID> --db .gismo/state.db
 ```
 
 ### Windows Note

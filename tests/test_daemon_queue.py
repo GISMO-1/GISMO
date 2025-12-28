@@ -1,5 +1,7 @@
 import tempfile
+import time
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from gismo.core import daemon as daemon_module
@@ -17,6 +19,16 @@ class FlakyEchoTool(Tool):
         self.calls += 1
         if self.calls == 1:
             raise RuntimeError("flaky echo")
+        return {"echo": tool_input}
+
+
+class SlowEchoTool(Tool):
+    def __init__(self, sleep_seconds: float) -> None:
+        super().__init__(name="echo", description="Sleeps before returning")
+        self._sleep_seconds = sleep_seconds
+
+    def run(self, tool_input: dict) -> dict:
+        time.sleep(self._sleep_seconds)
         return {"echo": tool_input}
 
 
@@ -79,7 +91,36 @@ class DaemonQueueTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = str(Path(tmpdir) / "state.db")
             state_store = StateStore(db_path)
-            item = state_store.enqueue_command("echo: retry", max_attempts=3)
+            item = state_store.enqueue_command("echo: retry", max_retries=3)
+
+            original_factory = daemon_module.build_registry
+            try:
+                daemon_module.build_registry = _build_flaky_registry
+                daemon_module.run_daemon_loop(
+                    state_store,
+                    policy_path=self._policy_path(),
+                    sleep_seconds=0.0,
+                    once=True,
+                )
+            finally:
+                daemon_module.build_registry = original_factory
+
+            updated = state_store.get_queue_item(item.id)
+            assert updated is not None
+            self.assertEqual(updated.attempt_count, 1)
+            self.assertEqual(updated.status, QueueStatus.QUEUED)
+            self.assertIsNotNone(updated.next_attempt_at)
+
+            with state_store._connection() as connection:  # pylint: disable=protected-access
+                connection.execute(
+                    """
+                    UPDATE queue_items
+                    SET next_attempt_at = ?
+                    WHERE id = ?
+                    """,
+                    ((datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat(), item.id),
+                )
+                connection.commit()
 
             original_factory = daemon_module.build_registry
             try:
@@ -115,6 +156,53 @@ class DaemonQueueTest(unittest.TestCase):
             assert updated is not None
             self.assertEqual(updated.status, QueueStatus.FAILED)
             self.assertEqual(updated.attempt_count, 0)
+            self.assertIsNone(updated.next_attempt_at)
+
+    def test_timeout_marks_failed_when_no_retries(self) -> None:
+        slow_tool = SlowEchoTool(sleep_seconds=2.0)
+
+        def _build_slow_registry(state_store: StateStore, policy) -> ToolRegistry:
+            registry = ToolRegistry()
+            registry.register(slow_tool)
+            return registry
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = str(Path(tmpdir) / "state.db")
+            state_store = StateStore(db_path)
+            item = state_store.enqueue_command(
+                "echo: slow",
+                max_retries=0,
+                timeout_seconds=1,
+            )
+
+            original_factory = daemon_module.build_registry
+            try:
+                daemon_module.build_registry = _build_slow_registry
+                daemon_module.run_daemon_loop(
+                    state_store,
+                    policy_path=self._policy_path(),
+                    sleep_seconds=0.0,
+                    once=True,
+                )
+            finally:
+                daemon_module.build_registry = original_factory
+
+            updated = state_store.get_queue_item(item.id)
+            assert updated is not None
+            self.assertEqual(updated.status, QueueStatus.FAILED)
+            self.assertIn("Task timed out after 1s", updated.last_error or "")
+            self.assertIsNotNone(updated.finished_at)
+
+    def test_cancel_queued_item(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = str(Path(tmpdir) / "state.db")
+            state_store = StateStore(db_path)
+            item = state_store.enqueue_command("echo: cancel")
+
+            cancelled = state_store.request_queue_item_cancel(item.id)
+            assert cancelled is not None
+            self.assertEqual(cancelled.status, QueueStatus.CANCELLED)
+            self.assertTrue(cancelled.cancel_requested)
 
 
 if __name__ == "__main__":

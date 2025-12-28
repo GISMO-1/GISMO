@@ -131,3 +131,19 @@ def test_queue_purge_failed_dry_run_and_confirm(repo_root: Path, db_path: Path) 
     assert state_store.get_queue_item(failed_item.id) is None
     assert state_store.get_queue_item(queued_item.id) is not None
     assert state_store.get_queue_item(succeeded_item.id) is not None
+
+
+def test_queue_cancel(repo_root: Path, db_path: Path) -> None:
+    state_store = StateStore(str(db_path))
+    item = state_store.enqueue_command("echo: cancel")
+
+    cancel = _run_cli(
+        ["queue", "cancel", "--db", str(db_path), item.id],
+        cwd=repo_root,
+    )
+    assert cancel.returncode == 0, cancel.stderr
+    assert "Cancelled queue item" in cancel.stdout
+
+    updated = state_store.get_queue_item(item.id)
+    assert updated is not None
+    assert updated.status.value == "CANCELLED"

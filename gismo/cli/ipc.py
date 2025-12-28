@@ -202,11 +202,14 @@ def handle_ipc_request(
                 raise ValueError("enqueue requires a command string")
             parse_command(command_text)
             run_id = args.get("run_id")
-            max_attempts = int(args.get("max_attempts", 3))
+            retries_value = args.get("max_retries", args.get("max_attempts", 3))
+            max_retries = int(retries_value)
+            timeout_seconds = int(args.get("timeout_seconds", 300))
             item = state_store.enqueue_command(
                 command_text=command_text,
                 run_id=run_id,
-                max_attempts=max_attempts,
+                max_retries=max_retries,
+                timeout_seconds=timeout_seconds,
             )
             data = {"queue_item_id": item.id, "status": item.status.value}
             return IPCResponse(True, request_id, data, None).to_dict()
@@ -255,6 +258,15 @@ def handle_ipc_request(
                 "older_than_minutes": older_than_minutes,
                 "limit": limit_value,
             }
+            return IPCResponse(True, request_id, data, None).to_dict()
+        if action == "queue_cancel":
+            queue_item_id = str(args.get("queue_item_id") or "").strip()
+            if not queue_item_id:
+                raise ValueError("queue_cancel requires a queue item id")
+            item = state_store.request_queue_item_cancel(queue_item_id)
+            if item is None:
+                return IPCResponse(False, request_id, None, "not_found").to_dict()
+            data = {"queue_item_id": item.id, "status": item.status.value}
             return IPCResponse(True, request_id, data, None).to_dict()
         if action == "run_show":
             run_id = str(args.get("run_id") or "").strip()
@@ -527,6 +539,10 @@ def format_queue_requeue_stale_output(data: Dict[str, Any]) -> str:
         f"Requeued {requeued} stale queue item(s) "
         f"(older_than_minutes={older_than_minutes}, limit={limit})."
     )
+
+
+def format_queue_cancel_output(data: Dict[str, Any]) -> str:
+    return f"Queue item {data['queue_item_id']} status={data['status']}"
 
 
 def format_run_show_output(payload: Dict[str, Any]) -> str:

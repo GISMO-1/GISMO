@@ -39,6 +39,7 @@ class QueueStatus(str, Enum):
     IN_PROGRESS = "IN_PROGRESS"
     SUCCEEDED = "SUCCEEDED"
     FAILED = "FAILED"
+    CANCELLED = "CANCELLED"
 
 
 @dataclass
@@ -134,7 +135,10 @@ class QueueItem:
     started_at: Optional[datetime] = None
     finished_at: Optional[datetime] = None
     attempt_count: int = 0
-    max_attempts: int = 3
+    max_retries: int = 3
+    next_attempt_at: Optional[datetime] = None
+    timeout_seconds: int = 300
+    cancel_requested: bool = False
     last_error: Optional[str] = None
 
 

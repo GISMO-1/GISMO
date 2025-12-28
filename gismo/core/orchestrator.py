@@ -7,7 +7,7 @@ import sqlite3
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Dict, Optional, Tuple, Type
+from typing import Any, Callable, Dict, Optional, Tuple, Type
 
 from gismo.core.agent import Agent
 from gismo.core.models import FailureType, Task, TaskStatus, ToolCall, ToolCallStatus
@@ -115,7 +115,12 @@ class Orchestrator:
 
         return task
 
-    def run_task_graph(self, run_id: str) -> Dict[str, Task]:
+    def run_task_graph(
+        self,
+        run_id: str,
+        *,
+        should_cancel: Optional[Callable[[], bool]] = None,
+    ) -> Dict[str, Task]:
         tasks = {task.id: task for task in self.state_store.list_tasks(run_id)}
         if not tasks:
             return {}
@@ -123,6 +128,13 @@ class Orchestrator:
         while True:
             runnable: list[Task] = []
             pending = [task for task in tasks.values() if task.status == TaskStatus.PENDING]
+            if should_cancel and pending and should_cancel():
+                error = "Cancellation requested."
+                for task in pending:
+                    task.mark_failed(error, FailureType.SYSTEM_ERROR, status_reason=error)
+                    with self.state_store.transaction() as connection:
+                        self.state_store.update_task(task, connection=connection)
+                break
 
             for task in pending:
                 if not task.depends_on:

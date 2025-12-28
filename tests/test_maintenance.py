@@ -33,6 +33,7 @@ def test_run_maintenance_iteration_allows_zero_stale_minutes(tmp_path: Path) -> 
 
     assert summary.stale_minutes == 0
     assert summary.requeued_count == 1
+    assert summary.dry_run is False
     updated = state_store.get_queue_item(item.id)
     assert updated is not None
     assert updated.status == QueueStatus.QUEUED

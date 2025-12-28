@@ -87,6 +87,17 @@ class SuperviseStatusTest(unittest.TestCase):
         self.assertTrue(status.daemon_running)
 
 
+class SuperviseRecoverTest(unittest.TestCase):
+    def test_recover_handles_missing_pid_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            pid_path = Path(tempdir) / "supervise.json"
+            buffer = io.StringIO()
+            with contextlib.redirect_stdout(buffer):
+                supervise_cli.run_supervise_recover(pid_path=pid_path)
+            output = buffer.getvalue().strip()
+            self.assertIn("recover: no supervisor pid file found", output)
+
+
 class SuperviseUpTest(unittest.TestCase):
     def test_ipc_already_running_skips_ipc_spawn(self) -> None:
         process_ops = FakeProcessOps(spawn_processes=[FakeProcess(3001)])

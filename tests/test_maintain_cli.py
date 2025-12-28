@@ -50,7 +50,13 @@ def test_maintain_once_no_stale_items(repo_root: Path, db_path: Path) -> None:
 
     state_store = StateStore(str(db_path))
     events = state_store.list_events()
-    assert events == []
+    assert len(events) == 1
+    event = events[0]
+    assert event.actor == "maintain"
+    assert event.event_type == "maintenance_check"
+    assert event.json_payload is not None
+    assert event.json_payload["requeued_count"] == 0
+    assert event.json_payload["dry_run"] is False
 
 
 def test_maintain_once_requeues_stale_items(repo_root: Path, db_path: Path) -> None:
@@ -124,3 +130,55 @@ def test_maintain_once_stale_minutes_zero(repo_root: Path, db_path: Path) -> Non
     updated = state_store.get_queue_item(item.id)
     assert updated is not None
     assert updated.status == QueueStatus.QUEUED
+
+
+def test_maintain_dry_run_reports_without_requeue(repo_root: Path, db_path: Path) -> None:
+    state_store = StateStore(str(db_path))
+    item = state_store.enqueue_command("echo: stale")
+    stale_start = datetime.now(timezone.utc) - timedelta(minutes=20)
+    with state_store._connection() as connection:  # pylint: disable=protected-access
+        connection.execute(
+            """
+            UPDATE queue_items
+            SET status = ?, started_at = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (
+                QueueStatus.IN_PROGRESS.value,
+                stale_start.isoformat(),
+                stale_start.isoformat(),
+                item.id,
+            ),
+        )
+        connection.commit()
+
+    proc = _run_cli(
+        [
+            "maintain",
+            "--db",
+            str(db_path),
+            "--once",
+            "--stale-minutes",
+            "10",
+            "--dry-run",
+        ],
+        cwd=repo_root,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert (
+        "maintain: dry-run would requeue 1 stale items (stale_minutes=10)"
+        in proc.stdout
+    )
+
+    updated = state_store.get_queue_item(item.id)
+    assert updated is not None
+    assert updated.status == QueueStatus.IN_PROGRESS
+
+    events = state_store.list_events()
+    assert len(events) == 1
+    event = events[0]
+    assert event.actor == "maintain"
+    assert event.event_type == "maintenance_check"
+    assert event.json_payload is not None
+    assert event.json_payload["dry_run"] is True
+    assert event.json_payload["stale_count"] == 1

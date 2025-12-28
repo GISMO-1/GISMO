@@ -164,6 +164,19 @@ python -m gismo.cli.main run show RUN_ID
 
 ---
 
+## Operator Lifecycle
+
+Each operator command has one responsibility:
+
+* `daemon`: executes queued work from the SQLite state store. It does **not** start IPC.
+* `ipc serve`: starts the local control plane for queue/daemon commands. It does **not** execute work.
+* `supervise up`: starts both `ipc serve` and `daemon` together and records their PIDs.
+* `supervise status`: reports PID metadata plus IPC heartbeat health.
+* `supervise down`: stops only the IPC/daemon processes launched by `supervise up`.
+* `maintain`: requeues stale `IN_PROGRESS` queue items; safe to run alongside a daemon.
+
+---
+
 ## Queue & Daemon
 
 Enqueue work:
@@ -193,13 +206,17 @@ Cancellation requests for in-progress items are best-effort; the daemon checks b
 ### Maintenance loop
 
 Requeue stale in-progress queue items with the local maintenance loop. Use
-`--stale-minutes 0` to treat any in-progress item as stale immediately:
+`--stale-minutes 0` to treat any in-progress item as stale immediately. Use
+`--once` for a single iteration and `--dry-run` to report without requeueing:
 
 ```bash
 python -m gismo.cli.main maintain --db .gismo/state.db --once
 python -m gismo.cli.main maintain --db .gismo/state.db --interval-seconds 30 --stale-minutes 10
 python -m gismo.cli.main maintain --db .gismo/state.db --once --stale-minutes 0
+python -m gismo.cli.main maintain --db .gismo/state.db --once --stale-minutes 10 --dry-run
 ```
+
+Each iteration records an audit event (`maintenance_check` or `queue_requeue_stale`).
 
 ---
 
@@ -208,7 +225,7 @@ python -m gismo.cli.main maintain --db .gismo/state.db --once --stale-minutes 0
 Set a token (required):
 
 ```bash
-export GISMO_IPC_TOKEN="your-token"
+$env:GISMO_IPC_TOKEN = "your-token"
 ```
 
 Start the IPC server:
@@ -245,7 +262,7 @@ You **must** use the same `--db` value for:
 Run IPC + daemon together:
 
 ```bash
-export GISMO_IPC_TOKEN="your-token"
+$env:GISMO_IPC_TOKEN = "your-token"
 python -m gismo.cli.main supervise up --db .gismo/state.db
 ```
 
@@ -267,6 +284,20 @@ The supervisor reconciles:
 * Daemon state
 * PID metadata (best-effort)
 * Heartbeat freshness (source of truth)
+
+---
+
+## If things go weird
+
+Check what is running, recover stale supervisor state, and bring the system back up:
+
+```bash
+gismo status
+gismo recover
+gismo up
+```
+
+Ensure `GISMO_IPC_TOKEN` matches for `gismo status` and `gismo up`.
 
 ---
 

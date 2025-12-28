@@ -97,6 +97,28 @@ class CliMainParserTest(unittest.TestCase):
         self.assertEqual(args.supervise_command, "status")
         self.assertIs(args.handler, cli_main._handle_supervise_status)
 
+    def test_supervise_aliases_route_to_handlers(self) -> None:
+        parser = cli_main.build_parser()
+
+        up_args = parser.parse_args(["up", "--token", "token"])
+        self.assertEqual(up_args.command, "up")
+        self.assertIs(up_args.handler, cli_main._handle_supervise_up)
+
+        status_args = parser.parse_args(["status", "--token", "token"])
+        self.assertEqual(status_args.command, "status")
+        self.assertIs(status_args.handler, cli_main._handle_supervise_status)
+
+        down_args = parser.parse_args(["down"])
+        self.assertEqual(down_args.command, "down")
+        self.assertIs(down_args.handler, cli_main._handle_supervise_down)
+
+    def test_recover_routes_to_handler(self) -> None:
+        parser = cli_main.build_parser()
+        args = parser.parse_args(["recover"])
+
+        self.assertEqual(args.command, "recover")
+        self.assertIs(args.handler, cli_main._handle_recover)
+
     def test_enqueue_and_daemon_share_db_path(self) -> None:
         repo_root = Path(__file__).resolve().parents[1]
         policy_path = str(repo_root / "policy" / "readonly.json")
@@ -141,7 +163,9 @@ class CliMainParserTest(unittest.TestCase):
             output = buffer.getvalue().strip().splitlines()
             self.assertEqual(
                 output[0],
-                "IPC server not running. Start it with: python -m gismo.cli.main ipc serve",
+                "IPC server unreachable. Start it with: "
+                "python -m gismo.cli.main ipc serve --db .gismo/state.db "
+                "or run: python -m gismo.cli.main supervise up --db .gismo/state.db",
             )
             self.assertEqual(
                 output[1],

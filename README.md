@@ -156,8 +156,10 @@ python -m gismo.cli.main run "graph: echo A -> note B -> echo C"
 
 Show a run summary:
 
+PowerShell note: `<` and `>` are redirection operators. Replace placeholders without angle brackets (e.g., use `RUN_ID`).
+
 ```bash
-python -m gismo.cli.main run show <RUN_ID>
+python -m gismo.cli.main run show RUN_ID
 ```
 
 ---
@@ -182,8 +184,8 @@ Inspect the queue:
 ```bash
 python -m gismo.cli.main queue stats --db .gismo/state.db
 python -m gismo.cli.main queue list --db .gismo/state.db
-python -m gismo.cli.main queue show <QUEUE_ITEM_ID> --db .gismo/state.db
-python -m gismo.cli.main queue cancel <QUEUE_ITEM_ID> --db .gismo/state.db
+python -m gismo.cli.main queue show QUEUE_ITEM_ID --db .gismo/state.db
+python -m gismo.cli.main queue cancel QUEUE_ITEM_ID --db .gismo/state.db
 ```
 
 Cancellation requests for in-progress items are best-effort; the daemon checks between steps.
@@ -213,7 +215,7 @@ python -m gismo.cli.main ipc daemon-pause --db .gismo/state.db
 python -m gismo.cli.main ipc daemon-resume --db .gismo/state.db
 python -m gismo.cli.main ipc enqueue "echo: hello" --db .gismo/state.db
 python -m gismo.cli.main ipc enqueue --timeout 30 --retries 2 "echo: hello" --db .gismo/state.db
-python -m gismo.cli.main ipc queue-cancel <QUEUE_ITEM_ID> --db .gismo/state.db
+python -m gismo.cli.main ipc queue-cancel QUEUE_ITEM_ID --db .gismo/state.db
 ```
 
 ### Windows Note

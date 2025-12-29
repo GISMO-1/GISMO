@@ -3,21 +3,75 @@ from __future__ import annotations
 
 import json
 import os
+import socket
 import urllib.error
 import urllib.request
+from dataclasses import dataclass
 from typing import Any
 
 
-DEFAULT_HOST = "http://127.0.0.1:11434"
-DEFAULT_MODEL = "phi3:mini"
+DEFAULT_OLLAMA_URL = "http://127.0.0.1:11434"
+DEFAULT_OLLAMA_MODEL = "phi3:mini"
+DEFAULT_OLLAMA_TIMEOUT_S = 120
+
+
+@dataclass(frozen=True)
+class OllamaConfig:
+    url: str
+    model: str
+    timeout_s: int
+
+
+def _coerce_timeout(value: str | None, default: int) -> int:
+    if not value:
+        return default
+    try:
+        timeout = int(value)
+    except ValueError:
+        return default
+    return timeout if timeout > 0 else default
+
+
+def resolve_ollama_url(url: str | None = None) -> str:
+    return (
+        url
+        or os.getenv("GISMO_OLLAMA_URL")
+        or os.getenv("OLLAMA_HOST")
+        or DEFAULT_OLLAMA_URL
+    ).rstrip("/")
 
 
 def resolve_ollama_host(host: str | None = None) -> str:
-    return (host or os.getenv("OLLAMA_HOST") or DEFAULT_HOST).rstrip("/")
+    return resolve_ollama_url(host)
 
 
 def resolve_ollama_model(model: str | None = None) -> str:
-    return model or os.getenv("GISMO_LLM_MODEL") or DEFAULT_MODEL
+    return (
+        model
+        or os.getenv("GISMO_OLLAMA_MODEL")
+        or os.getenv("GISMO_LLM_MODEL")
+        or DEFAULT_OLLAMA_MODEL
+    )
+
+
+def resolve_ollama_timeout(timeout_s: int | None = None) -> int:
+    if timeout_s is not None and timeout_s > 0:
+        return timeout_s
+    env_value = os.getenv("GISMO_OLLAMA_TIMEOUT_S")
+    return _coerce_timeout(env_value, DEFAULT_OLLAMA_TIMEOUT_S)
+
+
+def resolve_ollama_config(
+    *,
+    url: str | None = None,
+    model: str | None = None,
+    timeout_s: int | None = None,
+) -> OllamaConfig:
+    return OllamaConfig(
+        url=resolve_ollama_url(url),
+        model=resolve_ollama_model(model),
+        timeout_s=resolve_ollama_timeout(timeout_s),
+    )
 
 
 def ollama_chat(
@@ -25,14 +79,13 @@ def ollama_chat(
     system: str,
     model: str | None = None,
     host: str | None = None,
-    timeout_s: int = 60,
+    timeout_s: int | None = None,
 ) -> str:
     """Call Ollama chat API and return assistant content."""
-    resolved_host = resolve_ollama_host(host)
-    resolved_model = resolve_ollama_model(model)
-    url = f"{resolved_host}/api/chat"
+    config = resolve_ollama_config(url=host, model=model, timeout_s=timeout_s)
+    url = f"{config.url}/api/chat"
     payload = {
-        "model": resolved_model,
+        "model": config.model,
         "stream": False,
         "messages": [
             {"role": "system", "content": system},
@@ -47,16 +100,17 @@ def ollama_chat(
         method="POST",
     )
     try:
-        with urllib.request.urlopen(request, timeout=timeout_s) as response:
+        with urllib.request.urlopen(request, timeout=config.timeout_s) as response:
             body = response.read().decode("utf-8")
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8") if exc.fp else ""
-        message = f"Ollama error {exc.code} from {resolved_host}. {detail}".strip()
+        message = f"Ollama error {exc.code} from {config.url}. {detail}".strip()
         raise RuntimeError(message) from exc
-    except urllib.error.URLError as exc:
+    except (urllib.error.URLError, socket.timeout, TimeoutError) as exc:
         raise RuntimeError(
-            f"Ollama not running or unreachable at {resolved_host}. "
-            "Start Ollama and ensure the model is pulled."
+            "Ollama request failed (timeout/connection). Verify `ollama ps` and that "
+            f"{config.url} is reachable. Try a smaller model (phi3:mini) or increase "
+            "--timeout-s."
         ) from exc
 
     try:

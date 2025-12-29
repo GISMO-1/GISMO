@@ -175,10 +175,21 @@ python -m gismo.cli.main ask --db .gismo/state.db --enqueue "Queue an echo and a
 python -m gismo.cli.main ask --db .gismo/state.db --enqueue --dry-run "Show what would be enqueued"
 ```
 
+PowerShell-safe env overrides:
+
+```powershell
+$env:GISMO_OLLAMA_MODEL = "phi3:mini"
+$env:GISMO_OLLAMA_TIMEOUT_S = "120"
+$env:GISMO_OLLAMA_URL = "http://127.0.0.1:11434"
+python -m gismo.cli.main ask --db .gismo/state.db --dry-run "Draft a quick plan"
+python -m gismo.cli.main ask --db .gismo/state.db --enqueue "Queue a note and an echo"
+```
+
 Defaults:
 
-* Model: `phi3:mini` (override with `--model` or `GISMO_LLM_MODEL`)
-* Host: `http://127.0.0.1:11434` (override with `--host` or `OLLAMA_HOST`)
+* Model: `phi3:mini` (override with `--model` or `GISMO_OLLAMA_MODEL`)
+* URL: `http://127.0.0.1:11434` (override with `--ollama-url` or `GISMO_OLLAMA_URL`)
+* Timeout: `120s` (override with `--timeout-s` or `GISMO_OLLAMA_TIMEOUT_S`)
 
 Every `ask` call writes an audit event (`llm_plan`) to the state database.
 

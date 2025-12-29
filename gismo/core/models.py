@@ -43,6 +43,7 @@ class QueueStatus(str, Enum):
 
 
 EVENT_TYPE_LLM_PLAN = "llm_plan"
+EVENT_TYPE_ASK_FAILED = "ask_failed"
 
 
 @dataclass

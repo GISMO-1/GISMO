@@ -25,7 +25,7 @@ from gismo.cli.windows_utils import quote_windows_arg
 from gismo.core.agent import SimpleAgent
 from gismo.core.daemon import run_daemon_loop
 from gismo.core.export import export_latest_run_jsonl, export_run_jsonl
-from gismo.core.models import EVENT_TYPE_LLM_PLAN, QueueStatus, TaskStatus
+from gismo.core.models import EVENT_TYPE_ASK_FAILED, EVENT_TYPE_LLM_PLAN, QueueStatus, TaskStatus
 from gismo.core.maintenance import run_maintenance_iteration
 from gismo.core.orchestrator import Orchestrator
 from gismo.core.permissions import PermissionPolicy, load_policy
@@ -33,7 +33,7 @@ from gismo.core.state import StateStore
 from gismo.core.tools import EchoTool, ToolRegistry, WriteNoteTool
 from gismo.core.toolpacks.fs_tools import FileSystemConfig, ListDirTool, ReadFileTool, WriteFileTool
 from gismo.core.toolpacks.shell_tool import ShellConfig, ShellTool
-from gismo.llm.ollama import ollama_chat, resolve_ollama_host, resolve_ollama_model
+from gismo.llm.ollama import ollama_chat, resolve_ollama_config
 from gismo.llm.prompts import build_system_prompt, build_user_prompt
 
 
@@ -65,6 +65,16 @@ def _coerce_str_list(value: object) -> list[str]:
     return [str(value)]
 
 
+def _is_grounded_assumption(text: str) -> bool:
+    lowered = text.strip().lower()
+    return (
+        lowered.startswith("operator requested")
+        or lowered.startswith("user requested")
+        or lowered.startswith("user asked")
+        or lowered.startswith("operator asked")
+    )
+
+
 def _coerce_int(value: object, default: int, minimum: int = 0) -> int:
     try:
         coerced = int(value)
@@ -76,9 +86,17 @@ def _coerce_int(value: object, default: int, minimum: int = 0) -> int:
 
 
 def _normalize_llm_plan(plan: dict, max_actions: int) -> dict:
+    allowed_fields = {"intent", "assumptions", "actions", "notes"}
+    unknown_fields = set(plan.keys()) - allowed_fields
+    if unknown_fields:
+        raise ValueError(
+            "Plan contains unsupported fields: " + ", ".join(sorted(unknown_fields)) + "."
+        )
     intent = plan.get("intent")
     intent_text = intent if isinstance(intent, str) else str(intent) if intent is not None else ""
-    assumptions = _coerce_str_list(plan.get("assumptions"))
+    assumptions = [
+        item for item in _coerce_str_list(plan.get("assumptions")) if _is_grounded_assumption(item)
+    ]
     notes = _coerce_str_list(plan.get("notes"))
     raw_actions = plan.get("actions")
     actions: list[dict[str, object]] = []
@@ -86,6 +104,21 @@ def _normalize_llm_plan(plan: dict, max_actions: int) -> dict:
         for action in raw_actions:
             if not isinstance(action, dict):
                 continue
+            allowed_action_fields = {
+                "type",
+                "command",
+                "timeout_seconds",
+                "retries",
+                "why",
+                "risk",
+            }
+            unknown_action_fields = set(action.keys()) - allowed_action_fields
+            if unknown_action_fields:
+                raise ValueError(
+                    "Action contains unsupported fields: "
+                    + ", ".join(sorted(unknown_action_fields))
+                    + "."
+                )
             action_type = action.get("type")
             action_type_text = (
                 action_type.strip()
@@ -482,32 +515,52 @@ def run_ask(
     *,
     model: str | None,
     host: str | None,
-    timeout_s: int,
+    timeout_s: int | None,
     enqueue: bool,
     dry_run: bool,
     max_actions: int,
 ) -> None:
     if not user_text or not user_text.strip():
         raise ValueError("ask requires a natural language request.")
-    resolved_host = resolve_ollama_host(host)
-    resolved_model = resolve_ollama_model(model)
+    config = resolve_ollama_config(url=host, model=model, timeout_s=timeout_s)
     state_store = StateStore(db_path)
     system_prompt = build_system_prompt()
     user_prompt = build_user_prompt(user_text)
-    raw_response = ollama_chat(
-        user_prompt,
-        system_prompt,
-        model=resolved_model,
-        host=resolved_host,
-        timeout_s=timeout_s,
-    )
+    print(f"LLM: {config.model} url={config.url} timeout={config.timeout_s}s")
+    try:
+        raw_response = ollama_chat(
+            user_prompt,
+            system_prompt,
+            model=config.model,
+            host=config.url,
+            timeout_s=config.timeout_s,
+        )
+    except RuntimeError as exc:
+        payload = {
+            "model": config.model,
+            "host": config.url,
+            "timeout_s": config.timeout_s,
+            "user_text": user_text,
+            "error": _truncate(str(exc), 200),
+            "enqueue": enqueue,
+            "dry_run": dry_run,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+        state_store.record_event(
+            actor="ask",
+            event_type=EVENT_TYPE_ASK_FAILED,
+            message="LLM request failed.",
+            json_payload=payload,
+        )
+        raise
     try:
         parsed = json.loads(raw_response)
     except json.JSONDecodeError as exc:
         print(raw_response, file=sys.stderr)
         payload = {
-            "model": resolved_model,
-            "host": resolved_host,
+            "model": config.model,
+            "host": config.url,
+            "timeout_s": config.timeout_s,
             "user_text": user_text,
             "plan": None,
             "raw_response": raw_response,
@@ -526,8 +579,9 @@ def run_ask(
 
     if not isinstance(parsed, dict):
         payload = {
-            "model": resolved_model,
-            "host": resolved_host,
+            "model": config.model,
+            "host": config.url,
+            "timeout_s": config.timeout_s,
             "user_text": user_text,
             "plan": None,
             "raw_response": raw_response,
@@ -547,8 +601,9 @@ def run_ask(
         plan = _normalize_llm_plan(parsed, max_actions=max_actions)
     except ValueError as exc:
         payload = {
-            "model": resolved_model,
-            "host": resolved_host,
+            "model": config.model,
+            "host": config.url,
+            "timeout_s": config.timeout_s,
             "user_text": user_text,
             "plan": None,
             "raw_response": raw_response,
@@ -566,8 +621,9 @@ def run_ask(
         raise
     _print_llm_plan(plan)
     payload = {
-        "model": resolved_model,
-        "host": resolved_host,
+        "model": config.model,
+        "host": config.url,
+        "timeout_s": config.timeout_s,
         "user_text": user_text,
         "plan": plan,
         "enqueue": enqueue,
@@ -821,8 +877,8 @@ def _handle_ask(args: argparse.Namespace) -> None:
         args.db_path,
         user_text,
         model=args.model,
-        host=args.host,
-        timeout_s=args.timeout,
+        host=args.ollama_url,
+        timeout_s=args.timeout_s,
         enqueue=args.enqueue,
         dry_run=dry_run,
         max_actions=args.max_actions,
@@ -1380,7 +1436,12 @@ def _handle_supervise_down(_args: argparse.Namespace) -> None:
     supervise_cli.run_supervise_down()
 
 
-def _handle_recover(_args: argparse.Namespace) -> None:
+def _handle_recover(args: argparse.Namespace) -> None:
+    try:
+        ipc_cli.load_ipc_token(args.token)
+    except ValueError as exc:
+        print(str(exc))
+        raise SystemExit(2) from exc
     supervise_cli.run_supervise_recover()
 
 
@@ -1530,18 +1591,33 @@ def build_parser() -> argparse.ArgumentParser:
     ask_parser.add_argument(
         "--model",
         default=None,
-        help="Override the local LLM model (default: phi3:mini or GISMO_LLM_MODEL)",
+        help="Override the local LLM model (default: phi3:mini or GISMO_OLLAMA_MODEL)",
+    )
+    ask_parser.add_argument(
+        "--ollama-url",
+        dest="ollama_url",
+        default=None,
+        help="Override the Ollama URL (default: http://127.0.0.1:11434 or GISMO_OLLAMA_URL)",
     )
     ask_parser.add_argument(
         "--host",
+        dest="ollama_url",
         default=None,
-        help="Override the Ollama host URL (default: http://127.0.0.1:11434 or OLLAMA_HOST)",
+        help="Alias for --ollama-url",
+    )
+    ask_parser.add_argument(
+        "--timeout-s",
+        type=int,
+        dest="timeout_s",
+        default=None,
+        help="Timeout in seconds for the LLM call (default: 120 or GISMO_OLLAMA_TIMEOUT_S)",
     )
     ask_parser.add_argument(
         "--timeout",
         type=int,
-        default=60,
-        help="Timeout in seconds for the LLM call (default: 60)",
+        dest="timeout_s",
+        default=None,
+        help="Alias for --timeout-s",
     )
     ask_parser.add_argument(
         "--enqueue",
@@ -1785,6 +1861,11 @@ def build_parser() -> argparse.ArgumentParser:
         "recover",
         help="Stop supervised processes and remove stale supervisor state",
         parents=[db_parent_optional],
+    )
+    recover_parser.add_argument(
+        "--token",
+        default=None,
+        help="IPC auth token (or set GISMO_IPC_TOKEN)",
     )
     recover_parser.set_defaults(handler=_handle_recover)
 

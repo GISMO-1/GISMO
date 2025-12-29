@@ -168,6 +168,7 @@ python -m gismo.cli.main run show RUN_ID
 
 GISMO can ask a local Ollama model to propose a JSON plan. The planner is **dry-run by default** and never executes commands directly.
 Use `--enqueue` to submit validated operator commands to the queue for daemon execution.
+Planner actions always use `type: enqueue`, and `command` is an operator command string like `echo: hello`.
 
 ```bash
 python -m gismo.cli.main ask --db .gismo/state.db "Create a quick echo and note plan"

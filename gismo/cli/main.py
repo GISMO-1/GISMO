@@ -85,6 +85,26 @@ def _coerce_int(value: object, default: int, minimum: int = 0) -> int:
     return coerced
 
 
+def _coerce_action_type_to_command(action_type_text: str) -> str | None:
+    if not action_type_text:
+        return None
+    candidate = action_type_text.strip()
+    if ":" not in candidate:
+        return None
+    lowered = candidate.lower()
+    if not (
+        lowered.startswith("echo:")
+        or lowered.startswith("note:")
+        or lowered.startswith("graph:")
+    ):
+        return None
+    try:
+        parse_command(candidate)
+    except ValueError:
+        return None
+    return candidate
+
+
 def _normalize_llm_plan(plan: dict, max_actions: int) -> dict:
     allowed_fields = {"intent", "assumptions", "actions", "notes"}
     unknown_fields = set(plan.keys()) - allowed_fields
@@ -143,6 +163,14 @@ def _normalize_llm_plan(plan: dict, max_actions: int) -> dict:
             risk_text = risk.strip().lower() if isinstance(risk, str) else ""
             if risk_text not in {"low", "medium", "high"}:
                 risk_text = "medium"
+            if action_type_text != "enqueue":
+                coerced_command = _coerce_action_type_to_command(action_type_text)
+                if coerced_command:
+                    action_type_text = "enqueue"
+                    command_text = coerced_command
+                    timeout_seconds = 30
+                    retries = 0
+                    risk_text = "medium"
             actions.append(
                 {
                     "type": action_type_text,

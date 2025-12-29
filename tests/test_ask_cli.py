@@ -218,6 +218,111 @@ class AskCliTest(unittest.TestCase):
                     _, kwargs = ollama_mock.call_args
                     self.assertEqual(kwargs["timeout_s"], 5)
 
+    def test_ask_coerces_echo_action_type_to_enqueue(self) -> None:
+        response = json.dumps(
+            {
+                "intent": "queue echo",
+                "assumptions": [],
+                "actions": [
+                    {
+                        "type": "echo: hello from GISMO",
+                        "command": "",
+                        "timeout_seconds": 10,
+                        "retries": 2,
+                        "why": "respond",
+                        "risk": "low",
+                    }
+                ],
+                "notes": [],
+            }
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = str(Path(tmpdir) / "state.db")
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "GISMO_OLLAMA_MODEL": "",
+                    "GISMO_OLLAMA_TIMEOUT_S": "",
+                    "GISMO_OLLAMA_URL": "",
+                    "GISMO_LLM_MODEL": "",
+                    "OLLAMA_HOST": "",
+                },
+                clear=False,
+            ):
+                with mock.patch.object(cli_main, "ollama_chat", return_value=response):
+                    cli_main.run_ask(
+                        db_path,
+                        "enqueue an echo",
+                        model=None,
+                        host=None,
+                        timeout_s=None,
+                        enqueue=False,
+                        dry_run=True,
+                        max_actions=10,
+                    )
+            state_store = StateStore(db_path)
+            event = state_store.list_events()[0]
+            payload = event.json_payload
+            assert payload is not None
+            plan = payload["plan"]
+            actions = plan["actions"]
+            self.assertEqual(actions[0]["type"], "enqueue")
+            self.assertEqual(actions[0]["command"], "echo: hello from GISMO")
+            notes = plan["notes"]
+            self.assertFalse(any("Ignored unsupported action types" in note for note in notes))
+
+    def test_ask_unsupported_action_still_reported(self) -> None:
+        response = json.dumps(
+            {
+                "intent": "cleanup",
+                "assumptions": [],
+                "actions": [
+                    {
+                        "type": "delete_files",
+                        "command": "rm -rf /",
+                        "timeout_seconds": 30,
+                        "retries": 0,
+                        "why": "cleanup",
+                        "risk": "high",
+                    }
+                ],
+                "notes": [],
+            }
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = str(Path(tmpdir) / "state.db")
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "GISMO_OLLAMA_MODEL": "",
+                    "GISMO_OLLAMA_TIMEOUT_S": "",
+                    "GISMO_OLLAMA_URL": "",
+                    "GISMO_LLM_MODEL": "",
+                    "OLLAMA_HOST": "",
+                },
+                clear=False,
+            ):
+                with mock.patch.object(cli_main, "ollama_chat", return_value=response):
+                    cli_main.run_ask(
+                        db_path,
+                        "delete files",
+                        model=None,
+                        host=None,
+                        timeout_s=None,
+                        enqueue=False,
+                        dry_run=True,
+                        max_actions=10,
+                    )
+            state_store = StateStore(db_path)
+            event = state_store.list_events()[0]
+            payload = event.json_payload
+            assert payload is not None
+            plan = payload["plan"]
+            self.assertIn(
+                "Ignored unsupported action types: delete_files.",
+                plan["notes"],
+            )
+
     def test_ask_failure_writes_failed_event(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = str(Path(tmpdir) / "state.db")

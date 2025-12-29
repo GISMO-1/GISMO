@@ -15,6 +15,25 @@ Each operator command has a single responsibility:
 - `supervise down`: stops only the IPC/daemon processes launched by `supervise up`.
 - `up`, `status`, `down`: aliases for the matching `supervise` subcommands.
 - `maintain`: requeues stale `IN_PROGRESS` queue items; safe to run alongside a daemon.
+- `ask`: calls a local Ollama model to propose a JSON plan (dry-run by default).
+
+## LLM planner (local)
+
+The `ask` command calls a local Ollama instance on 127.0.0.1:11434 by default and never executes commands directly.
+It returns a plan and, when `--enqueue` is set, validates each `enqueue` action and submits it to the queue.
+
+PowerShell-safe examples:
+
+```bash
+python -m gismo.cli.main ask --db .gismo/state.db "Draft a quick plan"
+python -m gismo.cli.main ask --db .gismo/state.db --enqueue "Queue a note and an echo"
+python -m gismo.cli.main ask --db .gismo/state.db --enqueue --dry-run "Show what would be enqueued"
+```
+
+Defaults:
+
+- Model: `phi3:mini` (override with `--model` or `GISMO_LLM_MODEL`)
+- Host: `http://127.0.0.1:11434` (override with `--host` or `OLLAMA_HOST`)
 
 ## Recovery
 

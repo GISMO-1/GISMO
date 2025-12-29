@@ -45,6 +45,14 @@ class CliMainParserTest(unittest.TestCase):
         self.assertIs(args.handler, cli_main._handle_enqueue)
         self.assertEqual(args.operator_command, ["echo:", "hello"])
 
+    def test_ask_subcommand_routes_to_ask(self) -> None:
+        parser = cli_main.build_parser()
+        args = parser.parse_args(["ask", "draft", "plan"])
+
+        self.assertEqual(args.command, "ask")
+        self.assertIs(args.handler, cli_main._handle_ask)
+        self.assertEqual(args.text, ["draft", "plan"])
+
     def test_daemon_subcommand_routes_to_daemon(self) -> None:
         parser = cli_main.build_parser()
         args = parser.parse_args(["daemon", "--once"])

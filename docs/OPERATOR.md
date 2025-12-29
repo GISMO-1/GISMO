@@ -1,106 +1,254 @@
-# Operator Guide
+# OPERATOR GUIDE — GISMO
 
-## PowerShell placeholder note
+This document is for operators running GISMO day-to-day. It focuses on how to run the system, how to inspect it, how to recover it, and how to keep it safe. This is not a contributor guide and not an architecture deep dive.
 
-PowerShell treats `<` and `>` as redirection operators. When copying commands, replace placeholders without angle brackets (e.g., use `RUN_ID`).
+-------------------------------------------------------------------------------
 
-## Operator lifecycle
+BASIC MENTAL MODEL
 
-Each operator command has a single responsibility:
+GISMO is a local orchestration core.
 
-- `daemon`: executes queued work from the SQLite state store. It does **not** start IPC.
-- `ipc serve`: starts the local control plane for queue/daemon commands. It does **not** execute work.
-- `supervise up`: starts both `ipc serve` and `daemon` together and records their PIDs.
-- `supervise status`: reports PID metadata plus IPC heartbeat health.
-- `supervise down`: stops only the IPC/daemon processes launched by `supervise up`.
-- `up`, `status`, `down`: aliases for the matching `supervise` subcommands.
-- `maintain`: requeues stale `IN_PROGRESS` queue items; safe to run alongside a daemon.
-- `ask`: calls a local Ollama model to propose a JSON plan (dry-run by default).
+- You enqueue work.
+- A daemon executes work.
+- Everything is persisted to SQLite.
+- Policy gates every action.
+- Nothing runs silently.
+- If it did not log, it did not happen.
 
-## Exports
+-------------------------------------------------------------------------------
 
-Exports default to the `exports/` folder next to `.gismo`, derived from `--db`, so the output location is stable across terminals.
+CANONICAL INVOCATION
 
-```bash
-python -m gismo.cli.main export --latest --db .gismo/state.db
-```
+Preferred invocation (always valid):
 
-## LLM planner (local)
+  python -m gismo.cli.main ...
 
-The `ask` command calls a local Ollama instance on 127.0.0.1:11434 by default and never executes commands directly.
-It returns a plan and, when `--enqueue` is set, validates each `enqueue` action and submits it to the queue.
+If installed in editable mode:
 
-PowerShell-safe examples:
+  gismo ...
 
-```bash
-python -m gismo.cli.main ask --db .gismo/state.db "Draft a quick plan"
-python -m gismo.cli.main ask --db .gismo/state.db --enqueue "Queue a note and an echo"
-python -m gismo.cli.main ask --db .gismo/state.db --enqueue --dry-run "Show what would be enqueued"
-```
+-------------------------------------------------------------------------------
 
-PowerShell-safe env overrides:
+STATE & FILE LOCATIONS
 
-```powershell
-$env:GISMO_OLLAMA_MODEL = "phi3:mini"
-$env:GISMO_OLLAMA_TIMEOUT_S = "120"
-$env:GISMO_OLLAMA_URL = "http://127.0.0.1:11434"
-python -m gismo.cli.main ask --db .gismo/state.db --dry-run "Draft a quick plan"
-python -m gismo.cli.main ask --db .gismo/state.db --enqueue "Queue a note and an echo"
-```
+Default state database:
+  .gismo/state.db
 
-Defaults:
+Exports directory:
+  .gismo/exports/
 
-- Model: `phi3:mini` (override with `--model` or `GISMO_OLLAMA_MODEL`)
-- URL: `http://127.0.0.1:11434` (override with `--ollama-url` or `GISMO_OLLAMA_URL`)
-- Timeout: `120s` (override with `--timeout-s` or `GISMO_OLLAMA_TIMEOUT_S`)
+Important:
+- Export paths are anchored to the database location.
+- Exports do NOT depend on your current working directory.
+- If you change --db, exports move with it.
 
-## Recovery
+Example:
+  --db D:\gismo\data\state.db
+  Exports -> D:\gismo\data\exports\
 
-If things get stuck, use the recovery flow (PowerShell-safe examples):
+-------------------------------------------------------------------------------
 
-```bash
-python -m gismo.cli.main status --db .gismo/state.db
-python -m gismo.cli.main recover --db .gismo/state.db
-python -m gismo.cli.main up --db .gismo/state.db
-```
+CORE COMMANDS
 
-`recover` stops supervised IPC/daemon processes (best-effort), removes stale supervisor
-state, and is safe to run repeatedly.
-Ensure `GISMO_IPC_TOKEN` matches for `status` and `up`.
-Set `GISMO_IPC_TOKEN` for `recover` if you omit `--token`.
+RUN A SINGLE COMMAND (IMMEDIATE):
 
-## How status works
+  gismo run "echo:hello world"
 
-GISMO records a daemon heartbeat in SQLite while the daemon is running.
-Status commands use the heartbeat freshness as the **source of truth** for daemon health.
-PID files are best-effort metadata and may go stale without a matching heartbeat.
+- Executes immediately
+- Still audited
+- Does not require daemon
 
-## Maintenance loop
+ENQUEUE A COMMAND:
 
-Use `maintain` to periodically requeue stale `IN_PROGRESS` queue items.
-It is a local-only loop that never contacts the network or invokes an LLM.
-Use `--stale-minutes 0` to treat any in-progress item as stale immediately.
-Use `--once` for a single iteration or omit it to loop on `--interval-seconds`.
-Use `--dry-run` to report what would be requeued without making changes.
+  gismo enqueue "note:remember this"
 
-PowerShell-safe examples:
+- Adds item to durable queue
+- Requires daemon to execute
 
-```bash
-python -m gismo.cli.main maintain --db .gismo/state.db --once
-python -m gismo.cli.main maintain --db .gismo/state.db --interval-seconds 30 --stale-minutes 10
-python -m gismo.cli.main maintain --db .gismo/state.db --once --stale-minutes 0
-python -m gismo.cli.main maintain --db .gismo/state.db --once --stale-minutes 10 --dry-run
-```
+-------------------------------------------------------------------------------
 
-Each iteration prints a single-line summary:
+DAEMON & SUPERVISION
 
-```
-maintain: requeued 3 stale items (stale_minutes=10)
-maintain: no stale items (stale_minutes=10)
-maintain: requeued 1 stale items (stale_minutes=0)
-maintain: dry-run would requeue 2 stale items (stale_minutes=10)
-maintain: dry-run no stale items (stale_minutes=10)
-```
+FOREGROUND DAEMON:
 
-Each iteration records an audit event. Requeues emit `queue_requeue_stale`; no-op or dry-run
-iterations emit `maintenance_check`.
+  gismo daemon
+
+- Runs execution loop in foreground
+- Ctrl+C stops it cleanly
+
+SUPERVISED MODE (RECOMMENDED FOR LONG RUNS):
+
+  gismo up
+  gismo status
+  gismo down
+  gismo recover
+
+What this does:
+- Starts daemon + IPC server in background
+- Tracks health via heartbeat
+- Allows safe recovery if something crashes
+
+STATUS CHECK:
+- Uses DB heartbeat, not PID alone
+- If heartbeat is stale, daemon is considered down
+
+RECOVER:
+- Stops orphaned processes
+- Clears stale PID/IPC state
+- Does NOT touch the database
+
+-------------------------------------------------------------------------------
+
+QUEUE INSPECTION
+
+QUEUE STATS:
+
+  gismo queue stats
+
+QUEUE LIST:
+
+  gismo queue list
+
+QUEUE SHOW:
+
+  gismo queue show <ID_OR_PREFIX>
+
+Notes:
+- Short ID prefixes are supported
+- Ambiguity is detected and reported
+- Failed items remain by design
+
+-------------------------------------------------------------------------------
+
+EXPORTING LOGS
+
+LATEST RUN:
+
+  gismo export --latest
+
+SPECIFIC RUN:
+
+  gismo export --run <RUN_ID>
+
+ALL RUNS:
+
+  gismo export --all
+
+Format:
+- JSON Lines (one event per line)
+- Safe to parse with jq, Python, etc.
+- Includes tool inputs, outputs, errors
+
+-------------------------------------------------------------------------------
+
+LOCAL LLM PLANNER (ASK)
+
+BASIC USE:
+
+  gismo ask "summarize last 5 failures" --dry-run
+
+EXECUTE PLAN:
+
+  gismo ask "do X safely" --enqueue
+
+Planner rules:
+- Produces enqueue-only plans
+- Action count is bounded
+- Output is normalized
+- Policy is still enforced at execution time
+- Planner cannot execute directly
+
+Always prefer:
+- --dry-run first
+- Review plan
+- Then --enqueue
+
+-------------------------------------------------------------------------------
+
+MAINTENANCE & RECOVERY
+
+MAINTAIN STALE TASKS (ONE SHOT):
+
+  gismo maintain --once --stale-minutes 0
+
+CONTINUOUS MAINTENANCE:
+
+  gismo maintain --interval-seconds 30 --stale-minutes 10
+
+What this does:
+- Requeues tasks stuck IN_PROGRESS
+- Uses DB timestamps
+- Safe to run alongside daemon
+- Fully audited
+
+-------------------------------------------------------------------------------
+
+POLICY & SAFETY
+
+Default behavior:
+- Deny by default
+- shell: blocked unless allowlisted
+
+Policies:
+- dev-safe.json
+- readonly.json
+
+Use custom policy:
+
+  gismo --policy path\to\policy.json run "..."
+
+If a task fails with PERMISSION_DENIED:
+- This is expected behavior
+- Adjust policy explicitly if needed
+- Never weaken policy casually
+
+-------------------------------------------------------------------------------
+
+WINDOWS NOTES
+
+- Windows is the reference platform.
+- Path handling is explicit.
+- Shell builtins are executed via cmd /c where required.
+- SQLite locking issues are treated as bugs, not “Windows quirks”.
+
+If something only works on Linux, it is not finished.
+
+-------------------------------------------------------------------------------
+
+SAFE OPERATING PRACTICES
+
+- Use dry-run for planner requests.
+- Inspect queue regularly.
+- Export logs for audits.
+- Stop system cleanly (gismo down).
+- Use recover if something crashes.
+- Keep policies tight.
+- If behavior surprises you, investigate logs.
+
+-------------------------------------------------------------------------------
+
+COMMON FAILURE MODES
+
+PERMISSION_DENIED:
+- Policy blocked the action
+- Fix policy or request
+
+FAILED TASK:
+- Logged and retained intentionally
+- Inspect with queue show
+
+DAEMON NOT RUNNING:
+- Start with gismo up or gismo daemon
+- Check status heartbeat
+
+-------------------------------------------------------------------------------
+
+FINAL NOTES
+
+GISMO is designed to be boring, predictable, and safe.
+If it feels exciting, something is probably wrong.
+
+Policy before power.
+Explicit over implicit.
+State is truth.
+Audit everything.

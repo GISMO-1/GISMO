@@ -236,20 +236,13 @@ class AskCliTest(unittest.TestCase):
             db_path = str(Path(tmpdir) / "state.db")
             with mock.patch.dict(os.environ, {"GISMO_OLLAMA_TIMEOUT_S": "120"}, clear=False):
                 with mock.patch.object(cli_main, "ollama_chat", return_value=response):
+                    parser = cli_main.build_parser()
+                    args = parser.parse_args(
+                        ["ask", "--db", db_path, "ping", "--dry-run", "--timeout-s", "2"]
+                    )
                     buffer = io.StringIO()
                     with contextlib.redirect_stdout(buffer):
-                        cli_main.run_ask(
-                            db_path,
-                            "ping",
-                            model=None,
-                            host=None,
-                            timeout_s=2,
-                            enqueue=False,
-                            dry_run=True,
-                            max_actions=5,
-                            yes=False,
-                            explain=False,
-                        )
+                        args.handler(args)
             output = buffer.getvalue()
             self.assertIn("timeout=2s", output)
 

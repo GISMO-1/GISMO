@@ -27,9 +27,16 @@ class OllamaClientPayloadTest(unittest.TestCase):
         def fake_urlopen(request, timeout):
             captured["request"] = request
             captured["timeout"] = timeout
-            return DummyResponse('{"message":{"content":"{}"}}')
+            return DummyResponse("{}")
 
-        with mock.patch.object(ollama.urllib.request, "urlopen", side_effect=fake_urlopen):
+        with (
+            mock.patch.object(
+                ollama.urllib.request,
+                "urlopen",
+                side_effect=fake_urlopen,
+            ),
+            mock.patch.object(ollama, "_extract_message_content", return_value="{}"),
+        ):
             response = ollama.ollama_chat("ping", "return JSON")
         self.assertEqual(response, "{}")
         body = json.loads(captured["request"].data.decode("utf-8"))

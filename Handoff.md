@@ -171,7 +171,7 @@ Plan assessment gate:
 LATEST UPDATE (OPERATOR NOTES)
 
 Status:
-- Ask now supports curl transport selection for Ollama (Windows defaults to curl when available).
+- Ollama payload unit test now isolates outgoing payload assertions with a stubbed response.
 - Ollama JSON parsing hardens against fenced output and reports richer errors.
 - Ollama-related tests are hermetic by default with an optional integration gate.
 

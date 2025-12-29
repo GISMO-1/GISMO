@@ -1,6 +1,7 @@
 import argparse
 import contextlib
 import io
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -119,6 +120,15 @@ class CliMainParserTest(unittest.TestCase):
         down_args = parser.parse_args(["down"])
         self.assertEqual(down_args.command, "down")
         self.assertIs(down_args.handler, cli_main._handle_supervise_down)
+
+    def test_supervise_status_uses_env_token_fallback(self) -> None:
+        args = argparse.Namespace(token=None, db_path="state.db")
+        with mock.patch.dict(os.environ, {"GISMO_IPC_TOKEN": "env-token"}, clear=False):
+            with mock.patch.object(
+                cli_main.supervise_cli, "run_supervise_status"
+            ) as run_status:
+                cli_main._handle_supervise_status(args)
+                run_status.assert_called_once_with("env-token", db_path="state.db")
 
     def test_recover_routes_to_handler(self) -> None:
         parser = cli_main.build_parser()

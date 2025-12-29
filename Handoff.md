@@ -1,13 +1,13 @@
 # Handoff
 
 ## Status
-- Added local LLM planner support via the new `ask` CLI command with Ollama HTTP calls, dry-run output, and optional enqueueing.
-- Logged `llm_plan` audit events for planner runs (including parse failures).
-- Added tests and docs for the new planner flow.
+- Centralized Ollama config with GISMO_OLLAMA_* env vars, CLI overrides, and ask output header details.
+- Hardened ask planning prompts and normalization, including strict field validation and grounded assumptions.
+- Added ask failure auditing (`ask_failed`), token env fallback coverage, and updated docs/tests.
 
 ## Next Steps
-- Validate the `ask` command with a running Ollama instance and confirm model availability.
-- Consider expanding planner validation rules if new operator commands are added.
+- Validate `ask` against a live Ollama instance on Windows and confirm env overrides behave as expected.
+- Extend planner validation rules if new operator command verbs are introduced.
 
 ## Tests
 - `python scripts/verify.py`

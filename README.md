@@ -1,389 +1,227 @@
 # GISMO
 
-**General Intelligent System for Multi-flow Operations**
+GISMO (General Intelligent System for Multiflow Operations) is a local-first, operator-grade autonomous orchestration system. It can plan, schedule, execute, audit, and recover tasks on a single machine using a controlled local LLM (Large Language Model) for planning. GISMO is not a chatbot or a cloud service – it runs entirely on your hardware and is built for determinism, safety, and clarity.
 
----
+Key Features and Principles:
 
-## Overview
+- Fully Local & Deterministic:
+  GISMO operates with no external dependencies or cloud APIs. All decisions and state are local. Execution is deterministic and repeatable, with a persistent SQLite state database (.gismo/state.db by default) recording runs and tasks.
 
-GISMO is a **persistent orchestration runtime** designed to **execute, coordinate, and supervise work** across tools, agents, and processes.
+- Operator Commands & Structured Tasks:
+  GISMO accepts explicit operator commands (like echo:, note:, graph:) that define actions. High-level goals can be decomposed by the planner into sequences of these commands, but only within strict safety bounds.
 
-GISMO is not a chatbot.
-GISMO is not a personality.
-GISMO is not a UI product.
+- Queued Orchestration Engine:
+  Tasks are enqueued and executed via a durable queue and daemon process, ensuring reliable, resume-safe operation. Each task transitions through clear states (QUEUED → IN_PROGRESS → SUCCEEDED/FAILED), with retry handling and failure retention for auditability.
 
-GISMO is an **operator-grade system core**.
+- Policy-Enforced Tooling:
+  All operations are gated by security policies. Policies supported include readonly and dev-safe modes. Disallowed actions (like unapproved shell: commands) are blocked by default, logged, and safely marked failed.
 
-It maintains durable state, enforces authority, executes actions, and exposes a deterministic control plane for managing work.
+- Auditability:
+  Every action and decision is logged. GISMO produces detailed JSONL audit logs per run, capturing tool inputs/outputs and outcomes. Nothing happens silently.
 
----
+- Cross-Platform, Windows-First:
+  GISMO is built to run reliably on Windows first, as well as Linux. It avoids Unix assumptions and handles Windows-specific concerns (paths, subprocess behavior, locking) explicitly.
 
-## What GISMO Is
+- No Magic, No Surprises:
+  Policy before power. Explicit > implicit. No silent actions. No hidden behavior.
 
-GISMO provides:
+-------------------------------------------------------------------------------
 
-* **Persistent state** for tasks, runs, tools, and outcomes
-* **Deterministic execution** via a queue + daemon model
-* **Local IPC control plane** for same-machine control
-* **Supervisor orchestration** for managing IPC + daemon lifecycles
-* **Strict policy-gated tool execution**
-* **Full auditability** of every action taken
+INSTALLATION
 
-GISMO is designed to be embedded inside larger systems as the **execution and coordination layer**.
+Prereqs:
+- Python 3.11+ recommended
+- A virtual environment is strongly recommended
+- Optional (for planner features): Ollama running locally with an available model
 
----
+Install (from repo root):
 
-## What GISMO Is Not
+1) Create venv
+   Windows (PowerShell):
+     python -m venv .venv
+     .\.venv\Scripts\Activate.ps1
 
-GISMO explicitly does **not** attempt to be:
+   Linux/macOS:
+     python -m venv .venv
+     source .venv/bin/activate
 
-* A conversational assistant
-* A general AI or AGI system
-* A UI-first application
-* A robotics framework
-* A speculative research project
+2) Editable install
+     pip install -e .
 
-Anything that does not serve **orchestration, execution, delegation, or state** is out of scope.
+3) Verify
+     python scripts/verify.py
 
----
+-------------------------------------------------------------------------------
 
-## Mental Model
+CANONICAL INVOCATION
 
-```
-Inputs / Triggers
-        ↓
- ┌───────────────────┐
- │       GISMO       │
- │  State + Rules    │
- │  Orchestration    │
- └───────────────────┘
-     ↓        ↓
-   Agents    Tools
-```
+Prefer:
+  python -m gismo.cli.main ...
 
-GISMO **does not act directly**.
-It **coordinates systems that act**.
+If installed in editable mode, the `gismo` console entrypoint may also be available:
+  gismo ...
 
----
+-------------------------------------------------------------------------------
 
-## Core Capabilities
+STATE & DEFAULT PATHS
 
-### 1. Persistent State
+- Default DB path: .gismo/state.db
+- Exports are DB-anchored:
+  By default, exports are written to an `exports/` directory located next to the DB file.
+  Example:
+    DB:      .gismo/state.db
+    Exports: .gismo/exports/
 
-* SQLite-backed state for runs, tasks, queue items, and tool calls
-* Explicit tracking of lifecycle: queued → running → succeeded / failed
-* Idempotent execution with retry semantics
+This behavior is intentional: exports must not depend on the current working directory.
 
-### 2. Task Orchestration
+-------------------------------------------------------------------------------
 
-* Deterministic task scheduling
-* Dependency-aware execution graphs
-* Failure classification and recovery
+CORE COMMANDS (CLI)
 
-### 3. Headless Execution (Daemon)
+Run a single operator command immediately:
 
-* Background daemon processes queued work
-* Always policy-enforced
-* Safe to run unattended
+  gismo run "echo:Hello from GISMO"
 
-### 4. Local IPC Control Plane
+Enqueue a command to be executed by the daemon later:
 
-* Same-machine IPC using:
+  gismo enqueue "note:remember this"
 
-  * Unix sockets (POSIX)
-  * Named pipes (Windows)
-* Token-based authentication
-* Full control over:
+Start the daemon loop (foreground):
 
-  * Queue inspection
-  * Daemon pause/resume
-  * Maintenance actions
+  gismo daemon
 
-### 5. Supervisor
+Queue introspection:
 
-* Single command to start IPC + daemon together
-* PID tracking (best-effort metadata)
-* Windows-safe lifecycle handling
-* Designed for long-running environments
+  gismo queue stats
+  gismo queue list
+  gismo queue show <ID_OR_PREFIX>
 
-### 6. Authority & Safety
+Notes:
+- queue show supports short-id prefix resolution (with ambiguity detection).
+- Human-readable output is available; JSON output is available where requested.
 
-* All tool execution is policy-gated
-* Deny-by-default toolpack
-* All actions logged and auditable
-* No silent side effects
+Export audit logs:
+
+  gismo export --latest
+  gismo export --run <RUN_ID>
+  gismo export --all
+
+Planner (local LLM via Ollama):
 
----
+  gismo ask "Summarize the last 10 queue failures" --dry-run
+  gismo ask "Do X safely" --enqueue
+
+Planner behavior:
+- Produces enqueue-only plans under strict schema.
+- Actions are bounded (hard limit on action count).
+- Normalization/coercion exists so malformed model output does not break the system.
+- Full audit trail is recorded for planner outputs and execution.
 
-## Status
+-------------------------------------------------------------------------------
 
-🟢 **Core runtime stabilized**
+SUPERVISION & IPC (WINDOWS-FIRST)
 
-The following components are complete and working on Windows:
+GISMO includes a supervisor lifecycle for running as a local service-like system:
 
-* CLI
-* Queue + daemon
-* IPC control plane
-* Supervisor
-* Windows-safe process, pipe, and shutdown handling
+  gismo up
+  gismo status
+  gismo down
+  gismo recover
 
-Breaking changes going forward are limited to **higher-level orchestration features**, not the runtime core.
+These coordinate:
+- The daemon process
+- The IPC server (Windows named pipes) with token auth
 
----
+Maintenance loop (stale recovery):
 
-## Quickstart
+  gismo maintain --once --stale-minutes 0
+  gismo maintain --interval-seconds 30 --stale-minutes 10
 
-### Requirements
+-------------------------------------------------------------------------------
 
-* Python **3.11+**
-* No external dependencies
+POLICY & SAFETY MODEL
 
-Activate your virtual environment and verify:
+- Deny by default.
+- Tools are permission-gated.
+- shell: is blocked unless explicitly allowlisted by policy.
+- Permission failures are safe, auditable, and do not partially execute actions.
 
-```bash
-python scripts/verify.py
-```
+Supported policies include:
+- readonly.json
+- dev-safe.json
 
----
+-------------------------------------------------------------------------------
 
-## Basic Operator Commands
+WHAT GISMO IS (AND IS NOT)
 
-```bash
-python -m gismo.cli.main run "echo: hello"
-python -m gismo.cli.main run "note: remember this"
-python -m gismo.cli.main run "graph: echo A -> note B -> echo C"
-```
+GISMO IS:
+- A local-first orchestration core
+- Deterministic and stateful via SQLite
+- CLI-first, inspectable, and auditable
+- Policy-controlled and safe by default
 
-Show a run summary:
+GISMO IS NOT:
+- A chatbot
+- A cloud agent framework
+- A networking/remote admin tool (unless you explicitly build/enable that interface)
+- A system that silently does things behind your back
 
-PowerShell note: `<` and `>` are redirection operators. Replace placeholders without angle brackets (e.g., use `RUN_ID`).
+-------------------------------------------------------------------------------
 
-```bash
-python -m gismo.cli.main run show RUN_ID
-```
+CURRENT STATUS / ROADMAP SNAPSHOT
 
-## Exporting Run Audits
+Phase 0 — Foundation: COMPLETE
+- SQLite state store with WAL, retries, backoff, cancellation
+- Durable queue + daemon execution engine
+- IPC server (Windows named pipes) with token auth
+- Supervisor lifecycle (up/down/status/recover)
+- Maintenance loop (stale recovery)
+- Exportable audit logs (jsonl, run/task/tool granularity)
+- Idempotent, test-covered CLI
+- Windows-native support
 
-Exports default to the `exports/` folder next to `.gismo`, derived from `--db`, so the output location is stable across terminals.
+Phase 1 — Local LLM Planner: COMPLETE
+- Ollama integration
+- Model-agnostic config via env + CLI
+- ask pipeline (dry-run, enqueue)
+- Strict plan schema (enqueue-only, bounded actions)
+- Normalization/coercion for model mistakes
+- Timeout handling + failure auditing
+- Test coverage for planner behavior
 
-```bash
-python -m gismo.cli.main export --latest --db .gismo/state.db
-```
+Phase 2 — Control & Guardrails: IN PROGRESS
+- Hard limits on action count
+- Enqueue-only execution model
+- Explicit tool allowlists
+- Read-only / dev-safe policy modes
+- Full audit trail for every decision
 
----
+Next:
+- Planner confidence scoring (low/medium/high)
+- User confirmation gates for higher-risk plans
+- Policy-aware planning prompts
+- Explain-before-execute mode
 
-## LLM Planner (Local Only)
+Phase 3 — Memory & Context: PLANNED
+- Persistent memory layer (prior plans, failures, preferences)
+- Context injection and summarization jobs
+- Session awareness across runs
 
-GISMO can ask a local Ollama model to propose a JSON plan. The planner is **dry-run by default** and never executes commands directly.
-Use `--enqueue` to submit validated operator commands to the queue for daemon execution.
-Planner actions always use `type: enqueue`, and `command` is an operator command string like `echo: hello`.
+Phase 4 — Interactive GISMO: END GAME
+- CLI/TUI/Local UI interactions
+- Always-on local service behavior
+- Plans, explains, executes, remembers, recovers
+- No cloud dependency and no silent actions
 
-```bash
-python -m gismo.cli.main ask --db .gismo/state.db "Create a quick echo and note plan"
-python -m gismo.cli.main ask --db .gismo/state.db --enqueue "Queue an echo and a note"
-python -m gismo.cli.main ask --db .gismo/state.db --enqueue --dry-run "Show what would be enqueued"
-```
+-------------------------------------------------------------------------------
 
-PowerShell-safe env overrides:
+DOCUMENTATION
 
-```powershell
-$env:GISMO_OLLAMA_MODEL = "phi3:mini"
-$env:GISMO_OLLAMA_TIMEOUT_S = "120"
-$env:GISMO_OLLAMA_URL = "http://127.0.0.1:11434"
-python -m gismo.cli.main ask --db .gismo/state.db --dry-run "Draft a quick plan"
-python -m gismo.cli.main ask --db .gismo/state.db --enqueue "Queue a note and an echo"
-```
+- docs/OPERATOR.md  : operator usage and lifecycle guidance
+- Handoff.md        : maintainer handoff and architecture overview
 
-Defaults:
+-------------------------------------------------------------------------------
 
-* Model: `phi3:mini` (override with `--model` or `GISMO_OLLAMA_MODEL`)
-* URL: `http://127.0.0.1:11434` (override with `--ollama-url` or `GISMO_OLLAMA_URL`)
-* Timeout: `120s` (override with `--timeout-s` or `GISMO_OLLAMA_TIMEOUT_S`)
+LICENSE
 
-Every `ask` call writes an audit event (`llm_plan`) to the state database.
-
----
-
-## Operator Lifecycle
-
-Each operator command has one responsibility:
-
-* `daemon`: executes queued work from the SQLite state store. It does **not** start IPC.
-* `ipc serve`: starts the local control plane for queue/daemon commands. It does **not** execute work.
-* `supervise up`: starts both `ipc serve` and `daemon` together and records their PIDs.
-* `supervise status`: reports PID metadata plus IPC heartbeat health.
-* `supervise down`: stops only the IPC/daemon processes launched by `supervise up`.
-* `maintain`: requeues stale `IN_PROGRESS` queue items; safe to run alongside a daemon.
-
----
-
-## Queue & Daemon
-
-Enqueue work:
-
-```bash
-python -m gismo.cli.main enqueue "echo: daemon hello" --db .gismo/state.db
-python -m gismo.cli.main enqueue --timeout 30 --retries 2 "echo: daemon hello" --db .gismo/state.db
-```
-
-Run the daemon once:
-
-```bash
-python -m gismo.cli.main daemon --once --db .gismo/state.db
-```
-
-Inspect the queue:
-
-```bash
-python -m gismo.cli.main queue stats --db .gismo/state.db
-python -m gismo.cli.main queue list --db .gismo/state.db
-python -m gismo.cli.main queue show QUEUE_ITEM_ID --db .gismo/state.db
-python -m gismo.cli.main queue cancel QUEUE_ITEM_ID --db .gismo/state.db
-```
-
-Cancellation requests for in-progress items are best-effort; the daemon checks between steps.
-
-### Maintenance loop
-
-Requeue stale in-progress queue items with the local maintenance loop. Use
-`--stale-minutes 0` to treat any in-progress item as stale immediately. Use
-`--once` for a single iteration and `--dry-run` to report without requeueing:
-
-```bash
-python -m gismo.cli.main maintain --db .gismo/state.db --once
-python -m gismo.cli.main maintain --db .gismo/state.db --interval-seconds 30 --stale-minutes 10
-python -m gismo.cli.main maintain --db .gismo/state.db --once --stale-minutes 0
-python -m gismo.cli.main maintain --db .gismo/state.db --once --stale-minutes 10 --dry-run
-```
-
-Each iteration records an audit event (`maintenance_check` or `queue_requeue_stale`).
-
----
-
-## IPC Control Plane (Local Only)
-
-Set a token (required):
-
-```bash
-$env:GISMO_IPC_TOKEN = "your-token"
-```
-
-Start the IPC server:
-
-```bash
-python -m gismo.cli.main ipc serve --db .gismo/state.db
-```
-
-Control the system:
-
-```bash
-python -m gismo.cli.main ipc ping --db .gismo/state.db
-python -m gismo.cli.main ipc daemon-status --db .gismo/state.db
-python -m gismo.cli.main ipc daemon-pause --db .gismo/state.db
-python -m gismo.cli.main ipc daemon-resume --db .gismo/state.db
-python -m gismo.cli.main ipc enqueue "echo: hello" --db .gismo/state.db
-python -m gismo.cli.main ipc enqueue --timeout 30 --retries 2 "echo: hello" --db .gismo/state.db
-python -m gismo.cli.main ipc queue-cancel QUEUE_ITEM_ID --db .gismo/state.db
-```
-
-### Windows Note
-
-On Windows, the IPC named pipe is **derived from the database path**.
-You **must** use the same `--db` value for:
-
-* `ipc serve`
-* All IPC client commands
-* `supervise`
-
----
-
-## Supervisor (Recommended)
-
-Run IPC + daemon together:
-
-```bash
-$env:GISMO_IPC_TOKEN = "your-token"
-python -m gismo.cli.main supervise up --db .gismo/state.db
-```
-
-Check status:
-
-```bash
-python -m gismo.cli.main supervise status --db .gismo/state.db
-```
-
-Stop everything:
-
-```bash
-python -m gismo.cli.main supervise down --db .gismo/state.db
-```
-
-The supervisor reconciles:
-
-* IPC reachability
-* Daemon state
-* PID metadata (best-effort)
-* Heartbeat freshness (source of truth)
-
----
-
-## If things go weird
-
-Check what is running, recover stale supervisor state, and bring the system back up:
-
-```bash
-gismo status
-gismo recover
-gismo up
-```
-
-Ensure `GISMO_IPC_TOKEN` matches for `gismo status` and `gismo up`.
-
----
-
-## Policies
-
-GISMO uses JSON policies to explicitly allow tools.
-
-* `policy/readonly.json` — default if no policy is provided
-* `policy/dev-safe.json` — development allowlist
-
-Example:
-
-```json
-{
-  "allowed_tools": ["echo", "write_note", "run_shell"],
-  "fs": { "base_dir": "." },
-  "shell": {
-    "base_dir": ".",
-    "allowlist": [["git", "status"], ["python", "-m", "unittest", "-v"]]
-  }
-}
-```
-
----
-
-## Toolpack Safety
-
-* Filesystem access is scoped
-* Shell commands are exact-match allowlisted
-* No implicit networking
-* All executions are logged
-
----
-
-## Roadmap
-
-* **v0** — Core orchestration runtime ✅
-* **v1** — Multi-agent delegation & advanced workflows (in progress)
-* **v2** — External system integrations
-* **v3** — Optional physical actuators (plugin-based)
-
----
-
-## Philosophy
-
-Most AI systems **talk**.
-GISMO is built to **operate**.
-
-Deterministic. Auditable. Controlled.
+TBD (project currently in active development; choose an OSS license before first formal release tag).

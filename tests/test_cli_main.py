@@ -166,6 +166,34 @@ class CliMainParserTest(unittest.TestCase):
             assert item is not None
             self.assertEqual(item.status, QueueStatus.SUCCEEDED)
 
+    def test_export_anchors_default_output_to_db_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_root = Path(tmpdir) / "repo"
+            db_path = repo_root / ".gismo" / "state.db"
+            state_store = StateStore(str(db_path))
+            run = state_store.create_run(label="export", metadata={})
+            other_cwd = Path(tmpdir) / "cwd"
+            other_cwd.mkdir(parents=True, exist_ok=True)
+
+            original_cwd = os.getcwd()
+            try:
+                os.chdir(other_cwd)
+                cli_main.run_export(
+                    str(db_path),
+                    run_id=run.id,
+                    use_latest=False,
+                    export_format="jsonl",
+                    out_path=None,
+                    redact=False,
+                    policy_path=None,
+                )
+            finally:
+                os.chdir(original_cwd)
+
+            expected = repo_root / "exports" / f"{run.id}.jsonl"
+            self.assertTrue(expected.exists())
+            self.assertFalse((other_cwd / "exports" / f"{run.id}.jsonl").exists())
+
     def test_ipc_queue_stats_connection_error(self) -> None:
         args = argparse.Namespace(token="secret-token")
         with mock.patch.object(

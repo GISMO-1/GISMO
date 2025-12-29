@@ -1,13 +1,12 @@
 # Handoff
 
 ## Status
-- Tightened LLM planner prompt with strict enqueue-only schema and examples.
-- Normalized ask plans now coerce echo/note/graph action type near-misses into enqueue commands while preserving safeguards.
-- Added ask CLI tests for action coercion and unsupported action reporting; updated README guidance.
+- Anchored export outputs to the repo root derived from the database path, with a shared helper and resolved paths.
+- Added CLI coverage for export defaults when running from an alternate working directory.
+- Documented export defaults in README and operator guide.
 
 ## Next Steps
-- Validate `ask` against a live Ollama instance with smaller models (phi3:mini) for plan compliance.
-- Extend operator command patterns if new verbs are added.
+- Consider extending db-anchored path defaults to other user-facing artifacts if new output types are added.
 
 ## Tests
 - `python scripts/verify.py`

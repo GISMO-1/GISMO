@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from gismo.core.models import Run, Task, ToolCall
+from gismo.core.paths import resolve_exports_dir
 from gismo.core.state import StateStore
 
 
@@ -21,8 +22,12 @@ def export_run_jsonl(
     run = state_store.get_run(run_id)
     if run is None:
         raise ValueError(f"Run not found: {run_id}")
-    base_dir = base_dir or Path(".")
-    resolved_out = _resolve_output_path(run_id, out_path, base_dir)
+    if base_dir is None:
+        exports_dir = resolve_exports_dir(state_store.db_path)
+    else:
+        exports_dir = base_dir / "exports"
+        exports_dir.mkdir(parents=True, exist_ok=True)
+    resolved_out = _resolve_output_path(run_id, out_path, exports_dir)
     tasks = list(state_store.list_tasks(run_id))
     tool_calls = list(state_store.list_tool_calls(run_id))
     records = _build_records(run, tasks, tool_calls, redact=redact)
@@ -49,11 +54,12 @@ def export_latest_run_jsonl(
     )
 
 
-def _resolve_output_path(run_id: str, out_path: str | Path | None, base_dir: Path) -> Path:
+def _resolve_output_path(run_id: str, out_path: str | Path | None, exports_dir: Path) -> Path:
     if out_path is None:
-        resolved = base_dir / "exports" / f"{run_id}.jsonl"
+        resolved = exports_dir / f"{run_id}.jsonl"
     else:
-        resolved = Path(out_path)
+        resolved = Path(out_path).expanduser()
+    resolved = resolved.resolve()
     resolved.parent.mkdir(parents=True, exist_ok=True)
     return resolved
 

@@ -56,10 +56,10 @@ Install (from repo root):
 CANONICAL INVOCATION
 
 Prefer:
-  python -m gismo.cli.main ...
-
-If installed in editable mode, the `gismo` console entrypoint may also be available:
   gismo ...
+
+Fallback (no console script available):
+  python -m gismo.cli.main ...
 
 -------------------------------------------------------------------------------
 

@@ -29,6 +29,7 @@ from gismo.core.models import EVENT_TYPE_ASK_FAILED, EVENT_TYPE_LLM_PLAN, QueueS
 from gismo.core.maintenance import run_maintenance_iteration
 from gismo.core.orchestrator import Orchestrator
 from gismo.core.permissions import PermissionPolicy, load_policy
+from gismo.core.plan_assess import PlanAssessment, assess_plan, expanded_explanation
 from gismo.core.state import StateStore
 from gismo.core.tools import EchoTool, ToolRegistry, WriteNoteTool
 from gismo.core.toolpacks.fs_tools import FileSystemConfig, ListDirTool, ReadFileTool, WriteFileTool
@@ -233,6 +234,53 @@ def _print_llm_plan(plan: dict) -> None:
         print("Notes:")
         for note in notes:
             print(f"- {note}")
+
+
+def _print_plan_assessment(assessment: PlanAssessment, *, explain: bool) -> None:
+    confidence_label = assessment.confidence.upper()
+    print(f"Confidence: {confidence_label}")
+    if assessment.risk_flags:
+        print(f"Risk flags: {', '.join(assessment.risk_flags)}")
+    else:
+        print("Risk flags: none")
+    print(f"Explanation: {assessment.explanation}")
+    if explain:
+        details = expanded_explanation(assessment)
+        if details:
+            print("Explanation details:")
+            for detail in details:
+                print(f"- {detail}")
+
+
+def _is_interactive_tty() -> bool:
+    return sys.stdin.isatty() and sys.stdout.isatty()
+
+
+def _confirm_assessment(assessment: PlanAssessment, *, yes: bool) -> None:
+    if not assessment.requires_confirmation or yes:
+        return
+    if _is_interactive_tty():
+        response = input("This plan requires confirmation. Proceed? [y/N]:")
+        if response.strip().lower() not in {"y", "yes"}:
+            print("Confirmation declined; plan not enqueued.", file=sys.stderr)
+            raise SystemExit(2)
+        return
+    print(
+        "Refusing to enqueue without confirmation in non-interactive mode. Use --yes to override.",
+        file=sys.stderr,
+    )
+    raise SystemExit(2)
+
+
+def _load_assessment_policy() -> PermissionPolicy | None:
+    repo_root = Path(__file__).resolve().parents[2]
+    policy_path, _ = _resolve_default_policy_path(None, repo_root)
+    if policy_path is None:
+        return None
+    try:
+        return load_policy(policy_path, repo_root=repo_root)
+    except (OSError, ValueError, PermissionError):
+        return None
 
 
 def _run_status(tasks: list) -> str:
@@ -544,6 +592,8 @@ def run_ask(
     enqueue: bool,
     dry_run: bool,
     max_actions: int,
+    yes: bool,
+    explain: bool,
 ) -> None:
     if not user_text or not user_text.strip():
         raise ValueError("ask requires a natural language request.")
@@ -645,12 +695,16 @@ def run_ask(
         )
         raise
     _print_llm_plan(plan)
+    policy = _load_assessment_policy()
+    assessment = assess_plan(plan.get("actions", []), policy=policy)
+    _print_plan_assessment(assessment, explain=explain)
     payload = {
         "model": config.model,
         "host": config.url,
         "timeout_s": config.timeout_s,
         "user_text": user_text,
         "plan": plan,
+        "assessment": assessment.to_dict(),
         "enqueue": enqueue,
         "dry_run": dry_run,
         "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -667,6 +721,7 @@ def run_ask(
     if dry_run:
         print("Dry run: enqueue requested but no items were enqueued.")
         return
+    _confirm_assessment(assessment, yes=yes)
 
     enqueued_ids = []
     skipped = []
@@ -907,6 +962,8 @@ def _handle_ask(args: argparse.Namespace) -> None:
         enqueue=args.enqueue,
         dry_run=dry_run,
         max_actions=args.max_actions,
+        yes=args.yes,
+        explain=args.explain,
     )
 
 
@@ -1648,6 +1705,16 @@ def build_parser() -> argparse.ArgumentParser:
         "--enqueue",
         action="store_true",
         help="Enqueue validated actions for the daemon to execute",
+    )
+    ask_parser.add_argument(
+        "--yes",
+        action="store_true",
+        help="Skip confirmation prompts for enqueue actions",
+    )
+    ask_parser.add_argument(
+        "--explain",
+        action="store_true",
+        help="Print expanded assessment explanation details",
     )
     ask_parser.add_argument(
         "--dry-run",

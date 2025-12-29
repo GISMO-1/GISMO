@@ -56,6 +56,8 @@ class AskCliTest(unittest.TestCase):
                             enqueue=False,
                             dry_run=True,
                             max_actions=10,
+                            yes=False,
+                            explain=False,
                         )
             output = buffer.getvalue()
             self.assertIn("LLM: phi3:mini url=http://127.0.0.1:11434 timeout=120s", output)
@@ -80,7 +82,7 @@ class AskCliTest(unittest.TestCase):
                 "actions": [
                     {
                         "type": "enqueue",
-                        "command": "note: queued",
+                        "command": "echo: queued",
                         "timeout_seconds": 15,
                         "retries": 1,
                         "why": "record",
@@ -115,6 +117,8 @@ class AskCliTest(unittest.TestCase):
                             enqueue=True,
                             dry_run=False,
                             max_actions=10,
+                            yes=False,
+                            explain=False,
                         )
             output = buffer.getvalue()
             self.assertIn("Enqueued items:", output)
@@ -122,7 +126,7 @@ class AskCliTest(unittest.TestCase):
             state_store = StateStore(db_path)
             items = state_store.list_queue_items(limit=10)
             self.assertEqual(len(items), 1)
-            self.assertEqual(items[0].command_text, "note: queued")
+            self.assertEqual(items[0].command_text, "echo: queued")
             self.assertEqual(items[0].max_retries, 1)
             self.assertEqual(items[0].timeout_seconds, 15)
 
@@ -158,6 +162,8 @@ class AskCliTest(unittest.TestCase):
                                 enqueue=False,
                                 dry_run=True,
                                 max_actions=10,
+                                yes=False,
+                                explain=False,
                             )
             self.assertIn("not json", buffer.getvalue())
 
@@ -190,6 +196,8 @@ class AskCliTest(unittest.TestCase):
                         enqueue=False,
                         dry_run=True,
                         max_actions=5,
+                        yes=False,
+                        explain=False,
                     )
                     _, kwargs = ollama_mock.call_args
                     self.assertEqual(kwargs["model"], "custom-model")
@@ -214,6 +222,8 @@ class AskCliTest(unittest.TestCase):
                         enqueue=False,
                         dry_run=True,
                         max_actions=5,
+                        yes=False,
+                        explain=False,
                     )
                     _, kwargs = ollama_mock.call_args
                     self.assertEqual(kwargs["timeout_s"], 5)
@@ -259,6 +269,8 @@ class AskCliTest(unittest.TestCase):
                         enqueue=False,
                         dry_run=True,
                         max_actions=10,
+                        yes=False,
+                        explain=False,
                     )
             state_store = StateStore(db_path)
             event = state_store.list_events()[0]
@@ -312,6 +324,8 @@ class AskCliTest(unittest.TestCase):
                         enqueue=False,
                         dry_run=True,
                         max_actions=10,
+                        yes=False,
+                        explain=False,
                     )
             state_store = StateStore(db_path)
             event = state_store.list_events()[0]
@@ -352,6 +366,8 @@ class AskCliTest(unittest.TestCase):
                             enqueue=False,
                             dry_run=True,
                             max_actions=5,
+                            yes=False,
+                            explain=False,
                         )
             state_store = StateStore(db_path)
             events = state_store.list_events()
@@ -377,6 +393,205 @@ class AskCliTest(unittest.TestCase):
         normalized = cli_main._normalize_llm_plan(plan, max_actions=5)
         self.assertEqual(normalized["assumptions"], [])
         self.assertEqual(normalized["actions"][0]["command"], "echo: hello")
+
+    def test_ask_enqueue_requires_confirmation_interactive_decline(self) -> None:
+        actions = [
+            {
+                "type": "enqueue",
+                "command": f"note: step {index}",
+                "timeout_seconds": 30,
+                "retries": 0,
+                "why": "test",
+                "risk": "low",
+            }
+            for index in range(13)
+        ]
+        response = json.dumps(
+            {"intent": "queue notes", "assumptions": [], "actions": actions, "notes": []}
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = str(Path(tmpdir) / "state.db")
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "GISMO_OLLAMA_MODEL": "",
+                    "GISMO_OLLAMA_TIMEOUT_S": "",
+                    "GISMO_OLLAMA_URL": "",
+                    "GISMO_LLM_MODEL": "",
+                    "OLLAMA_HOST": "",
+                },
+                clear=False,
+            ):
+                with mock.patch.object(cli_main, "ollama_chat", return_value=response):
+                    with mock.patch("sys.stdin.isatty", return_value=True), mock.patch(
+                        "sys.stdout.isatty", return_value=True
+                    ), mock.patch("builtins.input", return_value="n"):
+                        with self.assertRaises(SystemExit) as exc:
+                            cli_main.run_ask(
+                                db_path,
+                                "enqueue notes",
+                                model=None,
+                                host=None,
+                                timeout_s=None,
+                                enqueue=True,
+                                dry_run=False,
+                                max_actions=20,
+                                yes=False,
+                                explain=False,
+                            )
+                        self.assertEqual(exc.exception.code, 2)
+            state_store = StateStore(db_path)
+            items = state_store.list_queue_items(limit=20)
+            self.assertEqual(len(items), 0)
+
+    def test_ask_enqueue_requires_confirmation_interactive_accept(self) -> None:
+        actions = [
+            {
+                "type": "enqueue",
+                "command": f"note: step {index}",
+                "timeout_seconds": 30,
+                "retries": 0,
+                "why": "test",
+                "risk": "low",
+            }
+            for index in range(13)
+        ]
+        response = json.dumps(
+            {"intent": "queue notes", "assumptions": [], "actions": actions, "notes": []}
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = str(Path(tmpdir) / "state.db")
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "GISMO_OLLAMA_MODEL": "",
+                    "GISMO_OLLAMA_TIMEOUT_S": "",
+                    "GISMO_OLLAMA_URL": "",
+                    "GISMO_LLM_MODEL": "",
+                    "OLLAMA_HOST": "",
+                },
+                clear=False,
+            ):
+                with mock.patch.object(cli_main, "ollama_chat", return_value=response):
+                    with mock.patch("sys.stdin.isatty", return_value=True), mock.patch(
+                        "sys.stdout.isatty", return_value=True
+                    ), mock.patch("builtins.input", return_value="y"):
+                        cli_main.run_ask(
+                            db_path,
+                            "enqueue notes",
+                            model=None,
+                            host=None,
+                            timeout_s=None,
+                            enqueue=True,
+                            dry_run=False,
+                            max_actions=20,
+                            yes=False,
+                            explain=False,
+                        )
+            state_store = StateStore(db_path)
+            items = state_store.list_queue_items(limit=20)
+            self.assertEqual(len(items), 13)
+
+    def test_ask_enqueue_requires_confirmation_non_interactive(self) -> None:
+        actions = [
+            {
+                "type": "enqueue",
+                "command": f"note: step {index}",
+                "timeout_seconds": 30,
+                "retries": 0,
+                "why": "test",
+                "risk": "low",
+            }
+            for index in range(13)
+        ]
+        response = json.dumps(
+            {"intent": "queue notes", "assumptions": [], "actions": actions, "notes": []}
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = str(Path(tmpdir) / "state.db")
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "GISMO_OLLAMA_MODEL": "",
+                    "GISMO_OLLAMA_TIMEOUT_S": "",
+                    "GISMO_OLLAMA_URL": "",
+                    "GISMO_LLM_MODEL": "",
+                    "OLLAMA_HOST": "",
+                },
+                clear=False,
+            ):
+                with mock.patch.object(cli_main, "ollama_chat", return_value=response):
+                    buffer = io.StringIO()
+                    with contextlib.redirect_stderr(buffer):
+                        with mock.patch("sys.stdin.isatty", return_value=False), mock.patch(
+                            "sys.stdout.isatty", return_value=False
+                        ):
+                            with self.assertRaises(SystemExit) as exc:
+                                cli_main.run_ask(
+                                    db_path,
+                                    "enqueue notes",
+                                    model=None,
+                                    host=None,
+                                    timeout_s=None,
+                                    enqueue=True,
+                                    dry_run=False,
+                                    max_actions=20,
+                                    yes=False,
+                                    explain=False,
+                                )
+                            self.assertEqual(exc.exception.code, 2)
+                    self.assertIn("--yes", buffer.getvalue())
+            state_store = StateStore(db_path)
+            items = state_store.list_queue_items(limit=20)
+            self.assertEqual(len(items), 0)
+
+    def test_ask_enqueue_requires_confirmation_yes_override(self) -> None:
+        actions = [
+            {
+                "type": "enqueue",
+                "command": f"note: step {index}",
+                "timeout_seconds": 30,
+                "retries": 0,
+                "why": "test",
+                "risk": "low",
+            }
+            for index in range(13)
+        ]
+        response = json.dumps(
+            {"intent": "queue notes", "assumptions": [], "actions": actions, "notes": []}
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = str(Path(tmpdir) / "state.db")
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "GISMO_OLLAMA_MODEL": "",
+                    "GISMO_OLLAMA_TIMEOUT_S": "",
+                    "GISMO_OLLAMA_URL": "",
+                    "GISMO_LLM_MODEL": "",
+                    "OLLAMA_HOST": "",
+                },
+                clear=False,
+            ):
+                with mock.patch.object(cli_main, "ollama_chat", return_value=response):
+                    with mock.patch("sys.stdin.isatty", return_value=False), mock.patch(
+                        "sys.stdout.isatty", return_value=False
+                    ):
+                        cli_main.run_ask(
+                            db_path,
+                            "enqueue notes",
+                            model=None,
+                            host=None,
+                            timeout_s=None,
+                            enqueue=True,
+                            dry_run=False,
+                            max_actions=20,
+                            yes=True,
+                            explain=False,
+                        )
+            state_store = StateStore(db_path)
+            items = state_store.list_queue_items(limit=20)
+            self.assertEqual(len(items), 13)
 
 
 if __name__ == "__main__":

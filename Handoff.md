@@ -33,7 +33,7 @@ Completed:
 - Phase 1 (Local LLM Planner): DONE
 
 In progress:
-- Phase 2 (Control & Guardrails): ~65%
+- Phase 2 (Control & Guardrails): ~75%
 
 Planned:
 - Phase 3 (Memory & Context)
@@ -55,7 +55,7 @@ CLI and operator UX:
 - Queue introspection complete:
   - queue stats
   - queue list
-  - queue show <id_or_prefix>
+  - queue show ID_OR_PREFIX
   - short-id prefix resolution with ambiguity detection
 
 Policy & safety:
@@ -163,6 +163,21 @@ DB-anchored exports:
 - Coverage added: CLI export defaults tested from non-repo working directory.
 
 This is a structural improvement and should be treated as stable behavior.
+
+Plan assessment gate:
+- ask now prints confidence, risk flags, and an explanation for each plan.
+- High-risk plans require confirmation before enqueueing unless overridden with --yes.
+
+LATEST UPDATE (OPERATOR NOTES)
+
+Status:
+- Phase 2 now includes confidence scoring, risk flags, and confirmation gating for ask.
+
+Next steps:
+- Make planner prompts policy-aware (still pending).
+
+Tests run:
+- python scripts/verify.py
 
 -------------------------------------------------------------------------------
 

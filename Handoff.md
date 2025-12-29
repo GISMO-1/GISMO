@@ -171,7 +171,9 @@ Plan assessment gate:
 LATEST UPDATE (OPERATOR NOTES)
 
 Status:
-- Ask CLI now accepts options after the prompt so `--timeout-s` drives the LLM banner and request timeout.
+- Ask now uses Ollama JSON mode with keep_alive and best-effort JSON extraction.
+- Plans with more than 12 actions are explicitly flagged in notes.
+- Ollama-related tests are hermetic by default with an optional integration gate.
 
 Next steps:
 - Make planner prompts policy-aware (still pending).

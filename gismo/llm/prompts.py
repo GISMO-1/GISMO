@@ -34,6 +34,8 @@ def build_system_prompt() -> str:
         "command must be a GISMO operator command string (echo:, note:, or graph:), "
         "for example \"echo: hello\". "
         "Keep actions small and sequenced. "
+        "If the operator requests more than 12 items, produce ONE enqueue action "
+        "that describes the batch instead of listing each item. "
         "If the user request is unsafe or unsupported, return actions as an empty array "
         "and explain why in notes. "
         "Examples:\n"

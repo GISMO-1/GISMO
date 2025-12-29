@@ -115,11 +115,20 @@ Planner behavior:
 - Produces enqueue-only plans under strict schema.
 - Actions are bounded (hard limit on action count).
 - Normalization/coercion exists so malformed model output does not break the system.
+- Ollama is called in JSON mode and uses keep_alive to avoid repeated model reloads.
 - Full audit trail is recorded for planner outputs and execution.
 - Every plan includes a confidence assessment, risk flags, and a short explanation.
 - Higher-risk plans require confirmation before enqueueing unless --yes is used.
 - --explain prints additional assessment details.
 - Use --debug to print tracebacks for ask failures.
+
+Planner configuration:
+- Increase --timeout-s on CPU machines (60s baseline) if prompts time out.
+- Environment overrides:
+  - GISMO_LLM_MODEL or GISMO_OLLAMA_MODEL (model name)
+  - GISMO_LLM_TIMEOUT_S or GISMO_OLLAMA_TIMEOUT_S (LLM timeout)
+  - GISMO_OLLAMA_URL or OLLAMA_HOST (Ollama endpoint)
+- keep_alive defaults to 10m so models stay loaded for smoother repeated calls.
 
 -------------------------------------------------------------------------------
 

@@ -152,7 +152,7 @@ class AskCliTest(unittest.TestCase):
                 with mock.patch.object(cli_main, "ollama_chat", return_value=response):
                     buffer = io.StringIO()
                     with contextlib.redirect_stderr(buffer):
-                        with self.assertRaises(ValueError):
+                        with self.assertRaises(SystemExit) as exc:
                             cli_main.run_ask(
                                 db_path,
                                 "bad",
@@ -165,12 +165,100 @@ class AskCliTest(unittest.TestCase):
                                 yes=False,
                                 explain=False,
                             )
-            self.assertIn("not json", buffer.getvalue())
+                        self.assertNotEqual(exc.exception.code, 0)
+            self.assertIn("LLM response was not valid JSON", buffer.getvalue())
 
             state_store = StateStore(db_path)
             events = state_store.list_events()
             self.assertTrue(events)
             self.assertEqual(events[0].event_type, EVENT_TYPE_LLM_PLAN)
+    
+    def test_ask_best_effort_json_extraction_succeeds(self) -> None:
+        response = (
+            "Here is the plan:\n"
+            "```json\n"
+            "{\"intent\":\"queue\",\"assumptions\":[],\"actions\":["
+            "{\"type\":\"enqueue\",\"command\":\"echo: hello\","
+            "\"timeout_seconds\":30,\"retries\":0,\"why\":\"test\",\"risk\":\"low\"}"
+            "],\"notes\":[]}\n"
+            "```\n"
+            "Thanks."
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = str(Path(tmpdir) / "state.db")
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "GISMO_OLLAMA_MODEL": "",
+                    "GISMO_OLLAMA_TIMEOUT_S": "",
+                    "GISMO_OLLAMA_URL": "",
+                    "GISMO_LLM_MODEL": "",
+                    "OLLAMA_HOST": "",
+                },
+                clear=False,
+            ):
+                with mock.patch.object(cli_main, "ollama_chat", return_value=response):
+                    cli_main.run_ask(
+                        db_path,
+                        "enqueue hello",
+                        model=None,
+                        host=None,
+                        timeout_s=None,
+                        enqueue=False,
+                        dry_run=True,
+                        max_actions=10,
+                        yes=False,
+                        explain=False,
+                    )
+            state_store = StateStore(db_path)
+            event = state_store.list_events()[0]
+            payload = event.json_payload
+            assert payload is not None
+            plan = payload["plan"]
+            self.assertEqual(plan["intent"], "queue")
+            self.assertEqual(plan["actions"][0]["command"], "echo: hello")
+
+    def test_ask_best_effort_json_extraction_fails_on_comments(self) -> None:
+        response = (
+            "{"
+            "\"intent\": \"bad\","
+            "\"assumptions\": [],"
+            "\"actions\": [],"
+            "\"notes\": []"
+            "// trailing comment"
+            "}"
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = str(Path(tmpdir) / "state.db")
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "GISMO_OLLAMA_MODEL": "",
+                    "GISMO_OLLAMA_TIMEOUT_S": "",
+                    "GISMO_OLLAMA_URL": "",
+                    "GISMO_LLM_MODEL": "",
+                    "OLLAMA_HOST": "",
+                },
+                clear=False,
+            ):
+                with mock.patch.object(cli_main, "ollama_chat", return_value=response):
+                    buffer = io.StringIO()
+                    with contextlib.redirect_stderr(buffer):
+                        with self.assertRaises(SystemExit) as exc:
+                            cli_main.run_ask(
+                                db_path,
+                                "bad plan",
+                                model=None,
+                                host=None,
+                                timeout_s=None,
+                                enqueue=False,
+                                dry_run=True,
+                                max_actions=10,
+                                yes=False,
+                                explain=False,
+                            )
+                        self.assertNotEqual(exc.exception.code, 0)
+            self.assertIn("LLM response was not valid JSON", buffer.getvalue())
 
     def test_ask_env_defaults_used_for_model_and_timeout(self) -> None:
         response = json.dumps(
@@ -202,6 +290,36 @@ class AskCliTest(unittest.TestCase):
                     _, kwargs = ollama_mock.call_args
                     self.assertEqual(kwargs["model"], "custom-model")
                     self.assertEqual(kwargs["timeout_s"], 42)
+
+    def test_ask_env_defaults_used_for_llm_timeout(self) -> None:
+        response = json.dumps(
+            {"intent": "ping", "assumptions": [], "actions": [], "notes": []}
+        )
+        env = {
+            "GISMO_LLM_TIMEOUT_S": "33",
+            "GISMO_OLLAMA_TIMEOUT_S": "",
+            "GISMO_OLLAMA_URL": "http://127.0.0.1:11434",
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = str(Path(tmpdir) / "state.db")
+            with mock.patch.dict(os.environ, env, clear=False):
+                with mock.patch.object(
+                    cli_main, "ollama_chat", return_value=response
+                ) as ollama_mock:
+                    cli_main.run_ask(
+                        db_path,
+                        "ping",
+                        model=None,
+                        host=None,
+                        timeout_s=None,
+                        enqueue=False,
+                        dry_run=True,
+                        max_actions=5,
+                        yes=False,
+                        explain=False,
+                    )
+                    _, kwargs = ollama_mock.call_args
+                    self.assertEqual(kwargs["timeout_s"], 33)
 
     def test_ask_timeout_override_beats_env(self) -> None:
         response = json.dumps(
@@ -425,6 +543,29 @@ class AskCliTest(unittest.TestCase):
         normalized = cli_main._normalize_llm_plan(plan, max_actions=5)
         self.assertEqual(normalized["assumptions"], [])
         self.assertEqual(normalized["actions"][0]["command"], "echo: hello")
+
+    def test_normalize_plan_flags_too_many_actions(self) -> None:
+        actions = [
+            {
+                "type": "enqueue",
+                "command": f"note: step {index}",
+                "timeout_seconds": 30,
+                "retries": 0,
+                "why": "test",
+                "risk": "low",
+            }
+            for index in range(13)
+        ]
+        plan = {
+            "intent": "enqueue notes",
+            "assumptions": [],
+            "actions": actions,
+            "notes": [],
+        }
+        normalized = cli_main._normalize_llm_plan(plan, max_actions=20)
+        self.assertTrue(
+            any("Too many actions (13)" in note for note in normalized["notes"])
+        )
 
     def test_ask_enqueue_requires_confirmation_interactive_decline(self) -> None:
         actions = [

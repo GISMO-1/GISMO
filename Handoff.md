@@ -171,7 +171,7 @@ Plan assessment gate:
 LATEST UPDATE (OPERATOR NOTES)
 
 Status:
-- Added a console script entrypoint (`gismo`) for CLI access via pip installs.
+- Ask CLI now accepts options after the prompt so `--timeout-s` drives the LLM banner and request timeout.
 
 Next steps:
 - Make planner prompts policy-aware (still pending).

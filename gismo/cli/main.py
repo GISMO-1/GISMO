@@ -1740,7 +1740,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     ask_parser.add_argument(
         "text",
-        nargs=argparse.REMAINDER,
+        nargs="+",
         help="Natural language request for the planner",
     )
     ask_parser.set_defaults(handler=_handle_ask)

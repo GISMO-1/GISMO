@@ -499,14 +499,12 @@ def run_export(
     policy_path, warn = _resolve_default_policy_path(policy_path, repo_root)
     if warn:
         _warn_missing_default_policy()
-    policy = load_policy(policy_path, repo_root=repo_root)
-    base_dir = policy.fs.base_dir
+    load_policy(policy_path, repo_root=repo_root)
     if use_latest:
         export_path = export_latest_run_jsonl(
             state_store,
             out_path=out_path,
             redact=redact,
-            base_dir=base_dir,
         )
     else:
         export_path = export_run_jsonl(
@@ -514,7 +512,6 @@ def run_export(
             run_id,
             out_path=out_path,
             redact=redact,
-            base_dir=base_dir,
         )
     print(f"Exported run audit to {export_path}")
 
@@ -1564,7 +1561,7 @@ def build_parser() -> argparse.ArgumentParser:
     export_parser.add_argument(
         "--out",
         default=None,
-        help="Output file path (defaults to exports/RUN_ID.jsonl)",
+        help="Output file path (defaults to exports/RUN_ID.jsonl next to --db)",
     )
     export_parser.add_argument(
         "--redact",

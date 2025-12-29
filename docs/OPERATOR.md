@@ -17,6 +17,14 @@ Each operator command has a single responsibility:
 - `maintain`: requeues stale `IN_PROGRESS` queue items; safe to run alongside a daemon.
 - `ask`: calls a local Ollama model to propose a JSON plan (dry-run by default).
 
+## Exports
+
+Exports default to the `exports/` folder next to `.gismo`, derived from `--db`, so the output location is stable across terminals.
+
+```bash
+python -m gismo.cli.main export --latest --db .gismo/state.db
+```
+
 ## LLM planner (local)
 
 The `ask` command calls a local Ollama instance on 127.0.0.1:11434 by default and never executes commands directly.

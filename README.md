@@ -162,6 +162,14 @@ PowerShell note: `<` and `>` are redirection operators. Replace placeholders wit
 python -m gismo.cli.main run show RUN_ID
 ```
 
+## Exporting Run Audits
+
+Exports default to the `exports/` folder next to `.gismo`, derived from `--db`, so the output location is stable across terminals.
+
+```bash
+python -m gismo.cli.main export --latest --db .gismo/state.db
+```
+
 ---
 
 ## LLM Planner (Local Only)

@@ -34,7 +34,7 @@ from gismo.core.state import StateStore
 from gismo.core.tools import EchoTool, ToolRegistry, WriteNoteTool
 from gismo.core.toolpacks.fs_tools import FileSystemConfig, ListDirTool, ReadFileTool, WriteFileTool
 from gismo.core.toolpacks.shell_tool import ShellConfig, ShellTool
-from gismo.llm.ollama import ollama_chat, resolve_ollama_config
+from gismo.llm.ollama import OllamaError, ollama_chat, resolve_ollama_config
 from gismo.llm.prompts import build_system_prompt, build_user_prompt
 
 
@@ -594,6 +594,7 @@ def run_ask(
     max_actions: int,
     yes: bool,
     explain: bool,
+    debug: bool = False,
 ) -> None:
     if not user_text or not user_text.strip():
         raise ValueError("ask requires a natural language request.")
@@ -610,7 +611,7 @@ def run_ask(
             host=config.url,
             timeout_s=config.timeout_s,
         )
-    except RuntimeError as exc:
+    except OllamaError as exc:
         payload = {
             "model": config.model,
             "host": config.url,
@@ -627,7 +628,10 @@ def run_ask(
             message="LLM request failed.",
             json_payload=payload,
         )
-        raise
+        print(f"ERROR: {exc}", file=sys.stderr)
+        if debug:
+            raise
+        raise SystemExit(1)
     try:
         parsed = json.loads(raw_response)
     except json.JSONDecodeError as exc:
@@ -964,6 +968,7 @@ def _handle_ask(args: argparse.Namespace) -> None:
         max_actions=args.max_actions,
         yes=args.yes,
         explain=args.explain,
+        debug=args.debug,
     )
 
 
@@ -1715,6 +1720,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--explain",
         action="store_true",
         help="Print expanded assessment explanation details",
+    )
+    ask_parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Print debug tracebacks on LLM request errors",
     )
     ask_parser.add_argument(
         "--dry-run",

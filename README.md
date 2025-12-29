@@ -119,6 +119,7 @@ Planner behavior:
 - Every plan includes a confidence assessment, risk flags, and a short explanation.
 - Higher-risk plans require confirmation before enqueueing unless --yes is used.
 - --explain prints additional assessment details.
+- Use --debug to print tracebacks for ask failures.
 
 -------------------------------------------------------------------------------
 

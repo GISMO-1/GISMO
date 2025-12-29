@@ -228,6 +228,31 @@ class AskCliTest(unittest.TestCase):
                     _, kwargs = ollama_mock.call_args
                     self.assertEqual(kwargs["timeout_s"], 5)
 
+    def test_ask_timeout_override_printed_in_llm_line(self) -> None:
+        response = json.dumps(
+            {"intent": "ping", "assumptions": [], "actions": [], "notes": []}
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = str(Path(tmpdir) / "state.db")
+            with mock.patch.dict(os.environ, {"GISMO_OLLAMA_TIMEOUT_S": "120"}, clear=False):
+                with mock.patch.object(cli_main, "ollama_chat", return_value=response):
+                    buffer = io.StringIO()
+                    with contextlib.redirect_stdout(buffer):
+                        cli_main.run_ask(
+                            db_path,
+                            "ping",
+                            model=None,
+                            host=None,
+                            timeout_s=2,
+                            enqueue=False,
+                            dry_run=True,
+                            max_actions=5,
+                            yes=False,
+                            explain=False,
+                        )
+            output = buffer.getvalue()
+            self.assertIn("timeout=2s", output)
+
     def test_ask_coerces_echo_action_type_to_enqueue(self) -> None:
         response = json.dumps(
             {
@@ -354,21 +379,35 @@ class AskCliTest(unittest.TestCase):
                 with mock.patch.object(
                     cli_main,
                     "ollama_chat",
-                    side_effect=RuntimeError("Ollama request failed (timeout/connection)."),
+                    side_effect=cli_main.OllamaError(
+                        "Ollama request failed (timeout/connection) after 120s. "
+                        "Verify `ollama ps` and that http://127.0.0.1:11434 is "
+                        "reachable. Consider a smaller model or increase --timeout-s."
+                    ),
                 ):
-                    with self.assertRaises(RuntimeError):
-                        cli_main.run_ask(
-                            db_path,
-                            "ping",
-                            model=None,
-                            host=None,
-                            timeout_s=None,
-                            enqueue=False,
-                            dry_run=True,
-                            max_actions=5,
-                            yes=False,
-                            explain=False,
-                        )
+                    stdout_buffer = io.StringIO()
+                    stderr_buffer = io.StringIO()
+                    with contextlib.redirect_stdout(stdout_buffer), contextlib.redirect_stderr(
+                        stderr_buffer
+                    ):
+                        with self.assertRaises(SystemExit) as exc:
+                            cli_main.run_ask(
+                                db_path,
+                                "ping",
+                                model=None,
+                                host=None,
+                                timeout_s=None,
+                                enqueue=False,
+                                dry_run=True,
+                                max_actions=5,
+                                yes=False,
+                                explain=False,
+                            )
+                    self.assertNotEqual(exc.exception.code, 0)
+                    stderr_output = stderr_buffer.getvalue()
+                    self.assertIn("ERROR: Ollama request failed", stderr_output)
+                    self.assertNotIn("Traceback", stderr_output)
+                    self.assertNotIn("Traceback", stdout_buffer.getvalue())
             state_store = StateStore(db_path)
             events = state_store.list_events()
             self.assertTrue(events)

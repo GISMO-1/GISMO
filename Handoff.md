@@ -171,10 +171,11 @@ Plan assessment gate:
 LATEST UPDATE (OPERATOR NOTES)
 
 Status:
-- Phase 2 now includes confidence scoring, risk flags, and confirmation gating for ask.
+- Ask now reports Ollama timeouts cleanly, with accurate timeout display and a --debug flag.
 
 Next steps:
 - Make planner prompts policy-aware (still pending).
+- Monitor operator feedback on ask timeout UX.
 
 Tests run:
 - python scripts/verify.py

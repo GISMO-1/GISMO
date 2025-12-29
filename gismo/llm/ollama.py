@@ -22,6 +22,21 @@ class OllamaConfig:
     timeout_s: int
 
 
+class OllamaError(RuntimeError):
+    def __init__(
+        self,
+        message: str,
+        *,
+        timeout_s: int | None = None,
+        url: str | None = None,
+        status_code: int | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.timeout_s = timeout_s
+        self.url = url
+        self.status_code = status_code
+
+
 def _coerce_timeout(value: str | None, default: int) -> int:
     if not value:
         return default
@@ -105,12 +120,19 @@ def ollama_chat(
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8") if exc.fp else ""
         message = f"Ollama error {exc.code} from {config.url}. {detail}".strip()
-        raise RuntimeError(message) from exc
+        raise OllamaError(
+            message,
+            timeout_s=config.timeout_s,
+            url=config.url,
+            status_code=exc.code,
+        ) from exc
     except (urllib.error.URLError, socket.timeout, TimeoutError) as exc:
-        raise RuntimeError(
-            "Ollama request failed (timeout/connection). Verify `ollama ps` and that "
-            f"{config.url} is reachable. Try a smaller model (phi3:mini) or increase "
-            "--timeout-s."
+        raise OllamaError(
+            "Ollama request failed (timeout/connection) after "
+            f"{config.timeout_s}s. Verify `ollama ps` and that {config.url} is "
+            "reachable. Consider a smaller model or increase --timeout-s.",
+            timeout_s=config.timeout_s,
+            url=config.url,
         ) from exc
 
     try:
@@ -118,7 +140,15 @@ def ollama_chat(
         message = payload_json.get("message") or {}
         content = message.get("content")
     except (json.JSONDecodeError, TypeError) as exc:
-        raise RuntimeError("Invalid JSON response from Ollama.") from exc
+        raise OllamaError(
+            "Invalid JSON response from Ollama.",
+            timeout_s=config.timeout_s,
+            url=config.url,
+        ) from exc
     if not isinstance(content, str):
-        raise RuntimeError("Ollama response missing assistant content.")
+        raise OllamaError(
+            "Ollama response missing assistant content.",
+            timeout_s=config.timeout_s,
+            url=config.url,
+        )
     return content

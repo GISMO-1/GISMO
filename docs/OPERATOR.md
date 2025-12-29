@@ -160,6 +160,7 @@ Planner rules:
 - Confidence assessment and risk flags are printed with every plan
 - Higher-risk plans require confirmation before enqueueing unless --yes is used
 - Use --explain to print expanded assessment details
+- Use --debug to print tracebacks for ask failures
 
 Always prefer:
 - --dry-run first

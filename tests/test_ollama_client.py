@@ -1,4 +1,5 @@
 import json
+import subprocess
 import unittest
 from unittest import mock
 
@@ -35,6 +36,52 @@ class OllamaClientPayloadTest(unittest.TestCase):
         self.assertEqual(body["format"], "json")
         self.assertEqual(body["keep_alive"], ollama.DEFAULT_OLLAMA_KEEP_ALIVE)
         self.assertEqual(body["options"]["temperature"], 0)
+
+
+class OllamaCurlTransportTest(unittest.TestCase):
+    def test_curl_transport_writes_payload_and_invokes_curl(self) -> None:
+        captured = {}
+        payload = ollama.build_ollama_chat_payload(
+            "ping",
+            "return JSON",
+            model="phi3:mini",
+        )
+        payload_json = json.dumps(payload)
+        config = ollama.OllamaConfig(
+            url="http://127.0.0.1:11434",
+            model="phi3:mini",
+            timeout_s=5,
+            transport="curl",
+        )
+
+        def fake_run(command, capture_output, text, check, timeout):
+            captured["command"] = command
+            captured["timeout"] = timeout
+            data_arg = command[-1]
+            self.assertTrue(data_arg.startswith("@"))
+            with open(data_arg[1:], encoding="utf-8") as handle:
+                body = json.load(handle)
+            self.assertEqual(body["format"], "json")
+            self.assertEqual(body["options"]["temperature"], 0)
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                stdout='{"message":{"content":"{}"}}',
+                stderr="",
+            )
+
+        with mock.patch.object(ollama.subprocess, "run", side_effect=fake_run):
+            response = ollama._ollama_chat_via_curl(
+                "http://127.0.0.1:11434/api/chat",
+                payload_json,
+                timeout_s=config.timeout_s,
+                config=config,
+                curl_executable="curl.exe",
+            )
+        self.assertEqual(response, "{}")
+        self.assertIn("curl.exe", captured["command"][0])
+        self.assertIn("--data-binary", captured["command"])
+        self.assertEqual(captured["timeout"], 5)
 
 
 if __name__ == "__main__":

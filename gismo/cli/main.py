@@ -119,34 +119,11 @@ def extract_json_object(text: str) -> str | None:
     cleaned = _strip_code_fences(text).strip()
     if not cleaned:
         return None
-    for start, ch in enumerate(cleaned):
-        if ch in "{[":
-            open_ch = ch
-            close_ch = "}" if ch == "{" else "]"
-            depth = 0
-            in_string = False
-            escape = False
-            for index in range(start, len(cleaned)):
-                current = cleaned[index]
-                if in_string:
-                    if escape:
-                        escape = False
-                    elif current == "\\":
-                        escape = True
-                    elif current == '"':
-                        in_string = False
-                    continue
-                if current == '"':
-                    in_string = True
-                    continue
-                if current == open_ch:
-                    depth += 1
-                elif current == close_ch:
-                    depth -= 1
-                    if depth == 0:
-                        return cleaned[start : index + 1]
-            return None
-    return None
+    start = cleaned.find("{")
+    end = cleaned.rfind("}")
+    if start == -1 or end == -1 or end <= start:
+        return None
+    return cleaned[start : end + 1]
 
 
 def _normalize_llm_plan(plan: dict, max_actions: int) -> dict:
@@ -712,15 +689,14 @@ def run_ask(
                 message="LLM plan parsing failed.",
                 json_payload=payload,
             )
+            raw_preview = raw_response[:200]
             message = (
                 "LLM response was not valid JSON. "
-                f"model={config.model} endpoint={config.url} timeout={config.timeout_s}s. "
-                "Try --timeout-s 60+ and/or switch models."
+                f"model={config.model} timeout={config.timeout_s}s "
+                f"raw_response={raw_preview} "
+                "Model violated JSON-only contract; try another model or transport=curl"
             )
-            print(f"ERROR: {message}", file=sys.stderr)
-            if debug:
-                raise ValueError(message) from exc
-            raise SystemExit(1)
+            raise ValueError(message) from exc
 
     if not isinstance(parsed, dict):
         payload = {

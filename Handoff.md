@@ -171,8 +171,8 @@ Plan assessment gate:
 LATEST UPDATE (OPERATOR NOTES)
 
 Status:
-- Ask now uses Ollama JSON mode with keep_alive and best-effort JSON extraction.
-- Plans with more than 12 actions are explicitly flagged in notes.
+- Ask now supports curl transport selection for Ollama (Windows defaults to curl when available).
+- Ollama JSON parsing hardens against fenced output and reports richer errors.
 - Ollama-related tests are hermetic by default with an optional integration gate.
 
 Next steps:

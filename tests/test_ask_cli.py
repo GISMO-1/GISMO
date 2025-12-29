@@ -150,23 +150,21 @@ class AskCliTest(unittest.TestCase):
                 clear=False,
             ):
                 with mock.patch.object(cli_main, "ollama_chat", return_value=response):
-                    buffer = io.StringIO()
-                    with contextlib.redirect_stderr(buffer):
-                        with self.assertRaises(SystemExit) as exc:
-                            cli_main.run_ask(
-                                db_path,
-                                "bad",
-                                model=None,
-                                host=None,
-                                timeout_s=None,
-                                enqueue=False,
-                                dry_run=True,
-                                max_actions=10,
-                                yes=False,
-                                explain=False,
-                            )
-                        self.assertNotEqual(exc.exception.code, 0)
-            self.assertIn("LLM response was not valid JSON", buffer.getvalue())
+                    with self.assertRaises(ValueError) as exc:
+                        cli_main.run_ask(
+                            db_path,
+                            "bad",
+                            model=None,
+                            host=None,
+                            timeout_s=None,
+                            enqueue=False,
+                            dry_run=True,
+                            max_actions=10,
+                            yes=False,
+                            explain=False,
+                        )
+            self.assertIn("LLM response was not valid JSON", str(exc.exception))
+            self.assertIn("Model violated JSON-only contract", str(exc.exception))
 
             state_store = StateStore(db_path)
             events = state_store.list_events()
@@ -242,23 +240,21 @@ class AskCliTest(unittest.TestCase):
                 clear=False,
             ):
                 with mock.patch.object(cli_main, "ollama_chat", return_value=response):
-                    buffer = io.StringIO()
-                    with contextlib.redirect_stderr(buffer):
-                        with self.assertRaises(SystemExit) as exc:
-                            cli_main.run_ask(
-                                db_path,
-                                "bad plan",
-                                model=None,
-                                host=None,
-                                timeout_s=None,
-                                enqueue=False,
-                                dry_run=True,
-                                max_actions=10,
-                                yes=False,
-                                explain=False,
-                            )
-                        self.assertNotEqual(exc.exception.code, 0)
-            self.assertIn("LLM response was not valid JSON", buffer.getvalue())
+                    with self.assertRaises(ValueError) as exc:
+                        cli_main.run_ask(
+                            db_path,
+                            "bad plan",
+                            model=None,
+                            host=None,
+                            timeout_s=None,
+                            enqueue=False,
+                            dry_run=True,
+                            max_actions=10,
+                            yes=False,
+                            explain=False,
+                        )
+            self.assertIn("LLM response was not valid JSON", str(exc.exception))
+            self.assertIn("Model violated JSON-only contract", str(exc.exception))
 
     def test_ask_env_defaults_used_for_model_and_timeout(self) -> None:
         response = json.dumps(

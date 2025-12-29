@@ -169,6 +169,7 @@ Planner configuration:
   - GISMO_LLM_MODEL or GISMO_OLLAMA_MODEL
   - GISMO_LLM_TIMEOUT_S or GISMO_OLLAMA_TIMEOUT_S
   - GISMO_OLLAMA_URL or OLLAMA_HOST
+  - GISMO_OLLAMA_TRANSPORT=python|curl (Windows defaults to curl when available because urllib can be slow)
 - keep_alive defaults to 10m so models remain loaded for repeated calls.
 
 Always prefer:

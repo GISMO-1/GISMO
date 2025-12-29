@@ -7,8 +7,8 @@ from gismo.llm.prompts import build_system_prompt, build_user_prompt
 
 
 @unittest.skipUnless(
-    os.getenv("GISMO_TEST_INTEGRATION_OLLAMA") == "1",
-    "Set GISMO_TEST_INTEGRATION_OLLAMA=1 to run Ollama integration tests.",
+    os.getenv("GISMO_TEST_OLLAMA") == "1",
+    "Set GISMO_TEST_OLLAMA=1 to run Ollama integration tests.",
 )
 class OllamaIntegrationTest(unittest.TestCase):
     def test_ollama_chat_round_trip(self) -> None:

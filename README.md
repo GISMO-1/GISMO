@@ -164,6 +164,26 @@ python -m gismo.cli.main run show RUN_ID
 
 ---
 
+## LLM Planner (Local Only)
+
+GISMO can ask a local Ollama model to propose a JSON plan. The planner is **dry-run by default** and never executes commands directly.
+Use `--enqueue` to submit validated operator commands to the queue for daemon execution.
+
+```bash
+python -m gismo.cli.main ask --db .gismo/state.db "Create a quick echo and note plan"
+python -m gismo.cli.main ask --db .gismo/state.db --enqueue "Queue an echo and a note"
+python -m gismo.cli.main ask --db .gismo/state.db --enqueue --dry-run "Show what would be enqueued"
+```
+
+Defaults:
+
+* Model: `phi3:mini` (override with `--model` or `GISMO_LLM_MODEL`)
+* Host: `http://127.0.0.1:11434` (override with `--host` or `OLLAMA_HOST`)
+
+Every `ask` call writes an audit event (`llm_plan`) to the state database.
+
+---
+
 ## Operator Lifecycle
 
 Each operator command has one responsibility:

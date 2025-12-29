@@ -42,6 +42,9 @@ class QueueStatus(str, Enum):
     CANCELLED = "CANCELLED"
 
 
+EVENT_TYPE_LLM_PLAN = "llm_plan"
+
+
 @dataclass
 class Run:
     id: str = field(default_factory=lambda: str(uuid4()))

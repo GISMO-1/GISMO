@@ -5,7 +5,7 @@ import argparse
 import json
 import sys
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 from gismo.cli.operator import (
@@ -25,7 +25,7 @@ from gismo.cli.windows_utils import quote_windows_arg
 from gismo.core.agent import SimpleAgent
 from gismo.core.daemon import run_daemon_loop
 from gismo.core.export import export_latest_run_jsonl, export_run_jsonl
-from gismo.core.models import QueueStatus, TaskStatus
+from gismo.core.models import EVENT_TYPE_LLM_PLAN, QueueStatus, TaskStatus
 from gismo.core.maintenance import run_maintenance_iteration
 from gismo.core.orchestrator import Orchestrator
 from gismo.core.permissions import PermissionPolicy, load_policy
@@ -33,6 +33,8 @@ from gismo.core.state import StateStore
 from gismo.core.tools import EchoTool, ToolRegistry, WriteNoteTool
 from gismo.core.toolpacks.fs_tools import FileSystemConfig, ListDirTool, ReadFileTool, WriteFileTool
 from gismo.core.toolpacks.shell_tool import ShellConfig, ShellTool
+from gismo.llm.ollama import ollama_chat, resolve_ollama_host, resolve_ollama_model
+from gismo.llm.prompts import build_system_prompt, build_user_prompt
 
 
 def _fmt_dt(dt) -> str:
@@ -53,6 +55,123 @@ def _summarize_value(value: object, max_len: int) -> str:
     else:
         text = json.dumps(value, ensure_ascii=False, sort_keys=True)
     return _truncate(text, max_len)
+
+
+def _coerce_str_list(value: object) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return [str(item) for item in value if item is not None]
+    return [str(value)]
+
+
+def _coerce_int(value: object, default: int, minimum: int = 0) -> int:
+    try:
+        coerced = int(value)
+    except (TypeError, ValueError):
+        return default
+    if coerced < minimum:
+        return default
+    return coerced
+
+
+def _normalize_llm_plan(plan: dict, max_actions: int) -> dict:
+    intent = plan.get("intent")
+    intent_text = intent if isinstance(intent, str) else str(intent) if intent is not None else ""
+    assumptions = _coerce_str_list(plan.get("assumptions"))
+    notes = _coerce_str_list(plan.get("notes"))
+    raw_actions = plan.get("actions")
+    actions: list[dict[str, object]] = []
+    if isinstance(raw_actions, list):
+        for action in raw_actions:
+            if not isinstance(action, dict):
+                continue
+            action_type = action.get("type")
+            action_type_text = (
+                action_type.strip()
+                if isinstance(action_type, str)
+                else str(action_type).strip()
+                if action_type is not None
+                else ""
+            )
+            command = action.get("command")
+            command_text = (
+                command.strip()
+                if isinstance(command, str)
+                else str(command).strip()
+                if command is not None
+                else ""
+            )
+            timeout_seconds = _coerce_int(action.get("timeout_seconds"), 30, minimum=1)
+            retries = _coerce_int(action.get("retries"), 0, minimum=0)
+            why = action.get("why")
+            why_text = why if isinstance(why, str) else str(why) if why is not None else ""
+            risk = action.get("risk")
+            risk_text = risk.strip().lower() if isinstance(risk, str) else ""
+            if risk_text not in {"low", "medium", "high"}:
+                risk_text = "medium"
+            actions.append(
+                {
+                    "type": action_type_text,
+                    "command": command_text,
+                    "timeout_seconds": timeout_seconds,
+                    "retries": retries,
+                    "why": why_text,
+                    "risk": risk_text,
+                }
+            )
+    if max_actions <= 0:
+        raise ValueError("max_actions must be > 0")
+    if len(actions) > max_actions:
+        notes.append(
+            f"Truncated actions from {len(actions)} to {max_actions} based on --max-actions."
+        )
+        actions = actions[:max_actions]
+    unknown_types = sorted({a["type"] for a in actions if a["type"] and a["type"] != "enqueue"})
+    if unknown_types:
+        notes.append(f"Ignored unsupported action types: {', '.join(unknown_types)}.")
+    return {
+        "intent": intent_text,
+        "assumptions": assumptions,
+        "actions": actions,
+        "notes": notes,
+    }
+
+
+def _print_llm_plan(plan: dict) -> None:
+    print("=== GISMO LLM Plan ===")
+    intent = plan.get("intent") or "unspecified"
+    print(f"Intent: {intent}")
+    assumptions = plan.get("assumptions") or []
+    if assumptions:
+        print("Assumptions:")
+        for item in assumptions:
+            print(f"- {item}")
+    else:
+        print("Assumptions: none")
+    actions = plan.get("actions") or []
+    print("Actions:")
+    if not actions:
+        print("  (none)")
+    else:
+        for index, action in enumerate(actions, start=1):
+            action_type = action.get("type") or "unknown"
+            command = action.get("command") or "-"
+            print(f"{index}. {action_type}: {command}")
+            print(
+                "   "
+                f"timeout_seconds={action.get('timeout_seconds')} "
+                f"retries={action.get('retries')} "
+                f"risk={action.get('risk')}"
+            )
+            why = action.get("why")
+            if why:
+                print(f"   why: {why}")
+    notes = plan.get("notes") or []
+    if notes:
+        print("Notes:")
+        for note in notes:
+            print(f"- {note}")
 
 
 def _run_status(tasks: list) -> str:
@@ -357,6 +476,149 @@ def run_enqueue(
     print(f"Enqueued {item.id} status={item.status.value}")
 
 
+def run_ask(
+    db_path: str,
+    user_text: str,
+    *,
+    model: str | None,
+    host: str | None,
+    timeout_s: int,
+    enqueue: bool,
+    dry_run: bool,
+    max_actions: int,
+) -> None:
+    if not user_text or not user_text.strip():
+        raise ValueError("ask requires a natural language request.")
+    resolved_host = resolve_ollama_host(host)
+    resolved_model = resolve_ollama_model(model)
+    state_store = StateStore(db_path)
+    system_prompt = build_system_prompt()
+    user_prompt = build_user_prompt(user_text)
+    raw_response = ollama_chat(
+        user_prompt,
+        system_prompt,
+        model=resolved_model,
+        host=resolved_host,
+        timeout_s=timeout_s,
+    )
+    try:
+        parsed = json.loads(raw_response)
+    except json.JSONDecodeError as exc:
+        print(raw_response, file=sys.stderr)
+        payload = {
+            "model": resolved_model,
+            "host": resolved_host,
+            "user_text": user_text,
+            "plan": None,
+            "raw_response": raw_response,
+            "parse_error": str(exc),
+            "enqueue": enqueue,
+            "dry_run": dry_run,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+        state_store.record_event(
+            actor="ask",
+            event_type=EVENT_TYPE_LLM_PLAN,
+            message="LLM plan parsing failed.",
+            json_payload=payload,
+        )
+        raise ValueError("LLM response was not valid JSON.") from exc
+
+    if not isinstance(parsed, dict):
+        payload = {
+            "model": resolved_model,
+            "host": resolved_host,
+            "user_text": user_text,
+            "plan": None,
+            "raw_response": raw_response,
+            "parse_error": "Response JSON was not an object.",
+            "enqueue": enqueue,
+            "dry_run": dry_run,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+        state_store.record_event(
+            actor="ask",
+            event_type=EVENT_TYPE_LLM_PLAN,
+            message="LLM plan parsing failed.",
+            json_payload=payload,
+        )
+        raise ValueError("LLM response must be a JSON object.")
+    try:
+        plan = _normalize_llm_plan(parsed, max_actions=max_actions)
+    except ValueError as exc:
+        payload = {
+            "model": resolved_model,
+            "host": resolved_host,
+            "user_text": user_text,
+            "plan": None,
+            "raw_response": raw_response,
+            "parse_error": str(exc),
+            "enqueue": enqueue,
+            "dry_run": dry_run,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+        state_store.record_event(
+            actor="ask",
+            event_type=EVENT_TYPE_LLM_PLAN,
+            message="LLM plan parsing failed.",
+            json_payload=payload,
+        )
+        raise
+    _print_llm_plan(plan)
+    payload = {
+        "model": resolved_model,
+        "host": resolved_host,
+        "user_text": user_text,
+        "plan": plan,
+        "enqueue": enqueue,
+        "dry_run": dry_run,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+    state_store.record_event(
+        actor="ask",
+        event_type=EVENT_TYPE_LLM_PLAN,
+        message="LLM plan generated.",
+        json_payload=payload,
+    )
+
+    if not enqueue:
+        return
+    if dry_run:
+        print("Dry run: enqueue requested but no items were enqueued.")
+        return
+
+    enqueued_ids = []
+    skipped = []
+    for action in plan.get("actions", []):
+        if action.get("type") != "enqueue":
+            continue
+        command_text = action.get("command") or ""
+        if not command_text.strip():
+            skipped.append("Skipped enqueue action with empty command.")
+            continue
+        try:
+            parse_command(command_text)
+        except ValueError as exc:
+            skipped.append(f"Skipped invalid command '{command_text}': {exc}")
+            continue
+        item = state_store.enqueue_command(
+            command_text=command_text,
+            max_retries=int(action.get("retries") or 0),
+            timeout_seconds=int(action.get("timeout_seconds") or 30),
+        )
+        enqueued_ids.append(item.id)
+    if skipped:
+        print("Enqueue notes:")
+        for note in skipped:
+            print(f"- {note}")
+    if enqueued_ids:
+        print("Enqueued items:")
+        for item_id in enqueued_ids:
+            print(f"- {item_id}")
+    else:
+        print("No items enqueued.")
+
+
 def run_daemon(
     db_path: str,
     policy_path: str | None,
@@ -547,6 +809,23 @@ def _handle_enqueue(args: argparse.Namespace) -> None:
         run_id=args.run_id,
         max_retries=args.max_retries,
         timeout_seconds=args.timeout_seconds,
+    )
+
+
+def _handle_ask(args: argparse.Namespace) -> None:
+    user_text = " ".join(args.text).strip()
+    dry_run = True if args.dry_run is None else args.dry_run
+    if args.enqueue and args.dry_run is None:
+        dry_run = False
+    run_ask(
+        args.db_path,
+        user_text,
+        model=args.model,
+        host=args.host,
+        timeout_s=args.timeout,
+        enqueue=args.enqueue,
+        dry_run=dry_run,
+        max_actions=args.max_actions,
     )
 
 
@@ -1242,6 +1521,51 @@ def build_parser() -> argparse.ArgumentParser:
         help="Operator command string to enqueue",
     )
     enqueue_parser.set_defaults(handler=_handle_enqueue)
+
+    ask_parser = subparsers.add_parser(
+        "ask",
+        help="Request an LLM plan (local Ollama only)",
+        parents=[db_parent_optional],
+    )
+    ask_parser.add_argument(
+        "--model",
+        default=None,
+        help="Override the local LLM model (default: phi3:mini or GISMO_LLM_MODEL)",
+    )
+    ask_parser.add_argument(
+        "--host",
+        default=None,
+        help="Override the Ollama host URL (default: http://127.0.0.1:11434 or OLLAMA_HOST)",
+    )
+    ask_parser.add_argument(
+        "--timeout",
+        type=int,
+        default=60,
+        help="Timeout in seconds for the LLM call (default: 60)",
+    )
+    ask_parser.add_argument(
+        "--enqueue",
+        action="store_true",
+        help="Enqueue validated actions for the daemon to execute",
+    )
+    ask_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        default=None,
+        help="Show the plan without enqueueing (default unless --enqueue is set)",
+    )
+    ask_parser.add_argument(
+        "--max-actions",
+        type=int,
+        default=10,
+        help="Maximum number of actions to accept from the LLM (default: 10)",
+    )
+    ask_parser.add_argument(
+        "text",
+        nargs=argparse.REMAINDER,
+        help="Natural language request for the planner",
+    )
+    ask_parser.set_defaults(handler=_handle_ask)
 
     daemon_parser = subparsers.add_parser(
         "daemon",

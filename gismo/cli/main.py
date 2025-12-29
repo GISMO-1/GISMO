@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 import time
 from datetime import datetime, timezone
@@ -106,6 +107,48 @@ def _coerce_action_type_to_command(action_type_text: str) -> str | None:
     return candidate
 
 
+def _strip_code_fences(text: str) -> str:
+    cleaned = text.strip()
+    if "```" not in cleaned:
+        return cleaned
+    cleaned = re.sub(r"```[a-zA-Z0-9_-]*", "", cleaned)
+    return cleaned.strip()
+
+
+def extract_json_object(text: str) -> str | None:
+    cleaned = _strip_code_fences(text).strip()
+    if not cleaned:
+        return None
+    for start, ch in enumerate(cleaned):
+        if ch in "{[":
+            open_ch = ch
+            close_ch = "}" if ch == "{" else "]"
+            depth = 0
+            in_string = False
+            escape = False
+            for index in range(start, len(cleaned)):
+                current = cleaned[index]
+                if in_string:
+                    if escape:
+                        escape = False
+                    elif current == "\\":
+                        escape = True
+                    elif current == '"':
+                        in_string = False
+                    continue
+                if current == '"':
+                    in_string = True
+                    continue
+                if current == open_ch:
+                    depth += 1
+                elif current == close_ch:
+                    depth -= 1
+                    if depth == 0:
+                        return cleaned[start : index + 1]
+            return None
+    return None
+
+
 def _normalize_llm_plan(plan: dict, max_actions: int) -> dict:
     allowed_fields = {"intent", "assumptions", "actions", "notes"}
     unknown_fields = set(plan.keys()) - allowed_fields
@@ -184,9 +227,15 @@ def _normalize_llm_plan(plan: dict, max_actions: int) -> dict:
             )
     if max_actions <= 0:
         raise ValueError("max_actions must be > 0")
-    if len(actions) > max_actions:
+    original_action_count = len(actions)
+    if original_action_count > 12:
         notes.append(
-            f"Truncated actions from {len(actions)} to {max_actions} based on --max-actions."
+            "Too many actions "
+            f"({original_action_count}). Please ask for 12 or fewer, or request batching."
+        )
+    if original_action_count > max_actions:
+        notes.append(
+            f"Truncated actions from {original_action_count} to {max_actions} based on --max-actions."
         )
         actions = actions[:max_actions]
     unknown_types = sorted({a["type"] for a in actions if a["type"] and a["type"] != "enqueue"})
@@ -632,29 +681,46 @@ def run_ask(
         if debug:
             raise
         raise SystemExit(1)
+    parsed: dict | None = None
+    parse_error: str | None = None
     try:
         parsed = json.loads(raw_response)
     except json.JSONDecodeError as exc:
-        print(raw_response, file=sys.stderr)
-        payload = {
-            "model": config.model,
-            "host": config.url,
-            "timeout_s": config.timeout_s,
-            "user_text": user_text,
-            "plan": None,
-            "raw_response": raw_response,
-            "parse_error": str(exc),
-            "enqueue": enqueue,
-            "dry_run": dry_run,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-        }
-        state_store.record_event(
-            actor="ask",
-            event_type=EVENT_TYPE_LLM_PLAN,
-            message="LLM plan parsing failed.",
-            json_payload=payload,
-        )
-        raise ValueError("LLM response was not valid JSON.") from exc
+        parse_error = str(exc)
+        extracted = extract_json_object(raw_response)
+        if extracted:
+            try:
+                parsed = json.loads(extracted)
+            except json.JSONDecodeError as exc_extracted:
+                parse_error = str(exc_extracted)
+        if parsed is None:
+            payload = {
+                "model": config.model,
+                "host": config.url,
+                "timeout_s": config.timeout_s,
+                "user_text": user_text,
+                "plan": None,
+                "raw_response": raw_response,
+                "parse_error": parse_error,
+                "enqueue": enqueue,
+                "dry_run": dry_run,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            }
+            state_store.record_event(
+                actor="ask",
+                event_type=EVENT_TYPE_LLM_PLAN,
+                message="LLM plan parsing failed.",
+                json_payload=payload,
+            )
+            message = (
+                "LLM response was not valid JSON. "
+                f"model={config.model} endpoint={config.url} timeout={config.timeout_s}s. "
+                "Try --timeout-s 60+ and/or switch models."
+            )
+            print(f"ERROR: {message}", file=sys.stderr)
+            if debug:
+                raise ValueError(message) from exc
+            raise SystemExit(1)
 
     if not isinstance(parsed, dict):
         payload = {
@@ -675,7 +741,14 @@ def run_ask(
             message="LLM plan parsing failed.",
             json_payload=payload,
         )
-        raise ValueError("LLM response must be a JSON object.")
+        message = (
+            "LLM response was not a JSON object. "
+            f"model={config.model} endpoint={config.url} timeout={config.timeout_s}s."
+        )
+        print(f"ERROR: {message}", file=sys.stderr)
+        if debug:
+            raise ValueError(message)
+        raise SystemExit(1)
     try:
         plan = _normalize_llm_plan(parsed, max_actions=max_actions)
     except ValueError as exc:

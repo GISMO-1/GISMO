@@ -13,6 +13,7 @@ from typing import Any
 DEFAULT_OLLAMA_URL = "http://127.0.0.1:11434"
 DEFAULT_OLLAMA_MODEL = "phi3:mini"
 DEFAULT_OLLAMA_TIMEOUT_S = 120
+DEFAULT_OLLAMA_KEEP_ALIVE = "10m"
 
 
 @dataclass(frozen=True)
@@ -72,7 +73,7 @@ def resolve_ollama_model(model: str | None = None) -> str:
 def resolve_ollama_timeout(timeout_s: int | None = None) -> int:
     if timeout_s is not None and timeout_s > 0:
         return timeout_s
-    env_value = os.getenv("GISMO_OLLAMA_TIMEOUT_S")
+    env_value = os.getenv("GISMO_OLLAMA_TIMEOUT_S") or os.getenv("GISMO_LLM_TIMEOUT_S")
     return _coerce_timeout(env_value, DEFAULT_OLLAMA_TIMEOUT_S)
 
 
@@ -89,6 +90,27 @@ def resolve_ollama_config(
     )
 
 
+def build_ollama_chat_payload(
+    prompt: str,
+    system: str,
+    *,
+    model: str,
+    keep_alive: str = DEFAULT_OLLAMA_KEEP_ALIVE,
+    temperature: float = 0,
+) -> dict[str, Any]:
+    return {
+        "model": model,
+        "stream": False,
+        "format": "json",
+        "keep_alive": keep_alive,
+        "options": {"temperature": temperature},
+        "messages": [
+            {"role": "system", "content": system},
+            {"role": "user", "content": prompt},
+        ],
+    }
+
+
 def ollama_chat(
     prompt: str,
     system: str,
@@ -99,14 +121,11 @@ def ollama_chat(
     """Call Ollama chat API and return assistant content."""
     config = resolve_ollama_config(url=host, model=model, timeout_s=timeout_s)
     url = f"{config.url}/api/chat"
-    payload = {
-        "model": config.model,
-        "stream": False,
-        "messages": [
-            {"role": "system", "content": system},
-            {"role": "user", "content": prompt},
-        ],
-    }
+    payload = build_ollama_chat_payload(
+        prompt,
+        system,
+        model=config.model,
+    )
     data = json.dumps(payload).encode("utf-8")
     request = urllib.request.Request(
         url,

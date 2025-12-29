@@ -155,12 +155,21 @@ Planner rules:
 - Produces enqueue-only plans
 - Action count is bounded
 - Output is normalized
+- Uses Ollama JSON mode with keep_alive to reduce reload latency
 - Policy is still enforced at execution time
 - Planner cannot execute directly
 - Confidence assessment and risk flags are printed with every plan
 - Higher-risk plans require confirmation before enqueueing unless --yes is used
 - Use --explain to print expanded assessment details
 - Use --debug to print tracebacks for ask failures
+
+Planner configuration:
+- Increase --timeout-s on CPU machines (60s baseline) if Ollama is slow.
+- Environment overrides:
+  - GISMO_LLM_MODEL or GISMO_OLLAMA_MODEL
+  - GISMO_LLM_TIMEOUT_S or GISMO_OLLAMA_TIMEOUT_S
+  - GISMO_OLLAMA_URL or OLLAMA_HOST
+- keep_alive defaults to 10m so models remain loaded for repeated calls.
 
 Always prefer:
 - --dry-run first

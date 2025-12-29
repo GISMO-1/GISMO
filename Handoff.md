@@ -1,13 +1,13 @@
 # Handoff
 
 ## Status
-- Centralized Ollama config with GISMO_OLLAMA_* env vars, CLI overrides, and ask output header details.
-- Hardened ask planning prompts and normalization, including strict field validation and grounded assumptions.
-- Added ask failure auditing (`ask_failed`), token env fallback coverage, and updated docs/tests.
+- Tightened LLM planner prompt with strict enqueue-only schema and examples.
+- Normalized ask plans now coerce echo/note/graph action type near-misses into enqueue commands while preserving safeguards.
+- Added ask CLI tests for action coercion and unsupported action reporting; updated README guidance.
 
 ## Next Steps
-- Validate `ask` against a live Ollama instance on Windows and confirm env overrides behave as expected.
-- Extend planner validation rules if new operator command verbs are introduced.
+- Validate `ask` against a live Ollama instance with smaller models (phi3:mini) for plan compliance.
+- Extend operator command patterns if new verbs are added.
 
 ## Tests
 - `python scripts/verify.py`

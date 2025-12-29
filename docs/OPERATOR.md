@@ -111,7 +111,7 @@ QUEUE LIST:
 
 QUEUE SHOW:
 
-  gismo queue show <ID_OR_PREFIX>
+  gismo queue show ID_OR_PREFIX
 
 Notes:
 - Short ID prefixes are supported
@@ -128,7 +128,7 @@ LATEST RUN:
 
 SPECIFIC RUN:
 
-  gismo export --run <RUN_ID>
+  gismo export --run RUN_ID
 
 ALL RUNS:
 
@@ -157,6 +157,9 @@ Planner rules:
 - Output is normalized
 - Policy is still enforced at execution time
 - Planner cannot execute directly
+- Confidence assessment and risk flags are printed with every plan
+- Higher-risk plans require confirmation before enqueueing unless --yes is used
+- Use --explain to print expanded assessment details
 
 Always prefer:
 - --dry-run first

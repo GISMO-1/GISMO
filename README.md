@@ -94,7 +94,7 @@ Queue introspection:
 
   gismo queue stats
   gismo queue list
-  gismo queue show <ID_OR_PREFIX>
+  gismo queue show ID_OR_PREFIX
 
 Notes:
 - queue show supports short-id prefix resolution (with ambiguity detection).
@@ -103,7 +103,7 @@ Notes:
 Export audit logs:
 
   gismo export --latest
-  gismo export --run <RUN_ID>
+  gismo export --run RUN_ID
   gismo export --all
 
 Planner (local LLM via Ollama):
@@ -116,6 +116,9 @@ Planner behavior:
 - Actions are bounded (hard limit on action count).
 - Normalization/coercion exists so malformed model output does not break the system.
 - Full audit trail is recorded for planner outputs and execution.
+- Every plan includes a confidence assessment, risk flags, and a short explanation.
+- Higher-risk plans require confirmation before enqueueing unless --yes is used.
+- --explain prints additional assessment details.
 
 -------------------------------------------------------------------------------
 

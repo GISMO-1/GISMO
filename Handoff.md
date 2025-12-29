@@ -50,7 +50,7 @@ Core persistence + execution:
 - Retained FAILED items for auditability (intentional)
 
 CLI and operator UX:
-- Canonical invocation: python -m gismo.cli.main ...
+- Canonical invocation: gismo ... (fallback: python -m gismo.cli.main ...)
 - CLI entrypoint supports: run, enqueue, daemon, export, queue introspection
 - Queue introspection complete:
   - queue stats
@@ -171,11 +171,12 @@ Plan assessment gate:
 LATEST UPDATE (OPERATOR NOTES)
 
 Status:
-- Ask now reports Ollama timeouts cleanly, with accurate timeout display and a --debug flag.
+- Added a console script entrypoint (`gismo`) for CLI access via pip installs.
 
 Next steps:
 - Make planner prompts policy-aware (still pending).
 - Monitor operator feedback on ask timeout UX.
+- Confirm Windows operator docs emphasize the console entrypoint when installed.
 
 Tests run:
 - python scripts/verify.py

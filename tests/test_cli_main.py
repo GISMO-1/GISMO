@@ -32,6 +32,17 @@ class CliMainParserTest(unittest.TestCase):
         self.assertTrue(args.latest)
         self.assertEqual(args.format, "jsonl")
 
+    def test_export_accepts_positional_run_id(self) -> None:
+        parser = cli_main.build_parser()
+        run_id = "11111111-1111-1111-1111-111111111111"
+
+        args = parser.parse_args(["export", run_id])
+
+        self.assertEqual(args.command, "export")
+        self.assertIs(args.handler, cli_main._handle_export)
+        self.assertIsNone(args.run_id)
+        self.assertEqual(args.run_id_arg, run_id)
+
     def test_demo_subcommand_routes_to_demo(self) -> None:
         parser = cli_main.build_parser()
         args = parser.parse_args(["demo"])
@@ -256,6 +267,26 @@ class CliMainParserTest(unittest.TestCase):
             renamed_path = db_path.with_name("locktest-renamed.db")
             os.replace(db_path, renamed_path)
             os.remove(renamed_path)
+
+    def test_prompt_paste_guard_exits(self) -> None:
+        argv = [
+            "gismo",
+            "(.venv)",
+            "PS",
+            "D:\\work>",
+            "python",
+            "-m",
+            "gismo.cli.main",
+            "queue",
+            "stats",
+        ]
+        with mock.patch.object(sys, "argv", argv):
+            buffer = io.StringIO()
+            with contextlib.redirect_stdout(buffer):
+                with self.assertRaises(SystemExit) as exc:
+                    cli_main.main()
+        self.assertEqual(exc.exception.code, 2)
+        self.assertIn("It looks like you pasted your shell prompt.", buffer.getvalue())
 
 
 if __name__ == "__main__":

@@ -8,6 +8,7 @@ import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+from uuid import UUID
 
 from gismo.cli.operator import (
     make_idempotency_key,
@@ -107,6 +108,57 @@ def _coerce_action_type_to_command(action_type_text: str) -> str | None:
     except ValueError:
         return None
     return candidate
+
+
+def _first_non_option_token(argv: list[str]) -> str | None:
+    skip_next = False
+    force_positional = False
+    for token in argv:
+        if skip_next:
+            skip_next = False
+            continue
+        if force_positional:
+            return token
+        if token == "--":
+            force_positional = True
+            continue
+        if token in {"--db", "--db-path"}:
+            skip_next = True
+            continue
+        if token.startswith("-") and token != "-":
+            continue
+        return token
+    return None
+
+
+def _is_shell_prompt_token(token: str) -> bool:
+    candidate = token.strip()
+    if not candidate:
+        return False
+    if candidate.startswith("PS"):
+        return True
+    if candidate.startswith("(.venv)"):
+        return True
+    if candidate.startswith(">"):
+        return True
+    if re.match(r"^[A-Za-z]:\\\\", candidate):
+        return True
+    return False
+
+
+def _has_shell_prompt_paste(argv: list[str]) -> bool:
+    token = _first_non_option_token(argv)
+    if token is None:
+        return False
+    return _is_shell_prompt_token(token)
+
+
+def _is_valid_run_id_format(run_id: str) -> bool:
+    try:
+        UUID(run_id)
+    except (TypeError, ValueError):
+        return False
+    return True
 
 
 def _strip_code_fences(text: str) -> str:
@@ -340,6 +392,55 @@ def _run_time_bounds(
     return start_time, end_time
 
 
+def _task_status_counts(tasks: list) -> dict[str, int]:
+    counts = {
+        "total": len(tasks),
+        "pending": 0,
+        "running": 0,
+        "succeeded": 0,
+        "failed": 0,
+    }
+    for task in tasks:
+        if task.status == TaskStatus.PENDING:
+            counts["pending"] += 1
+        elif task.status == TaskStatus.RUNNING:
+            counts["running"] += 1
+        elif task.status == TaskStatus.SUCCEEDED:
+            counts["succeeded"] += 1
+        elif task.status == TaskStatus.FAILED:
+            counts["failed"] += 1
+    return counts
+
+
+def _run_last_error(tasks: list, tool_calls: list) -> str | None:
+    entries: list[tuple[datetime, str]] = []
+    min_dt = datetime.min.replace(tzinfo=timezone.utc)
+    for task in tasks:
+        if task.error:
+            entries.append((task.updated_at or min_dt, str(task.error)))
+    for call in tool_calls:
+        if call.error:
+            entries.append(((call.finished_at or call.started_at or min_dt), str(call.error)))
+    if not entries:
+        return None
+    entries.sort(key=lambda item: item[0])
+    return entries[-1][1]
+
+
+def _tool_output_metadata(output: object) -> str:
+    if output is None:
+        return "-"
+    if isinstance(output, dict):
+        keys = ", ".join(sorted(str(k) for k in output.keys()))
+        serialized = json.dumps(output, ensure_ascii=False, sort_keys=True)
+        return f"keys=[{_truncate(keys, 120)}], chars={len(serialized)}"
+    if isinstance(output, list):
+        return f"items={len(output)}"
+    if isinstance(output, str):
+        return f"chars={len(output)}"
+    return f"type={type(output).__name__}"
+
+
 def run_demo(db_path: str, policy_path: str | None) -> None:
     repo_root = Path(__file__).resolve().parents[2]
     state_store = StateStore(db_path)
@@ -522,12 +623,19 @@ def run_show(db_path: str, run_id: str) -> None:
     tool_calls = list(state_store.list_tool_calls(run.id))
     status = _run_status(tasks)
     start_time, end_time = _run_time_bounds(run, tasks, tool_calls)
+    counts = _task_status_counts(tasks)
 
     print("=== GISMO Run Summary ===")
     print(f"Run ID:     {run.id}")
     print(f"Status:     {status}")
     print(f"Started:    {_fmt_dt(start_time)}")
     print(f"Finished:   {_fmt_dt(end_time)}")
+    print(
+        "Tasks:      "
+        f"{counts['total']} "
+        f"(pending={counts['pending']} running={counts['running']} "
+        f"succeeded={counts['succeeded']} failed={counts['failed']})"
+    )
     print("Tasks:")
     if not tasks:
         print("  (no tasks)")
@@ -535,6 +643,10 @@ def run_show(db_path: str, run_id: str) -> None:
 
     for task in tasks:
         print(f"- {task.id} {task.title} [{task.status.value}]")
+        if task.failure_type and task.failure_type.value != "NONE":
+            print(f"  failure_type: {task.failure_type.value}")
+        if task.status_reason:
+            print(f"  status_reason: {_summarize_value(task.status_reason, 200)}")
         if task.error:
             print(f"  error: {_summarize_value(task.error, 200)}")
         if task.output_json:
@@ -549,10 +661,46 @@ def run_show(db_path: str, run_id: str) -> None:
                 f"    - {call.id} tool={call.tool_name} status={call.status.value} "
                 f"started={_fmt_dt(call.started_at)} finished={_fmt_dt(call.finished_at)}"
             )
+            if call.failure_type and call.failure_type.value != "NONE":
+                print(f"      failure_type: {call.failure_type.value}")
+            if call.output_json is not None:
+                print(f"      output_meta: {_tool_output_metadata(call.output_json)}")
             if call.output_json:
                 print(f"      output: {_summarize_value(call.output_json, 200)}")
             if call.error:
                 print(f"      error: {_summarize_value(call.error, 200)}")
+
+
+def run_list(db_path: str, limit: int, newest_first: bool) -> None:
+    state_store = StateStore(db_path)
+    runs = list(state_store.list_runs(limit=limit, newest_first=newest_first))
+
+    print(f"DB: {db_path}")
+    print(f"Runs: {len(runs)} (limit={limit})")
+    header = (
+        f"{'RUN ID':8}  {'STATUS':10}  {'CREATED':20}  {'UPDATED':20}  "
+        f"{'TASKS':24}  {'LAST ERROR':40}"
+    )
+    print(header)
+    print("-" * len(header))
+    for run in runs:
+        tasks = list(state_store.list_tasks(run.id))
+        tool_calls = list(state_store.list_tool_calls(run.id))
+        status = _run_status(tasks)
+        _, end_time = _run_time_bounds(run, tasks, tool_calls)
+        updated_at = end_time or run.created_at
+        counts = _task_status_counts(tasks)
+        tasks_summary = (
+            f"{counts['total']} "
+            f"p{counts['pending']} r{counts['running']} "
+            f"s{counts['succeeded']} f{counts['failed']}"
+        )
+        last_error = _run_last_error(tasks, tool_calls)
+        print(
+            f"{run.id[:8]:8}  {status:10}  {_fmt_dt(run.created_at):20}  "
+            f"{_fmt_dt(updated_at):20}  "
+            f"{tasks_summary:24}  {_summarize_value(last_error, 40)}"
+        )
 
 
 def run_export(
@@ -980,10 +1128,30 @@ def _handle_run(args: argparse.Namespace) -> None:
     run_operator(args.db_path, args.operator_command, args.policy)
 
 
+def _handle_runs_list(args: argparse.Namespace) -> None:
+    run_list(args.db_path, limit=args.limit, newest_first=not args.oldest)
+
+
+def _handle_runs_show(args: argparse.Namespace) -> None:
+    run_show(args.db_path, args.run_id)
+
+
 def _handle_export(args: argparse.Namespace) -> None:
+    run_id = args.run_id
+    if getattr(args, "run_id_arg", None):
+        if run_id:
+            print("Provide either --run or a positional run id, not both.")
+            raise SystemExit(2)
+        if not _is_valid_run_id_format(args.run_id_arg):
+            print(
+                f"Invalid run id format: {args.run_id_arg}. "
+                "Provide a full run UUID or use --latest."
+            )
+            raise SystemExit(2)
+        run_id = args.run_id_arg
     run_export(
         args.db_path,
-        run_id=args.run_id,
+        run_id=run_id,
         use_latest=args.latest,
         export_format=args.format,
         out_path=args.out,
@@ -1178,6 +1346,11 @@ def _handle_queue_show(args: argparse.Namespace) -> None:
 
     matches = state_store.resolve_queue_item_id(args.id)
     if not matches:
+        if state_store.get_run(args.id) is not None:
+            print(
+                "That looks like a RUN id; use `runs show <id>` or `export --run <id>`."
+            )
+            raise SystemExit(2)
         print(f"Queue item not found: {args.id}")
         raise SystemExit(2)
 
@@ -1647,6 +1820,42 @@ def build_parser() -> argparse.ArgumentParser:
     )
     run_parser.set_defaults(handler=_handle_run)
 
+    runs_parser = subparsers.add_parser(
+        "runs",
+        help="Inspect runs (list, show)",
+        parents=[db_parent_optional],
+    )
+    runs_subparsers = runs_parser.add_subparsers(dest="runs_command", required=True)
+
+    runs_list_parser = runs_subparsers.add_parser(
+        "list",
+        help="List recent runs",
+        parents=[db_parent_optional],
+    )
+    runs_list_parser.add_argument(
+        "--limit",
+        type=int,
+        default=25,
+        help="Maximum number of runs to list (default: 25)",
+    )
+    runs_list_parser.add_argument(
+        "--oldest",
+        action="store_true",
+        help="Sort oldest-first (default: newest-first)",
+    )
+    runs_list_parser.set_defaults(handler=_handle_runs_list)
+
+    runs_show_parser = runs_subparsers.add_parser(
+        "show",
+        help="Show a run summary",
+        parents=[db_parent_optional],
+    )
+    runs_show_parser.add_argument(
+        "run_id",
+        help="Run ID to show",
+    )
+    runs_show_parser.set_defaults(handler=_handle_runs_show)
+
     export_parser = subparsers.add_parser(
         "export",
         help="Export run audit trail",
@@ -1662,6 +1871,11 @@ def build_parser() -> argparse.ArgumentParser:
         dest="run_id",
         default=None,
         help="Run ID to export",
+    )
+    export_parser.add_argument(
+        "run_id_arg",
+        nargs="?",
+        help="Run ID to export (positional alias for --run)",
     )
     export_parser.add_argument(
         "--latest",
@@ -2301,7 +2515,14 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     parser = build_parser()
-    args = parser.parse_args()
+    argv = sys.argv[1:]
+    if _has_shell_prompt_paste(argv):
+        print(
+            "It looks like you pasted your shell prompt. "
+            "Paste only the command starting with `python -m gismo.cli.main ...`."
+        )
+        raise SystemExit(2)
+    args = parser.parse_args(argv)
     handler = getattr(args, "handler", None)
     if handler is None:
         parser.error("No command provided.")

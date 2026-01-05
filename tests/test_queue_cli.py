@@ -147,3 +147,16 @@ def test_queue_cancel(repo_root: Path, db_path: Path) -> None:
     updated = state_store.get_queue_item(item.id)
     assert updated is not None
     assert updated.status.value == "CANCELLED"
+
+
+def test_queue_show_run_id_hint(repo_root: Path, db_path: Path) -> None:
+    state_store = StateStore(str(db_path))
+    run = state_store.create_run(label="hint")
+
+    proc = _run_cli(["queue", "show", "--db", str(db_path), run.id], cwd=repo_root)
+
+    assert proc.returncode != 0
+    assert (
+        "That looks like a RUN id; use `runs show <id>` or `export --run <id>`."
+        in proc.stdout
+    )

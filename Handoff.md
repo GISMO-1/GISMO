@@ -51,12 +51,13 @@ Core persistence + execution:
 
 CLI and operator UX:
 - Canonical invocation: gismo ... (fallback: python -m gismo.cli.main ...)
-- CLI entrypoint supports: run, enqueue, daemon, export, queue introspection
+- CLI entrypoint supports: run, enqueue, daemon, export, runs introspection, queue introspection
 - Queue introspection complete:
   - queue stats
   - queue list
   - queue show ID_OR_PREFIX
   - short-id prefix resolution with ambiguity detection
+- Queue item IDs are distinct from run IDs; runs are inspected via runs show or export.
 
 Policy & safety:
 - Policy enforcement layer is active and audited
@@ -171,9 +172,11 @@ Plan assessment gate:
 LATEST UPDATE (OPERATOR NOTES)
 
 Status:
-- Operator commands now include shell: mapped to run_shell with deny-by-default policy gating.
-- Shell allowlist matching is exact and Windows builtins execute via cmd.exe /c.
-- Added operator shell parsing/policy tests plus a Windows-only builtin echo regression test.
+- Run inspection is now first-class (runs list/show) with run-level summaries and error hints.
+- Export accepts positional run IDs (export RUN_ID) in addition to --run/--latest.
+- queue show now detects run IDs and points operators to runs show/export.
+- Added prompt-paste guardrails for PowerShell-style prompt tokens.
+- Updated docs with Windows-first examples.
 
 Next steps:
 - Make planner prompts policy-aware (still pending).
@@ -183,6 +186,11 @@ Next steps:
 
 Tests run:
 - python scripts/verify.py
+
+Operator examples:
+- python -m gismo.cli.main --db .\tmp\dev.db runs list
+- python -m gismo.cli.main --db .\tmp\dev.db runs show RUN_ID
+- python -m gismo.cli.main --db .\tmp\dev.db export RUN_ID
 
 -------------------------------------------------------------------------------
 

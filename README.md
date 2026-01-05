@@ -106,13 +106,25 @@ Queue introspection:
 
 Notes:
 - queue show supports short-id prefix resolution (with ambiguity detection).
+- Queue item IDs are not run IDs. Use `runs show RUN_ID` or `export --run RUN_ID` for run-level data.
 - Human-readable output is available; JSON output is available where requested.
+
+Run introspection:
+
+  gismo runs list
+  gismo runs show RUN_ID
 
 Export audit logs:
 
   gismo export --latest
   gismo export --run RUN_ID
-  gismo export --all
+  gismo export RUN_ID
+
+Windows examples (explicit module invocation):
+
+  python -m gismo.cli.main --db .\tmp\dev.db runs list
+  python -m gismo.cli.main --db .\tmp\dev.db runs show RUN_ID
+  python -m gismo.cli.main --db .\tmp\dev.db export RUN_ID
 
 Planner (local LLM via Ollama):
 

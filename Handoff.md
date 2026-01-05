@@ -161,6 +161,7 @@ Leashed agent loop:
 - Added `agent` CLI to turn a goal into a plan, enqueue it, and execute via the daemon.
 - Confirmation gates now apply to high-risk plans and any shell/write actions.
 - Agent summaries report confidence, risk flags, run IDs, and final status.
+- Agent memory handling now mirrors `ask` (read-only context injection, advisory suggestions, gated apply).
 
 This is a controlled autonomy feature and should be treated as guarded behavior.
 
@@ -171,11 +172,12 @@ Plan assessment gate:
 LATEST UPDATE (OPERATOR NOTES)
 
 Status:
-- Added Windows SQLite handle guardrail tests covering ask/memory CLI flows.
+- Added agent memory flags for read-only context injection and gated suggestion application.
+- Agent memory suggestion application links audit events to the originating plan.
 
 Next steps:
-- Run Windows CI or native Windows smoke tests to confirm SQLite handles close cleanly.
-- Run pytest -q on Windows to ensure ResourceWarning is surfaced as errors in guardrails.
+- Run Windows CI or native Windows smoke tests to confirm parity with `ask` memory behavior.
+- Run pytest -q on Windows to confirm agent memory tests and guardrails remain stable.
 
 Tests run:
 - python scripts/verify.py

@@ -1039,11 +1039,11 @@ def _apply_memory_suggestions(
     policy_path: str | None,
     yes: bool,
     non_interactive: bool,
-    related_ask_event_id: str,
+    related_event_id: str,
+    actor: str,
 ) -> MemoryApplyResult:
     if not suggestions:
         return MemoryApplyResult(applied=0, skipped=0, denied=0, applied_items=[])
-    actor = "ask"
     policy, resolved_policy_path = _load_memory_policy(policy_path)
     policy_hash = _memory_policy_hash(resolved_policy_path)
     action = "memory.put"
@@ -1065,7 +1065,7 @@ def _apply_memory_suggestions(
                     source="llm",
                 ),
                 result_meta=_memory_policy_result_meta(decision),
-                related_ask_event_id=related_ask_event_id,
+                related_ask_event_id=related_event_id,
             )
             result.denied += 1
 
@@ -1104,7 +1104,7 @@ def _apply_memory_suggestions(
                         source="llm",
                     ),
                     result_meta=_memory_policy_result_meta(denied),
-                    related_ask_event_id=related_ask_event_id,
+                    related_ask_event_id=related_event_id,
                 )
                 result.denied += 1
             result.skipped += len(allowed) - len(confirm_needed)
@@ -1133,7 +1133,7 @@ def _apply_memory_suggestions(
                             source="llm",
                         ),
                         result_meta=_memory_policy_result_meta(denied),
-                        related_ask_event_id=related_ask_event_id,
+                        related_ask_event_id=related_event_id,
                     )
                     result.denied += 1
                 return result
@@ -1165,7 +1165,7 @@ def _apply_memory_suggestions(
                             source="llm",
                         ),
                         result_meta=_memory_policy_result_meta(denied),
-                        related_ask_event_id=related_ask_event_id,
+                        related_ask_event_id=related_event_id,
                     )
                     result.denied += 1
                     decision.allowed = False
@@ -1196,7 +1196,7 @@ def _apply_memory_suggestions(
             actor=actor,
             policy_hash=policy_hash,
             result_meta_extra=_memory_policy_result_meta(decision),
-            related_ask_event_id=related_ask_event_id,
+            related_ask_event_id=related_event_id,
         )
         result.applied += 1
         result.applied_items.append(
@@ -1888,7 +1888,8 @@ def run_ask(
                     policy_path=policy_path,
                     yes=yes,
                     non_interactive=non_interactive,
-                    related_ask_event_id=ask_event_id,
+                    related_event_id=ask_event_id,
+                    actor="ask",
                 )
                 payload.update(
                     {
@@ -2044,6 +2045,9 @@ def run_agent(
     max_cycles: int,
     yes: bool,
     dry_run: bool,
+    use_memory: bool = False,
+    apply_memory_suggestions: bool = False,
+    non_interactive: bool = False,
 ) -> None:
     if not goal_text or not goal_text.strip():
         raise ValueError("agent requires a goal description.")
@@ -2055,6 +2059,7 @@ def run_agent(
     last_actions_count = 0
     for cycle in range(1, cycles_limit + 1):
         print(f"=== Agent Cycle {cycle} ===")
+        memory_injection = _build_memory_injection(db_path) if use_memory else None
         plan, assessment, state_store, _payload = _request_llm_plan(
             db_path,
             goal_text,
@@ -2068,8 +2073,99 @@ def run_agent(
             debug=False,
             actor="agent",
             assessment_policy_path=policy_path,
+            memory_injection=memory_injection,
+            record_event=False,
         )
         try:
+            payload = _payload
+            apply_result = MemoryApplyResult(
+                applied=0,
+                skipped=0,
+                denied=0,
+                applied_items=[],
+            )
+            event_recorded = False
+            if apply_memory_suggestions:
+                suggestions = plan.get("memory_suggestions") or []
+                if not suggestions:
+                    print("No suggestions to apply")
+                    payload.update(
+                        {
+                            "apply_memory_suggestions_requested": True,
+                            "apply_memory_suggestions_result": {
+                                "applied": 0,
+                                "skipped": 0,
+                                "denied": 0,
+                            },
+                            "apply_memory_suggestions_applied": [],
+                        }
+                    )
+                    state_store.record_event(
+                        actor="agent",
+                        event_type=EVENT_TYPE_LLM_PLAN,
+                        message="LLM plan generated.",
+                        json_payload=payload,
+                        event_id=str(uuid4()),
+                    )
+                    event_recorded = True
+                else:
+                    agent_event_id = str(uuid4())
+                    apply_result = _apply_memory_suggestions(
+                        db_path,
+                        suggestions,
+                        policy_path=policy_path,
+                        yes=yes,
+                        non_interactive=non_interactive,
+                        related_event_id=agent_event_id,
+                        actor="agent",
+                    )
+                    payload.update(
+                        {
+                            "apply_memory_suggestions_requested": True,
+                            "apply_memory_suggestions_result": {
+                                "applied": apply_result.applied,
+                                "skipped": apply_result.skipped,
+                                "denied": apply_result.denied,
+                            },
+                            "apply_memory_suggestions_applied": apply_result.applied_items,
+                        }
+                    )
+                    state_store.record_event(
+                        actor="agent",
+                        event_type=EVENT_TYPE_LLM_PLAN,
+                        message="LLM plan generated.",
+                        json_payload=payload,
+                        event_id=agent_event_id,
+                    )
+                    event_recorded = True
+                    print(
+                        "Memory suggestions summary: "
+                        f"applied={apply_result.applied} "
+                        f"skipped={apply_result.skipped} "
+                        f"denied={apply_result.denied}"
+                    )
+                    if apply_result.exit_code is not None:
+                        raise SystemExit(apply_result.exit_code)
+
+            if not event_recorded:
+                payload.update(
+                    {
+                        "apply_memory_suggestions_requested": False,
+                        "apply_memory_suggestions_result": {
+                            "applied": 0,
+                            "skipped": 0,
+                            "denied": 0,
+                        },
+                        "apply_memory_suggestions_applied": [],
+                    }
+                )
+                state_store.record_event(
+                    actor="agent",
+                    event_type=EVENT_TYPE_LLM_PLAN,
+                    message="LLM plan generated.",
+                    json_payload=payload,
+                )
+
             actions = plan.get("actions", [])
             last_actions_count = len(actions)
             last_assessment = assessment
@@ -2405,6 +2501,9 @@ def _handle_agent(args: argparse.Namespace) -> None:
         max_cycles=max_cycles,
         yes=args.yes,
         dry_run=args.dry_run,
+        use_memory=args.use_memory,
+        apply_memory_suggestions=args.apply_memory_suggestions,
+        non_interactive=args.non_interactive,
     )
 
 
@@ -3466,6 +3565,22 @@ def build_parser() -> argparse.ArgumentParser:
         "--yes",
         action="store_true",
         help="Skip confirmation prompts for high-risk plans",
+    )
+    agent_parser.add_argument(
+        "--memory",
+        dest="use_memory",
+        action="store_true",
+        help="Inject eligible memory items into the planner prompt (read-only)",
+    )
+    agent_parser.add_argument(
+        "--apply-memory-suggestions",
+        action="store_true",
+        help="Apply memory suggestions from the plan (policy-gated)",
+    )
+    agent_parser.add_argument(
+        "--non-interactive",
+        action="store_true",
+        help="Fail closed instead of prompting for memory suggestions",
     )
     agent_parser.add_argument(
         "--dry-run",

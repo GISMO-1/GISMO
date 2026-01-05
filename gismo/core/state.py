@@ -160,6 +160,87 @@ class StateStore:
                 )
                 """
             )
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS memory_items (
+                    id TEXT PRIMARY KEY,
+                    namespace TEXT NOT NULL,
+                    key TEXT NOT NULL,
+                    kind TEXT NOT NULL,
+                    value_json TEXT NOT NULL,
+                    tags_json TEXT NULL,
+                    confidence TEXT NOT NULL,
+                    source TEXT NOT NULL,
+                    ttl_seconds INTEGER NULL,
+                    is_tombstoned INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS memory_events (
+                    id TEXT PRIMARY KEY,
+                    timestamp TEXT NOT NULL,
+                    operation TEXT NOT NULL,
+                    actor TEXT NOT NULL,
+                    policy_hash TEXT NOT NULL,
+                    request_json TEXT NOT NULL,
+                    result_meta_json TEXT NOT NULL,
+                    related_run_id TEXT NULL,
+                    related_ask_event_id TEXT NULL
+                )
+                """
+            )
+            cursor.execute(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_items_namespace_key
+                ON memory_items (namespace, key)
+                """
+            )
+            cursor.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_memory_items_namespace
+                ON memory_items (namespace)
+                """
+            )
+            cursor.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_memory_items_kind
+                ON memory_items (kind)
+                """
+            )
+            cursor.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_memory_items_tombstoned
+                ON memory_items (is_tombstoned)
+                """
+            )
+            cursor.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_memory_events_timestamp
+                ON memory_events (timestamp)
+                """
+            )
+            cursor.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_memory_events_operation
+                ON memory_events (operation)
+                """
+            )
+            cursor.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_memory_events_actor
+                ON memory_events (actor)
+                """
+            )
+            cursor.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_memory_events_related_run
+                ON memory_events (related_run_id)
+                """
+            )
             self._ensure_columns(connection)
             cursor.execute(
                 """

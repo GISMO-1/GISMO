@@ -172,15 +172,14 @@ Plan assessment gate:
 LATEST UPDATE (OPERATOR NOTES)
 
 Status:
-- Added leashed `agent` CLI for goal-based plan → enqueue → execute cycles (queue/daemon only).
-- Agent cycles honor confirmation gates for high-risk and shell/write actions.
-- Updated docs with agent usage examples.
+- Added SQLite-backed memory primitives with CLI support (put/get/search/delete) and audit events.
+- Memory operations are deterministic, tombstone-aware, and include end-to-end CLI tests.
+- Updated CLI documentation with memory command examples.
 
 Next steps:
-- Make planner prompts policy-aware (still pending).
-- Monitor operator feedback on ask timeout UX.
-- Confirm Windows operator docs emphasize the console entrypoint when installed.
-- Watch for any remaining CLI flag ordering regressions as new subcommands land.
+- Wire policy-aware confirmation gates for persistent memory namespaces.
+- Consider adding memory read/write hooks to the planner once policy enforcement is defined.
+- Monitor Windows locking regressions for memory CLI interactions.
 
 Tests run:
 - python scripts/verify.py

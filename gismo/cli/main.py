@@ -38,6 +38,14 @@ from gismo.core.toolpacks.fs_tools import FileSystemConfig, ListDirTool, ReadFil
 from gismo.core.toolpacks.shell_tool import ShellConfig, ShellTool
 from gismo.llm.ollama import OllamaError, ollama_chat, resolve_ollama_config
 from gismo.llm.prompts import build_system_prompt, build_user_prompt
+from gismo.memory.store import (
+    MemoryItem,
+    get_item as memory_get_item,
+    policy_hash_for_path,
+    put_item as memory_put_item,
+    search_items as memory_search_items,
+    tombstone_item as memory_tombstone_item,
+)
 
 
 def _fmt_dt(dt) -> str:
@@ -58,6 +66,43 @@ def _summarize_value(value: object, max_len: int) -> str:
     else:
         text = json.dumps(value, ensure_ascii=False, sort_keys=True)
     return _truncate(text, max_len)
+
+
+def _serialize_memory_item(item: MemoryItem) -> dict[str, object]:
+    return {
+        "id": item.id,
+        "namespace": item.namespace,
+        "key": item.key,
+        "kind": item.kind,
+        "value": item.value,
+        "tags": item.tags,
+        "confidence": item.confidence,
+        "source": item.source,
+        "ttl_seconds": item.ttl_seconds,
+        "is_tombstoned": item.is_tombstoned,
+        "created_at": item.created_at,
+        "updated_at": item.updated_at,
+    }
+
+
+def _print_memory_item_summary(item: MemoryItem) -> None:
+    print(f"Namespace:  {item.namespace}")
+    print(f"Key:        {item.key}")
+    print(f"Kind:       {item.kind}")
+    print(f"Updated:    {item.updated_at}")
+    if item.is_tombstoned:
+        print("Status:     tombstoned")
+
+
+def _print_memory_search_results(items: list[MemoryItem]) -> None:
+    if not items:
+        print("(no matches)")
+        return
+    for item in items:
+        print(
+            f"- {item.namespace}/{item.key} kind={item.kind} "
+            f"updated={item.updated_at} tombstoned={item.is_tombstoned}"
+        )
 
 
 def _coerce_str_list(value: object) -> list[str]:
@@ -762,6 +807,117 @@ def run_list(db_path: str, limit: int, newest_first: bool) -> None:
         )
 
 
+def _memory_policy_hash(policy_path: str | None) -> str:
+    try:
+        return policy_hash_for_path(policy_path)
+    except FileNotFoundError as exc:
+        print(f"Policy file not found: {policy_path}")
+        raise SystemExit(2) from exc
+
+
+def _parse_memory_value(value_text: str | None, value_json: str | None) -> object:
+    if value_text and value_json:
+        print("Provide either --value or --value-text, not both.")
+        raise SystemExit(2)
+    if value_text is not None:
+        return value_text
+    if value_json is None:
+        print("Provide --value or --value-text for memory put.")
+        raise SystemExit(2)
+    try:
+        return json.loads(value_json)
+    except json.JSONDecodeError as exc:
+        print(f"Invalid JSON for --value: {exc}")
+        raise SystemExit(2) from exc
+
+
+def run_memory_put(args: argparse.Namespace) -> None:
+    actor = "operator"
+    policy_hash = _memory_policy_hash(args.policy)
+    value = _parse_memory_value(args.value_text, args.value)
+    tags = args.tag or []
+    item = memory_put_item(
+        args.db_path,
+        namespace=args.namespace,
+        key=args.key,
+        kind=args.kind,
+        value=value,
+        tags=tags,
+        confidence=args.confidence,
+        source=args.source,
+        ttl_seconds=args.ttl_seconds,
+        actor=actor,
+        policy_hash=policy_hash,
+    )
+    print(f"DB: {args.db_path}")
+    print("Stored memory item:")
+    _print_memory_item_summary(item)
+
+
+def run_memory_get(args: argparse.Namespace) -> None:
+    actor = "operator"
+    policy_hash = _memory_policy_hash(args.policy)
+    item = memory_get_item(
+        args.db_path,
+        args.namespace,
+        args.key,
+        include_tombstoned=args.include_tombstoned,
+        actor=actor,
+        policy_hash=policy_hash,
+    )
+    if item is None:
+        print(f"Memory item not found: {args.namespace}/{args.key}")
+        raise SystemExit(2)
+    if args.json:
+        print(json.dumps(_serialize_memory_item(item), ensure_ascii=False, sort_keys=True))
+        return
+    print(f"DB: {args.db_path}")
+    _print_memory_item_summary(item)
+
+
+def run_memory_search(args: argparse.Namespace) -> None:
+    actor = "operator"
+    policy_hash = _memory_policy_hash(args.policy)
+    items = memory_search_items(
+        args.db_path,
+        args.query or "",
+        namespace=args.namespace,
+        kind=args.kind,
+        tag=args.tag,
+        source=args.source,
+        confidence_min=args.confidence_min,
+        include_tombstoned=args.include_tombstoned,
+        limit=args.limit,
+        actor=actor,
+        policy_hash=policy_hash,
+    )
+    if args.json:
+        payload = [_serialize_memory_item(item) for item in items]
+        print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+        return
+    print(f"DB: {args.db_path}")
+    print(f"Matches: {len(items)}")
+    _print_memory_search_results(items)
+
+
+def run_memory_delete(args: argparse.Namespace) -> None:
+    actor = "operator"
+    policy_hash = _memory_policy_hash(args.policy)
+    item = memory_tombstone_item(
+        args.db_path,
+        args.namespace,
+        args.key,
+        actor=actor,
+        policy_hash=policy_hash,
+    )
+    if item is None:
+        print(f"Memory item not found: {args.namespace}/{args.key}")
+        raise SystemExit(2)
+    print(f"DB: {args.db_path}")
+    print("Tombstoned memory item:")
+    _print_memory_item_summary(item)
+
+
 def run_export(
     db_path: str,
     *,
@@ -1397,6 +1553,22 @@ def _handle_runs_list(args: argparse.Namespace) -> None:
 
 def _handle_runs_show(args: argparse.Namespace) -> None:
     run_show(args.db_path, args.run_id)
+
+
+def _handle_memory_put(args: argparse.Namespace) -> None:
+    run_memory_put(args)
+
+
+def _handle_memory_get(args: argparse.Namespace) -> None:
+    run_memory_get(args)
+
+
+def _handle_memory_search(args: argparse.Namespace) -> None:
+    run_memory_search(args)
+
+
+def _handle_memory_delete(args: argparse.Namespace) -> None:
+    run_memory_delete(args)
 
 
 def _handle_export(args: argparse.Namespace) -> None:
@@ -2175,6 +2347,180 @@ def build_parser() -> argparse.ArgumentParser:
         help="Redact file contents, shell output, and large tool outputs",
     )
     export_parser.set_defaults(handler=_handle_export)
+
+    memory_parser = subparsers.add_parser(
+        "memory",
+        help="Manage persistent memory items",
+        parents=[db_parent_optional],
+    )
+    memory_subparsers = memory_parser.add_subparsers(dest="memory_command", required=True)
+
+    memory_put_parser = memory_subparsers.add_parser(
+        "put",
+        help="Create or update a memory item",
+        parents=[db_parent_optional],
+    )
+    memory_put_parser.add_argument(
+        "--namespace",
+        required=True,
+        help="Memory namespace (e.g., global, project:<name>, run:<id>)",
+    )
+    memory_put_parser.add_argument(
+        "--key",
+        required=True,
+        help="Memory key",
+    )
+    memory_put_parser.add_argument(
+        "--kind",
+        required=True,
+        choices=["fact", "preference", "constraint", "procedure", "note", "summary"],
+        help="Memory kind",
+    )
+    memory_put_parser.add_argument(
+        "--value",
+        help="JSON value to store",
+    )
+    memory_put_parser.add_argument(
+        "--value-text",
+        dest="value_text",
+        help="Shortcut for string values (stored as JSON string)",
+    )
+    memory_put_parser.add_argument(
+        "--confidence",
+        required=True,
+        choices=["high", "medium", "low"],
+        help="Confidence level",
+    )
+    memory_put_parser.add_argument(
+        "--source",
+        required=True,
+        choices=["operator", "system", "llm"],
+        help="Source actor",
+    )
+    memory_put_parser.add_argument(
+        "--tag",
+        action="append",
+        default=[],
+        help="Tag (repeatable)",
+    )
+    memory_put_parser.add_argument(
+        "--ttl-seconds",
+        type=int,
+        default=None,
+        help="Optional TTL in seconds",
+    )
+    memory_put_parser.add_argument(
+        "--policy",
+        default=None,
+        help="Optional policy file path for audit hashing",
+    )
+    memory_put_parser.set_defaults(handler=_handle_memory_put)
+
+    memory_get_parser = memory_subparsers.add_parser(
+        "get",
+        help="Fetch a memory item by namespace/key",
+        parents=[db_parent_optional],
+    )
+    memory_get_parser.add_argument(
+        "--namespace",
+        required=True,
+        help="Memory namespace",
+    )
+    memory_get_parser.add_argument("key", help="Memory key")
+    memory_get_parser.add_argument(
+        "--include-tombstoned",
+        action="store_true",
+        help="Include tombstoned items",
+    )
+    memory_get_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Output JSON",
+    )
+    memory_get_parser.add_argument(
+        "--policy",
+        default=None,
+        help="Optional policy file path for audit hashing",
+    )
+    memory_get_parser.set_defaults(handler=_handle_memory_get)
+
+    memory_search_parser = memory_subparsers.add_parser(
+        "search",
+        help="Search memory items",
+        parents=[db_parent_optional],
+    )
+    memory_search_parser.add_argument(
+        "query",
+        nargs="?",
+        default="",
+        help="Search query (matches key/value)",
+    )
+    memory_search_parser.add_argument(
+        "--namespace",
+        default=None,
+        help="Filter by namespace",
+    )
+    memory_search_parser.add_argument(
+        "--kind",
+        choices=["fact", "preference", "constraint", "procedure", "note", "summary"],
+        help="Filter by kind",
+    )
+    memory_search_parser.add_argument(
+        "--tag",
+        default=None,
+        help="Filter by tag",
+    )
+    memory_search_parser.add_argument(
+        "--source",
+        choices=["operator", "system", "llm"],
+        help="Filter by source",
+    )
+    memory_search_parser.add_argument(
+        "--confidence-min",
+        dest="confidence_min",
+        choices=["high", "medium", "low"],
+        help="Minimum confidence filter",
+    )
+    memory_search_parser.add_argument(
+        "--include-tombstoned",
+        action="store_true",
+        help="Include tombstoned items",
+    )
+    memory_search_parser.add_argument(
+        "--limit",
+        type=int,
+        default=50,
+        help="Maximum number of results",
+    )
+    memory_search_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Output JSON",
+    )
+    memory_search_parser.add_argument(
+        "--policy",
+        default=None,
+        help="Optional policy file path for audit hashing",
+    )
+    memory_search_parser.set_defaults(handler=_handle_memory_search)
+
+    memory_delete_parser = memory_subparsers.add_parser(
+        "delete",
+        help="Tombstone a memory item",
+        parents=[db_parent_optional],
+    )
+    memory_delete_parser.add_argument(
+        "--namespace",
+        required=True,
+        help="Memory namespace",
+    )
+    memory_delete_parser.add_argument("key", help="Memory key")
+    memory_delete_parser.add_argument(
+        "--policy",
+        default=None,
+        help="Optional policy file path for audit hashing",
+    )
+    memory_delete_parser.set_defaults(handler=_handle_memory_delete)
 
     enqueue_parser = subparsers.add_parser(
         "enqueue",

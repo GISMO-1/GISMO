@@ -17,6 +17,11 @@ from gismo.memory.store import tombstone_item as memory_tombstone_item
 
 
 class AskCliTest(unittest.TestCase):
+    def _write_policy(self, tmpdir: str, policy: dict) -> str:
+        path = Path(tmpdir) / "policy.json"
+        path.write_text(json.dumps(policy), encoding="utf-8")
+        return str(path)
+
     def test_ask_dry_run_writes_event_and_prints_plan(self) -> None:
         response = json.dumps(
             {
@@ -357,6 +362,217 @@ class AskCliTest(unittest.TestCase):
                     "SELECT COUNT(*) FROM memory_items"
                 ).fetchone()[0]
             self.assertEqual(initial_count, final_count)
+
+    def test_ask_apply_memory_suggestions_writes_items_and_links_audit(self) -> None:
+        response = json.dumps(
+            {
+                "intent": "remember",
+                "assumptions": [],
+                "actions": [],
+                "notes": [],
+                "memory_suggestions": [
+                    {
+                        "namespace": "global",
+                        "key": "default_model",
+                        "kind": "preference",
+                        "value_json": "\"phi3:mini\"",
+                        "confidence": "high",
+                        "why": "Operator prefers the default model.",
+                    }
+                ],
+            }
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = str(Path(tmpdir) / "state.db")
+            policy_path = self._write_policy(
+                tmpdir,
+                {
+                    "allowed_tools": ["memory.put"],
+                    "memory": {"allow": {"memory.put": ["global"]}},
+                },
+            )
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "GISMO_OLLAMA_MODEL": "",
+                    "GISMO_OLLAMA_TIMEOUT_S": "",
+                    "GISMO_OLLAMA_URL": "",
+                    "GISMO_LLM_MODEL": "",
+                    "OLLAMA_HOST": "",
+                },
+                clear=False,
+            ):
+                with mock.patch.object(cli_main, "ollama_chat", return_value=response):
+                    cli_main.run_ask(
+                        db_path,
+                        "remember the model",
+                        model=None,
+                        host=None,
+                        timeout_s=None,
+                        enqueue=False,
+                        dry_run=True,
+                        max_actions=10,
+                        yes=True,
+                        explain=False,
+                        apply_memory_suggestions=True,
+                        policy_path=policy_path,
+                    )
+            with sqlite3.connect(db_path) as connection:
+                item_count = connection.execute(
+                    "SELECT COUNT(*) FROM memory_items"
+                ).fetchone()[0]
+                event_row = connection.execute(
+                    "SELECT related_ask_event_id, result_meta_json FROM memory_events"
+                ).fetchone()
+            self.assertEqual(item_count, 1)
+            self.assertIsNotNone(event_row)
+            related_ask_event_id, result_meta_json = event_row
+            self.assertIsNotNone(related_ask_event_id)
+            result_meta = json.loads(result_meta_json)
+            self.assertEqual(result_meta["policy_action"], "memory.put")
+            state_store = StateStore(db_path)
+            event = state_store.list_events()[0]
+            self.assertEqual(event.id, related_ask_event_id)
+            payload = event.json_payload
+            assert payload is not None
+            self.assertTrue(payload["apply_memory_suggestions_requested"])
+            self.assertEqual(payload["apply_memory_suggestions_result"]["applied"], 1)
+            self.assertEqual(
+                payload["apply_memory_suggestions_applied"],
+                [{"namespace": "global", "key": "default_model"}],
+            )
+
+    def test_ask_apply_memory_suggestions_requires_confirmation_interactive(self) -> None:
+        response = json.dumps(
+            {
+                "intent": "remember",
+                "assumptions": [],
+                "actions": [],
+                "notes": [],
+                "memory_suggestions": [
+                    {
+                        "namespace": "global",
+                        "key": "operator_pref",
+                        "kind": "preference",
+                        "value_json": "\"fast\"",
+                        "confidence": "high",
+                        "why": "Operator prefers speed.",
+                    }
+                ],
+            }
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = str(Path(tmpdir) / "state.db")
+            policy_path = self._write_policy(
+                tmpdir,
+                {
+                    "allowed_tools": ["memory.put"],
+                    "memory": {
+                        "allow": {"memory.put": ["global"]},
+                        "require_confirmation": {"memory.put": ["global"]},
+                    },
+                },
+            )
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "GISMO_OLLAMA_MODEL": "",
+                    "GISMO_OLLAMA_TIMEOUT_S": "",
+                    "GISMO_OLLAMA_URL": "",
+                    "GISMO_LLM_MODEL": "",
+                    "OLLAMA_HOST": "",
+                },
+                clear=False,
+            ):
+                with mock.patch.object(cli_main, "ollama_chat", return_value=response):
+                    with mock.patch("builtins.input", return_value="y"), mock.patch(
+                        "sys.stdin.isatty",
+                        return_value=True,
+                    ), mock.patch("sys.stdout.isatty", return_value=True):
+                        cli_main.run_ask(
+                            db_path,
+                            "remember preference",
+                            model=None,
+                            host=None,
+                            timeout_s=None,
+                            enqueue=False,
+                            dry_run=True,
+                            max_actions=10,
+                            yes=False,
+                            explain=False,
+                            apply_memory_suggestions=True,
+                            policy_path=policy_path,
+                        )
+            with sqlite3.connect(db_path) as connection:
+                item_count = connection.execute(
+                    "SELECT COUNT(*) FROM memory_items"
+                ).fetchone()[0]
+            self.assertEqual(item_count, 1)
+
+    def test_ask_apply_memory_suggestions_non_interactive_fails_closed(self) -> None:
+        response = json.dumps(
+            {
+                "intent": "remember",
+                "assumptions": [],
+                "actions": [],
+                "notes": [],
+                "memory_suggestions": [
+                    {
+                        "namespace": "global",
+                        "key": "operator_pref",
+                        "kind": "preference",
+                        "value_json": "\"safe\"",
+                        "confidence": "high",
+                        "why": "Operator prefers safety.",
+                    }
+                ],
+            }
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = str(Path(tmpdir) / "state.db")
+            policy_path = self._write_policy(
+                tmpdir,
+                {
+                    "allowed_tools": ["memory.put"],
+                    "memory": {
+                        "allow": {"memory.put": ["global"]},
+                        "require_confirmation": {"memory.put": ["global"]},
+                    },
+                },
+            )
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "GISMO_OLLAMA_MODEL": "",
+                    "GISMO_OLLAMA_TIMEOUT_S": "",
+                    "GISMO_OLLAMA_URL": "",
+                    "GISMO_LLM_MODEL": "",
+                    "OLLAMA_HOST": "",
+                },
+                clear=False,
+            ):
+                with mock.patch.object(cli_main, "ollama_chat", return_value=response):
+                    with self.assertRaises(SystemExit):
+                        cli_main.run_ask(
+                            db_path,
+                            "remember preference",
+                            model=None,
+                            host=None,
+                            timeout_s=None,
+                            enqueue=False,
+                            dry_run=True,
+                            max_actions=10,
+                            yes=False,
+                            explain=False,
+                            apply_memory_suggestions=True,
+                            non_interactive=True,
+                            policy_path=policy_path,
+                        )
+            with sqlite3.connect(db_path) as connection:
+                item_count = connection.execute(
+                    "SELECT COUNT(*) FROM memory_items"
+                ).fetchone()[0]
+            self.assertEqual(item_count, 0)
 
     def test_ask_invalid_json_fails_cleanly(self) -> None:
         response = "not json"

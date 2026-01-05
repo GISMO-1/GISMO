@@ -7,6 +7,7 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, Optional
+from uuid import uuid4
 
 from gismo.core.models import (
     DaemonHeartbeat,
@@ -326,6 +327,7 @@ class StateStore:
         event_type: str,
         message: str,
         json_payload: Optional[Dict[str, Any]] = None,
+        event_id: Optional[str] = None,
         connection: Optional[sqlite3.Connection] = None,
     ) -> Event:
         if connection is None:
@@ -335,6 +337,7 @@ class StateStore:
                     event_type,
                     message,
                     json_payload,
+                    event_id=event_id,
                     connection=connection,
                 )
                 connection.commit()
@@ -345,6 +348,7 @@ class StateStore:
             event_type=event_type,
             message=message,
             json_payload=json_payload,
+            id=event_id or str(uuid4()),
         )
         connection.execute(
             """

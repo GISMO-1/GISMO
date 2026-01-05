@@ -10,7 +10,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from gismo.cli.operator import (
     make_idempotency_key,
@@ -936,6 +936,15 @@ class MemoryDecision:
     reason: str | None
 
 
+@dataclass
+class MemoryApplyResult:
+    applied: int
+    skipped: int
+    denied: int
+    applied_items: list[dict[str, str]]
+    exit_code: int | None = None
+
+
 def _memory_policy_hash(policy_path: str | None) -> str:
     try:
         return policy_hash_for_path(policy_path)
@@ -968,6 +977,197 @@ def _memory_policy_result_meta(decision: MemoryDecision) -> dict[str, object]:
             "mode": decision.confirmation_mode,
         },
     }
+
+
+def _memory_request_from_suggestion(
+    suggestion: dict[str, str],
+    *,
+    value: object,
+    source: str,
+) -> dict[str, object]:
+    return {
+        "namespace": suggestion["namespace"],
+        "key": suggestion["key"],
+        "kind": suggestion["kind"],
+        "value_json": json.dumps(value, ensure_ascii=False, sort_keys=True),
+        "tags_json": None,
+        "confidence": suggestion["confidence"],
+        "source": source,
+        "ttl_seconds": None,
+    }
+
+
+def _apply_memory_suggestions(
+    db_path: str,
+    suggestions: list[dict[str, str]],
+    *,
+    policy_path: str | None,
+    yes: bool,
+    non_interactive: bool,
+    related_ask_event_id: str,
+) -> MemoryApplyResult:
+    if not suggestions:
+        return MemoryApplyResult(applied=0, skipped=0, denied=0, applied_items=[])
+    actor = "ask"
+    policy, resolved_policy_path = _load_memory_policy(policy_path)
+    policy_hash = _memory_policy_hash(resolved_policy_path)
+    action = "memory.put"
+    result = MemoryApplyResult(applied=0, skipped=0, denied=0, applied_items=[])
+    candidates: list[tuple[dict[str, str], object, MemoryDecision]] = []
+    for suggestion in suggestions:
+        value = json.loads(suggestion["value_json"])
+        decision = _evaluate_memory_policy(policy, action, suggestion["namespace"])
+        candidates.append((suggestion, value, decision))
+        if not decision.allowed:
+            memory_record_event(
+                db_path,
+                operation="put",
+                actor=actor,
+                policy_hash=policy_hash,
+                request=_memory_request_from_suggestion(
+                    suggestion,
+                    value=value,
+                    source="llm",
+                ),
+                result_meta=_memory_policy_result_meta(decision),
+                related_ask_event_id=related_ask_event_id,
+            )
+            result.denied += 1
+
+    allowed = [
+        (suggestion, value, decision)
+        for suggestion, value, decision in candidates
+        if decision.allowed
+    ]
+    if not allowed:
+        return result
+
+    confirm_needed = [
+        (suggestion, value, decision)
+        for suggestion, value, decision in allowed
+        if decision.confirmation_required
+    ]
+    if confirm_needed and not yes:
+        if non_interactive or not _is_interactive_tty():
+            for suggestion, value, _decision in confirm_needed:
+                denied = MemoryDecision(
+                    action=action,
+                    allowed=False,
+                    confirmation_required=True,
+                    confirmation_provided=False,
+                    confirmation_mode=None,
+                    reason="confirmation_required",
+                )
+                memory_record_event(
+                    db_path,
+                    operation="put",
+                    actor=actor,
+                    policy_hash=policy_hash,
+                    request=_memory_request_from_suggestion(
+                        suggestion,
+                        value=value,
+                        source="llm",
+                    ),
+                    result_meta=_memory_policy_result_meta(denied),
+                    related_ask_event_id=related_ask_event_id,
+                )
+                result.denied += 1
+            result.skipped += len(allowed) - len(confirm_needed)
+            result.exit_code = 2
+            return result
+        if len(confirm_needed) == len(allowed) and len(confirm_needed) > 1:
+            response = input("Apply all memory suggestions? [y/N]:")
+            if response.strip().lower() not in {"y", "yes"}:
+                for suggestion, value, _decision in confirm_needed:
+                    denied = MemoryDecision(
+                        action=action,
+                        allowed=False,
+                        confirmation_required=True,
+                        confirmation_provided=False,
+                        confirmation_mode=None,
+                        reason="confirmation_declined",
+                    )
+                    memory_record_event(
+                        db_path,
+                        operation="put",
+                        actor=actor,
+                        policy_hash=policy_hash,
+                        request=_memory_request_from_suggestion(
+                            suggestion,
+                            value=value,
+                            source="llm",
+                        ),
+                        result_meta=_memory_policy_result_meta(denied),
+                        related_ask_event_id=related_ask_event_id,
+                    )
+                    result.denied += 1
+                return result
+            for _suggestion, _value, decision in confirm_needed:
+                decision.confirmation_provided = True
+                decision.confirmation_mode = "prompt"
+        else:
+            for suggestion, value, decision in confirm_needed:
+                response = input(
+                    f"Apply memory suggestion {suggestion['namespace']}/{suggestion['key']}? [y/N]:"
+                )
+                if response.strip().lower() not in {"y", "yes"}:
+                    denied = MemoryDecision(
+                        action=action,
+                        allowed=False,
+                        confirmation_required=True,
+                        confirmation_provided=False,
+                        confirmation_mode=None,
+                        reason="confirmation_declined",
+                    )
+                    memory_record_event(
+                        db_path,
+                        operation="put",
+                        actor=actor,
+                        policy_hash=policy_hash,
+                        request=_memory_request_from_suggestion(
+                            suggestion,
+                            value=value,
+                            source="llm",
+                        ),
+                        result_meta=_memory_policy_result_meta(denied),
+                        related_ask_event_id=related_ask_event_id,
+                    )
+                    result.denied += 1
+                    decision.allowed = False
+                else:
+                    decision.confirmation_provided = True
+                    decision.confirmation_mode = "prompt"
+    elif confirm_needed and yes:
+        for _suggestion, _value, decision in confirm_needed:
+            decision.confirmation_provided = True
+            decision.confirmation_mode = "yes-flag"
+
+    for suggestion, value, decision in allowed:
+        if not decision.allowed:
+            continue
+        if decision.confirmation_required and not decision.confirmation_provided:
+            result.skipped += 1
+            continue
+        item = memory_put_item(
+            db_path,
+            namespace=suggestion["namespace"],
+            key=suggestion["key"],
+            kind=suggestion["kind"],
+            value=value,
+            tags=None,
+            confidence=suggestion["confidence"],
+            source="llm",
+            ttl_seconds=None,
+            actor=actor,
+            policy_hash=policy_hash,
+            result_meta_extra=_memory_policy_result_meta(decision),
+            related_ask_event_id=related_ask_event_id,
+        )
+        result.applied += 1
+        result.applied_items.append(
+            {"namespace": item.namespace, "key": item.key}
+        )
+    return result
 
 
 def _evaluate_memory_policy(policy: PermissionPolicy, action: str, namespace: str) -> MemoryDecision:
@@ -1399,7 +1599,8 @@ def _request_llm_plan(
     actor: str,
     memory_injection: MemoryInjection | None = None,
     assessment_policy_path: str | None = None,
-) -> tuple[dict, PlanAssessment, StateStore]:
+    record_event: bool = True,
+) -> tuple[dict, PlanAssessment, StateStore, dict[str, object]]:
     if not user_text or not user_text.strip():
         raise ValueError(f"{actor} requires a natural language request.")
     config = resolve_ollama_config(url=host, model=model, timeout_s=timeout_s)
@@ -1548,13 +1749,14 @@ def _request_llm_plan(
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
     _apply_memory_injection_payload(payload, memory_injection)
-    state_store.record_event(
-        actor=actor,
-        event_type=EVENT_TYPE_LLM_PLAN,
-        message="LLM plan generated.",
-        json_payload=payload,
-    )
-    return plan, assessment, state_store
+    if record_event:
+        state_store.record_event(
+            actor=actor,
+            event_type=EVENT_TYPE_LLM_PLAN,
+            message="LLM plan generated.",
+            json_payload=payload,
+        )
+    return plan, assessment, state_store, payload
 
 
 def _enqueue_plan_actions(
@@ -1601,9 +1803,12 @@ def run_ask(
     explain: bool,
     debug: bool = False,
     use_memory: bool = False,
+    apply_memory_suggestions: bool = False,
+    non_interactive: bool = False,
+    policy_path: str | None = None,
 ) -> None:
     memory_injection = _build_memory_injection(db_path) if use_memory else None
-    plan, assessment, state_store = _request_llm_plan(
+    plan, assessment, state_store, payload = _request_llm_plan(
         db_path,
         user_text,
         model=model,
@@ -1617,7 +1822,94 @@ def run_ask(
         actor="ask",
         memory_injection=memory_injection,
         assessment_policy_path=None,
+        record_event=False,
     )
+
+    apply_result = MemoryApplyResult(
+        applied=0,
+        skipped=0,
+        denied=0,
+        applied_items=[],
+    )
+    if apply_memory_suggestions:
+        suggestions = plan.get("memory_suggestions") or []
+        if not suggestions:
+            print("No suggestions to apply")
+        else:
+            ask_event_id = str(uuid4())
+            apply_result = _apply_memory_suggestions(
+                db_path,
+                suggestions,
+                policy_path=policy_path,
+                yes=yes,
+                non_interactive=non_interactive,
+                related_ask_event_id=ask_event_id,
+            )
+            payload.update(
+                {
+                    "apply_memory_suggestions_requested": True,
+                    "apply_memory_suggestions_result": {
+                        "applied": apply_result.applied,
+                        "skipped": apply_result.skipped,
+                        "denied": apply_result.denied,
+                    },
+                    "apply_memory_suggestions_applied": apply_result.applied_items,
+                }
+            )
+            state_store.record_event(
+                actor="ask",
+                event_type=EVENT_TYPE_LLM_PLAN,
+                message="LLM plan generated.",
+                json_payload=payload,
+                event_id=ask_event_id,
+            )
+            print(
+                "Memory suggestions summary: "
+                f"applied={apply_result.applied} "
+                f"skipped={apply_result.skipped} "
+                f"denied={apply_result.denied}"
+            )
+            if apply_result.exit_code is not None:
+                raise SystemExit(apply_result.exit_code)
+        if not suggestions:
+            payload.update(
+                {
+                    "apply_memory_suggestions_requested": True,
+                    "apply_memory_suggestions_result": {
+                        "applied": 0,
+                        "skipped": 0,
+                        "denied": 0,
+                    },
+                    "apply_memory_suggestions_applied": [],
+                }
+            )
+            state_store.record_event(
+                actor="ask",
+                event_type=EVENT_TYPE_LLM_PLAN,
+                message="LLM plan generated.",
+                json_payload=payload,
+                event_id=str(uuid4()),
+            )
+            return
+
+    if not apply_memory_suggestions:
+        payload.update(
+            {
+                "apply_memory_suggestions_requested": False,
+                "apply_memory_suggestions_result": {
+                    "applied": 0,
+                    "skipped": 0,
+                    "denied": 0,
+                },
+                "apply_memory_suggestions_applied": [],
+            }
+        )
+        state_store.record_event(
+            actor="ask",
+            event_type=EVENT_TYPE_LLM_PLAN,
+            message="LLM plan generated.",
+            json_payload=payload,
+        )
 
     if not enqueue:
         return
@@ -1716,7 +2008,7 @@ def run_agent(
     last_actions_count = 0
     for cycle in range(1, cycles_limit + 1):
         print(f"=== Agent Cycle {cycle} ===")
-        plan, assessment, state_store = _request_llm_plan(
+        plan, assessment, state_store, _payload = _request_llm_plan(
             db_path,
             goal_text,
             model=None,
@@ -2047,6 +2339,9 @@ def _handle_ask(args: argparse.Namespace) -> None:
         explain=args.explain,
         debug=args.debug,
         use_memory=args.use_memory,
+        apply_memory_suggestions=args.apply_memory_suggestions,
+        non_interactive=args.non_interactive,
+        policy_path=args.policy,
     )
 
 
@@ -3050,9 +3345,24 @@ def build_parser() -> argparse.ArgumentParser:
         help="Inject eligible memory items into the planner prompt (read-only)",
     )
     ask_parser.add_argument(
+        "--apply-memory-suggestions",
+        action="store_true",
+        help="Apply memory suggestions from the plan (policy-gated)",
+    )
+    ask_parser.add_argument(
+        "--policy",
+        default=None,
+        help="Path to a JSON policy file for memory writes",
+    )
+    ask_parser.add_argument(
+        "--non-interactive",
+        action="store_true",
+        help="Fail closed instead of prompting for memory suggestions",
+    )
+    ask_parser.add_argument(
         "--yes",
         action="store_true",
-        help="Skip confirmation prompts for enqueue actions",
+        help="Skip confirmation prompts for enqueue actions and memory suggestions",
     )
     ask_parser.add_argument(
         "--explain",

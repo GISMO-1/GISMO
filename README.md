@@ -140,6 +140,7 @@ Planner (local LLM via Ollama):
 
   gismo ask "Summarize the last 10 queue failures" --dry-run
   gismo ask "Do X safely" --enqueue
+  gismo ask "Plan with memory context" --dry-run --memory
 
 Agent loop (leashed autonomy):
 
@@ -161,6 +162,7 @@ Planner behavior:
 - Higher-risk plans require confirmation before enqueueing unless --yes is used.
 - --explain prints additional assessment details.
 - Use --debug to print tracebacks for ask failures.
+- --memory injects eligible read-only memory context into the planner prompt (bounded, audited).
 
 Planner configuration:
 - Increase --timeout-s on CPU machines (60s baseline) if prompts time out.

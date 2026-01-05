@@ -2,6 +2,8 @@ import contextlib
 import io
 import json
 import os
+import re
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
@@ -10,6 +12,8 @@ from unittest import mock
 from gismo.cli import main as cli_main
 from gismo.core.models import EVENT_TYPE_ASK_FAILED, EVENT_TYPE_LLM_PLAN
 from gismo.core.state import StateStore
+from gismo.memory.store import put_item as memory_put_item
+from gismo.memory.store import tombstone_item as memory_tombstone_item
 
 
 class AskCliTest(unittest.TestCase):
@@ -761,6 +765,255 @@ class AskCliTest(unittest.TestCase):
             state_store = StateStore(db_path)
             items = state_store.list_queue_items(limit=20)
             self.assertEqual(len(items), 13)
+
+    def test_ask_without_memory_has_no_audit_metadata(self) -> None:
+        response = json.dumps({"intent": "noop", "assumptions": [], "actions": [], "notes": []})
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = str(Path(tmpdir) / "state.db")
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "GISMO_OLLAMA_MODEL": "",
+                    "GISMO_OLLAMA_TIMEOUT_S": "",
+                    "GISMO_OLLAMA_URL": "",
+                    "GISMO_LLM_MODEL": "",
+                    "OLLAMA_HOST": "",
+                },
+                clear=False,
+            ):
+                with mock.patch.object(cli_main, "ollama_chat", return_value=response):
+                    cli_main.run_ask(
+                        db_path,
+                        "noop",
+                        model=None,
+                        host=None,
+                        timeout_s=None,
+                        enqueue=False,
+                        dry_run=True,
+                        max_actions=10,
+                        yes=False,
+                        explain=False,
+                    )
+            state_store = StateStore(db_path)
+            event = state_store.list_events()[0]
+            payload = event.json_payload
+            assert payload is not None
+            self.assertNotIn("memory_injection_enabled", payload)
+            self.assertNotIn("memory_injected_count", payload)
+
+    def test_ask_memory_injection_filters_and_orders(self) -> None:
+        response = json.dumps({"intent": "noop", "assumptions": [], "actions": [], "notes": []})
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = str(Path(tmpdir) / "state.db")
+            memory_put_item(
+                db_path,
+                namespace="global",
+                key="alpha",
+                kind="fact",
+                value={"a": 1},
+                tags=None,
+                confidence="high",
+                source="operator",
+                ttl_seconds=None,
+                actor="test",
+                policy_hash="test",
+            )
+            memory_put_item(
+                db_path,
+                namespace="project:alpha",
+                key="beta",
+                kind="preference",
+                value={"b": 2},
+                tags=None,
+                confidence="medium",
+                source="operator",
+                ttl_seconds=None,
+                actor="test",
+                policy_hash="test",
+            )
+            memory_put_item(
+                db_path,
+                namespace="global",
+                key="gamma",
+                kind="note",
+                value={"c": 3},
+                tags=None,
+                confidence="high",
+                source="operator",
+                ttl_seconds=None,
+                actor="test",
+                policy_hash="test",
+            )
+            memory_put_item(
+                db_path,
+                namespace="private",
+                key="delta",
+                kind="fact",
+                value={"d": 4},
+                tags=None,
+                confidence="high",
+                source="operator",
+                ttl_seconds=None,
+                actor="test",
+                policy_hash="test",
+            )
+            memory_put_item(
+                db_path,
+                namespace="global",
+                key="epsilon",
+                kind="constraint",
+                value={"e": 5},
+                tags=None,
+                confidence="low",
+                source="operator",
+                ttl_seconds=None,
+                actor="test",
+                policy_hash="test",
+            )
+            memory_put_item(
+                db_path,
+                namespace="project:alpha",
+                key="zeta",
+                kind="procedure",
+                value={"z": 6},
+                tags=None,
+                confidence="high",
+                source="operator",
+                ttl_seconds=None,
+                actor="test",
+                policy_hash="test",
+            )
+            memory_tombstone_item(
+                db_path,
+                "project:alpha",
+                "zeta",
+                actor="test",
+                policy_hash="test",
+            )
+            with sqlite3.connect(db_path) as connection:
+                connection.execute(
+                    "UPDATE memory_items SET updated_at = ? WHERE namespace = ? AND key = ?",
+                    ("2024-01-02T00:00:00+00:00", "global", "alpha"),
+                )
+                connection.execute(
+                    "UPDATE memory_items SET updated_at = ? WHERE namespace = ? AND key = ?",
+                    ("2024-01-03T00:00:00+00:00", "project:alpha", "beta"),
+                )
+                connection.commit()
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "GISMO_OLLAMA_MODEL": "",
+                    "GISMO_OLLAMA_TIMEOUT_S": "",
+                    "GISMO_OLLAMA_URL": "",
+                    "GISMO_LLM_MODEL": "",
+                    "OLLAMA_HOST": "",
+                },
+                clear=False,
+            ):
+                with mock.patch.object(cli_main, "ollama_chat", return_value=response) as mocked:
+                    cli_main.run_ask(
+                        db_path,
+                        "noop",
+                        model=None,
+                        host=None,
+                        timeout_s=None,
+                        enqueue=False,
+                        dry_run=True,
+                        max_actions=10,
+                        yes=False,
+                        explain=False,
+                        use_memory=True,
+                    )
+            user_prompt = mocked.call_args[0][0]
+            match = re.search(
+                r"<<<< MEMORY READ ONLY >>>>\n(.*)\n<<<< END MEMORY >>>>",
+                user_prompt,
+                re.DOTALL,
+            )
+            assert match is not None
+            entries = json.loads(match.group(1))
+            self.assertEqual([entry["key"] for entry in entries], ["beta", "alpha"])
+            self.assertEqual(entries[0]["namespace"], "project:alpha")
+            self.assertEqual(entries[1]["namespace"], "global")
+            state_store = StateStore(db_path)
+            event = state_store.list_events()[0]
+            payload = event.json_payload
+            assert payload is not None
+            self.assertTrue(payload["memory_injection_enabled"])
+            self.assertEqual(payload["memory_injected_count"], 2)
+            self.assertEqual(
+                payload["memory_injected_keys"],
+                [{"namespace": "project:alpha", "key": "beta"}, {"namespace": "global", "key": "alpha"}],
+            )
+            self.assertLessEqual(payload["memory_injected_bytes"], 8192)
+            os.remove(db_path)
+
+    def test_ask_memory_enforces_item_and_byte_caps(self) -> None:
+        response = json.dumps({"intent": "noop", "assumptions": [], "actions": [], "notes": []})
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = str(Path(tmpdir) / "state.db")
+            for index in range(25):
+                memory_put_item(
+                    db_path,
+                    namespace="global",
+                    key=f"k{index:02d}",
+                    kind="fact",
+                    value={"blob": "x" * 1000},
+                    tags=None,
+                    confidence="high",
+                    source="operator",
+                    ttl_seconds=None,
+                    actor="test",
+                    policy_hash="test",
+                )
+            with sqlite3.connect(db_path) as connection:
+                connection.execute(
+                    "UPDATE memory_items SET updated_at = ? WHERE namespace = ?",
+                    ("2024-01-04T00:00:00+00:00", "global"),
+                )
+                connection.commit()
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "GISMO_OLLAMA_MODEL": "",
+                    "GISMO_OLLAMA_TIMEOUT_S": "",
+                    "GISMO_OLLAMA_URL": "",
+                    "GISMO_LLM_MODEL": "",
+                    "OLLAMA_HOST": "",
+                },
+                clear=False,
+            ):
+                with mock.patch.object(cli_main, "ollama_chat", return_value=response) as mocked:
+                    cli_main.run_ask(
+                        db_path,
+                        "noop",
+                        model=None,
+                        host=None,
+                        timeout_s=None,
+                        enqueue=False,
+                        dry_run=True,
+                        max_actions=10,
+                        yes=False,
+                        explain=False,
+                        use_memory=True,
+                    )
+            user_prompt = mocked.call_args[0][0]
+            match = re.search(
+                r"<<<< MEMORY READ ONLY >>>>\n(.*)\n<<<< END MEMORY >>>>",
+                user_prompt,
+                re.DOTALL,
+            )
+            assert match is not None
+            entries = json.loads(match.group(1))
+            keys = [entry["key"] for entry in entries]
+            self.assertLessEqual(len(entries), 20)
+            self.assertEqual(keys, sorted(keys))
+            state_store = StateStore(db_path)
+            payload = state_store.list_events()[0].json_payload
+            assert payload is not None
+            self.assertLessEqual(payload["memory_injected_bytes"], 8192)
+            self.assertEqual(payload["memory_injected_count"], len(entries))
 
 
 if __name__ == "__main__":

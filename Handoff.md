@@ -173,9 +173,11 @@ LATEST UPDATE (OPERATOR NOTES)
 Status:
 - Added policy + confirmation gating for memory put/delete operations in the CLI.
 - Audited memory decision outcomes (allowed/denied/confirmed) in memory events.
+- Added optional ask --memory prompt injection with deterministic filters, bounds, and audit metadata.
 
 Next steps:
 - Extend policy samples if new memory namespaces are introduced.
+- Validate memory prompt injection ordering against real operator datasets.
 - Re-run Windows validation on a native host before release tagging.
 
 Tests run:

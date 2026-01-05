@@ -51,5 +51,7 @@ def build_system_prompt() -> str:
     )
 
 
-def build_user_prompt(user_text: str) -> str:
+def build_user_prompt(user_text: str, *, memory_block: str | None = None) -> str:
+    if memory_block:
+        return f"User request: {user_text}\n\n{memory_block}".strip()
     return f"User request: {user_text}".strip()

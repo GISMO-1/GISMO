@@ -30,6 +30,21 @@ class MemoryItem:
     updated_at: str
 
 
+@dataclass(frozen=True)
+class MemoryNamespaceSummary:
+    namespace: str
+    item_count: int
+    tombstone_count: int
+    last_write_at: str | None
+    retired: bool
+    retired_at: str | None
+
+
+@dataclass(frozen=True)
+class MemoryNamespaceDetail(MemoryNamespaceSummary):
+    retired_reason: str | None
+
+
 class MemoryStore:
     def __init__(self, db_path: str) -> None:
         self.db_path = db_path
@@ -110,6 +125,15 @@ class MemoryStore:
             )
             cursor.execute(
                 """
+                CREATE TABLE IF NOT EXISTS memory_namespaces (
+                    namespace TEXT PRIMARY KEY,
+                    retired_at TEXT NULL,
+                    retired_reason TEXT NULL
+                )
+                """
+            )
+            cursor.execute(
+                """
                 CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_items_namespace_key
                 ON memory_items (namespace, key)
                 """
@@ -157,6 +181,112 @@ class MemoryStore:
                 """
             )
             connection.commit()
+
+    def list_namespaces(self) -> list[MemoryNamespaceSummary]:
+        sql = """
+            WITH namespace_union AS (
+                SELECT namespace FROM memory_items
+                UNION
+                SELECT namespace FROM memory_namespaces
+            ),
+            stats AS (
+                SELECT
+                    namespace,
+                    SUM(CASE WHEN is_tombstoned = 0 THEN 1 ELSE 0 END) AS item_count,
+                    SUM(CASE WHEN is_tombstoned = 1 THEN 1 ELSE 0 END) AS tombstone_count,
+                    MAX(updated_at) AS last_write_at
+                FROM memory_items
+                GROUP BY namespace
+            )
+            SELECT
+                namespace_union.namespace AS namespace,
+                COALESCE(stats.item_count, 0) AS item_count,
+                COALESCE(stats.tombstone_count, 0) AS tombstone_count,
+                stats.last_write_at AS last_write_at,
+                memory_namespaces.retired_at AS retired_at,
+                memory_namespaces.retired_reason AS retired_reason
+            FROM namespace_union
+            LEFT JOIN stats ON stats.namespace = namespace_union.namespace
+            LEFT JOIN memory_namespaces ON memory_namespaces.namespace = namespace_union.namespace
+            ORDER BY namespace_union.namespace ASC
+        """
+        with self._connection() as connection:
+            rows = connection.cursor().execute(sql).fetchall()
+            return [_row_to_namespace_summary(row) for row in rows]
+
+    def get_namespace(self, *, namespace: str) -> MemoryNamespaceDetail | None:
+        sql = """
+            WITH namespace_union AS (
+                SELECT namespace FROM memory_items
+                UNION
+                SELECT namespace FROM memory_namespaces
+            ),
+            stats AS (
+                SELECT
+                    namespace,
+                    SUM(CASE WHEN is_tombstoned = 0 THEN 1 ELSE 0 END) AS item_count,
+                    SUM(CASE WHEN is_tombstoned = 1 THEN 1 ELSE 0 END) AS tombstone_count,
+                    MAX(updated_at) AS last_write_at
+                FROM memory_items
+                GROUP BY namespace
+            )
+            SELECT
+                namespace_union.namespace AS namespace,
+                COALESCE(stats.item_count, 0) AS item_count,
+                COALESCE(stats.tombstone_count, 0) AS tombstone_count,
+                stats.last_write_at AS last_write_at,
+                memory_namespaces.retired_at AS retired_at,
+                memory_namespaces.retired_reason AS retired_reason
+            FROM namespace_union
+            LEFT JOIN stats ON stats.namespace = namespace_union.namespace
+            LEFT JOIN memory_namespaces ON memory_namespaces.namespace = namespace_union.namespace
+            WHERE namespace_union.namespace = ?
+        """
+        with self._connection() as connection:
+            row = connection.cursor().execute(sql, (namespace,)).fetchone()
+            if not row:
+                return None
+            return _row_to_namespace_detail(row)
+
+    def retire_namespace(
+        self,
+        *,
+        namespace: str,
+        reason: str,
+        retired_at: Optional[str] = None,
+    ) -> tuple[MemoryNamespaceDetail, bool]:
+        retired_at = retired_at or _utc_now().isoformat()
+        with self._connection() as connection:
+            cursor = connection.cursor()
+            existing = cursor.execute(
+                """
+                SELECT retired_at, retired_reason
+                FROM memory_namespaces
+                WHERE namespace = ?
+                """,
+                (namespace,),
+            ).fetchone()
+            if existing and existing["retired_at"]:
+                detail = self.get_namespace(namespace=namespace)
+                if detail is None:
+                    raise RuntimeError("Failed to load namespace metadata after retire")
+                return detail, False
+            cursor.execute(
+                """
+                INSERT INTO memory_namespaces (namespace, retired_at, retired_reason)
+                VALUES (?, ?, ?)
+                ON CONFLICT(namespace)
+                DO UPDATE SET
+                    retired_at = excluded.retired_at,
+                    retired_reason = excluded.retired_reason
+                """,
+                (namespace, retired_at, reason),
+            )
+            connection.commit()
+        detail = self.get_namespace(namespace=namespace)
+        if detail is None:
+            raise RuntimeError("Failed to load namespace metadata after retire")
+        return detail, True
 
     def put_item(
         self,
@@ -794,6 +924,28 @@ def list_prompt_items(
     return MemoryStore(db_path).list_prompt_items(limit=limit)
 
 
+def list_namespaces(db_path: str) -> list[MemoryNamespaceSummary]:
+    return MemoryStore(db_path).list_namespaces()
+
+
+def get_namespace(db_path: str, *, namespace: str) -> MemoryNamespaceDetail | None:
+    return MemoryStore(db_path).get_namespace(namespace=namespace)
+
+
+def retire_namespace(
+    db_path: str,
+    *,
+    namespace: str,
+    reason: str,
+    retired_at: Optional[str] = None,
+) -> tuple[MemoryNamespaceDetail, bool]:
+    return MemoryStore(db_path).retire_namespace(
+        namespace=namespace,
+        reason=reason,
+        retired_at=retired_at,
+    )
+
+
 def tombstone_item(
     db_path: str,
     namespace: str,
@@ -948,3 +1100,28 @@ def _truncate_large_strings(value: Any) -> Any:
     if isinstance(value, dict):
         return {key: _truncate_large_strings(val) for key, val in value.items()}
     return value
+
+
+def _row_to_namespace_summary(row: sqlite3.Row) -> MemoryNamespaceSummary:
+    retired_at = row["retired_at"]
+    return MemoryNamespaceSummary(
+        namespace=row["namespace"],
+        item_count=int(row["item_count"]),
+        tombstone_count=int(row["tombstone_count"]),
+        last_write_at=row["last_write_at"],
+        retired=bool(retired_at),
+        retired_at=retired_at,
+    )
+
+
+def _row_to_namespace_detail(row: sqlite3.Row) -> MemoryNamespaceDetail:
+    summary = _row_to_namespace_summary(row)
+    return MemoryNamespaceDetail(
+        namespace=summary.namespace,
+        item_count=summary.item_count,
+        tombstone_count=summary.tombstone_count,
+        last_write_at=summary.last_write_at,
+        retired=summary.retired,
+        retired_at=summary.retired_at,
+        retired_reason=row["retired_reason"],
+    )

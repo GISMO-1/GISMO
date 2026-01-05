@@ -11,6 +11,7 @@ from unittest import mock
 from gismo.cli import main as cli_main
 from gismo.core.models import QueueStatus
 from gismo.core.state import StateStore
+from gismo.memory.store import retire_namespace as memory_retire_namespace
 
 
 class AgentCliTest(unittest.TestCase):
@@ -309,3 +310,66 @@ class AgentCliTest(unittest.TestCase):
                     "SELECT COUNT(*) FROM memory_items"
                 ).fetchone()[0]
             self.assertEqual(item_count, 0)
+
+    def test_agent_apply_memory_suggestions_denied_for_retired_namespace(self) -> None:
+        response = json.dumps(
+            {
+                "intent": "remember",
+                "assumptions": [],
+                "actions": [],
+                "notes": [],
+                "memory_suggestions": [
+                    {
+                        "namespace": "global",
+                        "key": "operator_pref",
+                        "kind": "preference",
+                        "value_json": "\"safe\"",
+                        "confidence": "high",
+                        "why": "Operator prefers safety.",
+                    }
+                ],
+            }
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = str(Path(tmpdir) / "state.db")
+            memory_retire_namespace(
+                db_path,
+                namespace="global",
+                reason="policy-freeze",
+            )
+            policy_path = self._write_policy(
+                tmpdir,
+                {
+                    "allowed_tools": ["memory.put"],
+                    "memory": {"allow": {"memory.put": ["global"]}},
+                },
+            )
+            with mock.patch.dict(os.environ, self._mock_env(), clear=False):
+                with mock.patch.object(cli_main, "ollama_chat", return_value=response):
+                    cli_main.run_agent(
+                        db_path,
+                        "remember preference",
+                        policy_path=policy_path,
+                        once=True,
+                        max_cycles=1,
+                        yes=True,
+                        dry_run=True,
+                        apply_memory_suggestions=True,
+                    )
+            with sqlite3.connect(db_path) as connection:
+                item_count = connection.execute(
+                    "SELECT COUNT(*) FROM memory_items"
+                ).fetchone()[0]
+                event_row = connection.execute(
+                    "SELECT result_meta_json FROM memory_events "
+                    "WHERE operation = ? "
+                    "ORDER BY timestamp DESC "
+                    "LIMIT 1",
+                    ("put",),
+                ).fetchone()
+            self.assertEqual(item_count, 0)
+            self.assertIsNotNone(event_row)
+            result_meta = json.loads(event_row[0])
+            self.assertEqual(result_meta["policy_action"], "memory.put.retired")
+            self.assertEqual(result_meta["policy_decision"], "denied")
+            self.assertTrue(result_meta["namespace_retired"])

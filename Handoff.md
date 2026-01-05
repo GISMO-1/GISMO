@@ -172,10 +172,10 @@ Plan assessment gate:
 LATEST UPDATE (OPERATOR NOTES)
 
 Status:
-- Moved memory snapshot CLI handlers into gismo/cli/memory_snapshot.py for reduced main.py churn (no behavior changes).
+- Added memory namespace lifecycle commands (list/show/retire) with audit logging and retired namespace write enforcement.
 
 Next steps:
-- Monitor snapshot CLI outputs for any regressions after the refactor.
+- Decide whether to ship a default policy allowing memory.namespace.retire in controlled environments.
 
 Tests run:
 - python scripts/verify.py

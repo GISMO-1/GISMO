@@ -13,6 +13,7 @@ from gismo.cli import main as cli_main
 from gismo.core.models import EVENT_TYPE_ASK_FAILED, EVENT_TYPE_LLM_PLAN
 from gismo.core.state import StateStore
 from gismo.memory.store import put_item as memory_put_item
+from gismo.memory.store import retire_namespace as memory_retire_namespace
 from gismo.memory.store import tombstone_item as memory_tombstone_item
 
 
@@ -573,6 +574,83 @@ class AskCliTest(unittest.TestCase):
                     "SELECT COUNT(*) FROM memory_items"
                 ).fetchone()[0]
             self.assertEqual(item_count, 0)
+
+    def test_ask_apply_memory_suggestions_denied_for_retired_namespace(self) -> None:
+        response = json.dumps(
+            {
+                "intent": "remember",
+                "assumptions": [],
+                "actions": [],
+                "notes": [],
+                "memory_suggestions": [
+                    {
+                        "namespace": "global",
+                        "key": "operator_pref",
+                        "kind": "preference",
+                        "value_json": "\"safe\"",
+                        "confidence": "high",
+                        "why": "Operator prefers safety.",
+                    }
+                ],
+            }
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = str(Path(tmpdir) / "state.db")
+            memory_retire_namespace(
+                db_path,
+                namespace="global",
+                reason="policy-freeze",
+            )
+            policy_path = self._write_policy(
+                tmpdir,
+                {
+                    "allowed_tools": ["memory.put"],
+                    "memory": {"allow": {"memory.put": ["global"]}},
+                },
+            )
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "GISMO_OLLAMA_MODEL": "",
+                    "GISMO_OLLAMA_TIMEOUT_S": "",
+                    "GISMO_OLLAMA_URL": "",
+                    "GISMO_LLM_MODEL": "",
+                    "OLLAMA_HOST": "",
+                },
+                clear=False,
+            ):
+                with mock.patch.object(cli_main, "ollama_chat", return_value=response):
+                    cli_main.run_ask(
+                        db_path,
+                        "remember preference",
+                        model=None,
+                        host=None,
+                        timeout_s=None,
+                        enqueue=False,
+                        dry_run=True,
+                        max_actions=10,
+                        yes=True,
+                        explain=False,
+                        apply_memory_suggestions=True,
+                        policy_path=policy_path,
+                    )
+            with sqlite3.connect(db_path) as connection:
+                item_count = connection.execute(
+                    "SELECT COUNT(*) FROM memory_items"
+                ).fetchone()[0]
+                event_row = connection.execute(
+                    "SELECT result_meta_json FROM memory_events "
+                    "WHERE operation = ? "
+                    "ORDER BY timestamp DESC "
+                    "LIMIT 1",
+                    ("put",),
+                ).fetchone()
+            self.assertEqual(item_count, 0)
+            self.assertIsNotNone(event_row)
+            result_meta = json.loads(event_row[0])
+            self.assertEqual(result_meta["policy_action"], "memory.put.retired")
+            self.assertEqual(result_meta["policy_decision"], "denied")
+            self.assertTrue(result_meta["namespace_retired"])
 
     def test_ask_invalid_json_fails_cleanly(self) -> None:
         response = "not json"

@@ -2,6 +2,7 @@ import argparse
 import contextlib
 import io
 import os
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -239,6 +240,22 @@ class CliMainParserTest(unittest.TestCase):
                 output[1],
                 "Ensure GISMO_IPC_TOKEN matches on server and client.",
             )
+
+    @unittest.skipIf(os.name != "nt", "Windows-only handle release check")
+    def test_queue_stats_releases_db_handle(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "locktest.db"
+            argv = ["gismo", "queue", "stats", "--db", str(db_path)]
+
+            with mock.patch.object(sys, "argv", argv):
+                buffer = io.StringIO()
+                with contextlib.redirect_stdout(buffer):
+                    cli_main.main()
+
+            self.assertTrue(db_path.exists())
+            renamed_path = db_path.with_name("locktest-renamed.db")
+            os.replace(db_path, renamed_path)
+            os.remove(renamed_path)
 
 
 if __name__ == "__main__":

@@ -129,6 +129,12 @@ Memory management (policy-gated; confirmation required for high-risk namespaces)
   gismo memory namespace show global --policy policy/dev-safe.json
   gismo memory namespace retire global --reason "governance" \
     --policy /path/to/policy.json --yes
+  gismo memory profile list --policy policy/dev-safe.json
+  gismo memory profile show operator --policy policy/dev-safe.json
+  gismo memory profile create --name operator --description "Operator defaults" \
+    --include-namespace global --include-kind preference --include-kind fact \
+    --max-items 20 --policy /path/to/policy.json --yes
+  gismo memory profile retire operator --policy /path/to/policy.json --yes
   gismo memory retention list --policy policy/dev-safe.json
   gismo memory retention show global --policy policy/dev-safe.json
   gismo memory retention set global --max-items 500 --ttl-seconds 86400 \
@@ -152,6 +158,9 @@ Notes:
 - Global/project namespaces require confirmation unless policy explicitly exempts them.
 - Use --non-interactive to fail closed instead of prompting.
 - Namespace retirement requires a policy that allows memory.namespace.retire for the target namespace.
+- Memory profiles control read-only visibility only; they never write memory.
+- Memory profile create/retire requires policy allowance for memory.profile.create and
+  memory.profile.retire plus explicit confirmation.
 - Retention enforcement is policy/confirmation-gated via memory.retention.enforce and runs only on writes.
 - Memory doctor repairs are operator-controlled, policy-gated, and require explicit flags (no automatic fixes).
 - Snapshot item_hash values are computed from a canonical JSON payload that includes
@@ -170,6 +179,7 @@ Planner (local LLM via Ollama):
   gismo ask "Summarize the last 10 queue failures" --dry-run
   gismo ask "Do X safely" --enqueue
   gismo ask "Plan with memory context" --dry-run --memory
+  gismo ask "Plan with operator memory profile" --dry-run --memory-profile operator
   gismo ask "Remember the default model" --apply-memory-suggestions \
     --policy policy/dev-safe.json --yes
 
@@ -179,6 +189,7 @@ Agent loop (leashed autonomy):
   gismo agent "Do X safely" --once
   gismo agent "Do X safely" --max-cycles 3 --yes
   gismo agent "Plan with memory context" --dry-run --memory
+  gismo agent "Plan with operator memory profile" --dry-run --memory-profile operator
   gismo agent "Apply memory suggestions" --dry-run --apply-memory-suggestions \
     --policy policy/dev-safe.json --yes
 
@@ -187,6 +198,13 @@ Agent notes:
 - Confirmation is required for high-risk plans or any shell/write actions unless --yes is provided.
 - Memory context and suggestion handling mirror `ask`: suggestions are advisory unless
   --apply-memory-suggestions is set (policy/confirmation-gated; use --non-interactive to fail closed).
+
+Memory profiles (read-only selection):
+- Profiles define which namespaces/kinds are visible for memory injection; they do not write memory.
+- Example profiles:
+  - operator: include global preferences/facts with a max-items cap.
+  - project: include project:<name> namespace kinds for task context.
+  - minimal: no filters (empty profile yields no injected memory).
 
 Planner behavior:
 - Produces enqueue-only plans under strict schema.

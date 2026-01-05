@@ -15,6 +15,7 @@ from typing import Iterator
 from uuid import UUID, uuid4
 
 from gismo.cli import memory_doctor as memory_doctor_cli
+from gismo.cli import memory_profile as memory_profile_cli
 from gismo.cli import memory_snapshot as memory_snapshot_cli
 from gismo.cli.operator import (
     make_idempotency_key,
@@ -49,9 +50,12 @@ from gismo.memory.store import (
     MemoryNamespaceDetail,
     MemoryNamespaceSummary,
     MemoryRetentionDetail,
+    MemoryProfile,
     get_item as memory_get_item,
     get_namespace as memory_get_namespace,
+    get_profile_by_selector as memory_get_profile_by_selector,
     get_retention_detail as memory_get_retention_detail,
+    list_profile_items as memory_list_profile_items,
     list_prompt_items as memory_list_prompt_items,
     list_namespaces as memory_list_namespaces,
     list_retention_rules as memory_list_retention_rules,
@@ -1043,6 +1047,22 @@ def _print_memory_provenance(provenance: object) -> None:
         print(f"    caps: items={cap_items or '-'} bytes={cap_bytes or '-'}")
     if injected.get("bytes") is not None:
         print(f"    bytes_used: {injected['bytes']}")
+    profile = injected.get("profile") or {}
+    if isinstance(profile, dict) and profile.get("profile_id"):
+        print(
+            "    profile: "
+            f"{profile.get('name') or '-'} ({profile.get('profile_id')})"
+        )
+        if profile.get("include_namespaces") or profile.get("exclude_namespaces"):
+            include_ns = ", ".join(profile.get("include_namespaces") or []) or "-"
+            exclude_ns = ", ".join(profile.get("exclude_namespaces") or []) or "-"
+            print(f"    profile namespaces: include={include_ns} exclude={exclude_ns}")
+        if profile.get("include_kinds") or profile.get("exclude_kinds"):
+            include_kinds = ", ".join(profile.get("include_kinds") or []) or "-"
+            exclude_kinds = ", ".join(profile.get("exclude_kinds") or []) or "-"
+            print(f"    profile kinds: include={include_kinds} exclude={exclude_kinds}")
+        if profile.get("max_items") is not None:
+            print(f"    profile max_items: {profile.get('max_items')}")
 
     print("  Suggested memory updates:")
     print(f"    count: {suggested.get('count', 0)}")
@@ -2793,6 +2813,7 @@ class MemoryInjection:
     keys: list[dict[str, str]]
     cap_items: int
     cap_bytes: int
+    profile: dict[str, object] | None = None
 
 
 MEMORY_INJECTION_ITEM_CAP = 20
@@ -2820,8 +2841,50 @@ def _memory_entries_for_prompt(items: list[MemoryItem]) -> list[dict[str, str]]:
     return entries
 
 
-def _build_memory_injection(db_path: str) -> MemoryInjection:
-    items = memory_list_prompt_items(db_path, limit=MEMORY_INJECTION_ITEM_CAP)
+def _resolve_memory_profile(db_path: str, selector: str) -> MemoryProfile:
+    profile = memory_get_profile_by_selector(db_path, selector)
+    if profile is None:
+        print(f"Memory profile not found: {selector}", file=sys.stderr)
+        raise SystemExit(2)
+    if profile.retired_at:
+        print(f"Memory profile is retired: {profile.name}", file=sys.stderr)
+        raise SystemExit(2)
+    return profile
+
+
+def _profile_filters(profile: MemoryProfile, effective_limit: int | None) -> dict[str, object]:
+    return {
+        "profile_id": profile.profile_id,
+        "name": profile.name,
+        "include_namespaces": profile.include_namespaces,
+        "exclude_namespaces": profile.exclude_namespaces,
+        "include_kinds": profile.include_kinds,
+        "exclude_kinds": profile.exclude_kinds,
+        "max_items": profile.max_items,
+        "effective_limit": effective_limit,
+    }
+
+
+def _build_memory_injection(
+    db_path: str,
+    *,
+    profile_selector: str | None = None,
+) -> MemoryInjection:
+    profile_filters = None
+    if profile_selector:
+        profile = _resolve_memory_profile(db_path, profile_selector)
+        items = memory_list_profile_items(
+            db_path,
+            profile=profile,
+            limit=MEMORY_INJECTION_ITEM_CAP,
+        )
+        effective_limit = min(
+            MEMORY_INJECTION_ITEM_CAP,
+            profile.max_items if profile.max_items is not None else MEMORY_INJECTION_ITEM_CAP,
+        )
+        profile_filters = _profile_filters(profile, effective_limit)
+    else:
+        items = memory_list_prompt_items(db_path, limit=MEMORY_INJECTION_ITEM_CAP)
     entries = _memory_entries_for_prompt(items)
     capped_entries: list[dict[str, str]] = []
     total_bytes = 0
@@ -2849,6 +2912,7 @@ def _build_memory_injection(db_path: str) -> MemoryInjection:
         keys=keys,
         cap_items=MEMORY_INJECTION_ITEM_CAP,
         cap_bytes=MEMORY_INJECTION_BYTE_CAP,
+        profile=profile_filters,
     )
 
 
@@ -2866,7 +2930,40 @@ def _apply_memory_injection_payload(
             "memory_injected_bytes": memory_injection.bytes,
             "memory_injected_cap_items": memory_injection.cap_items,
             "memory_injected_cap_bytes": memory_injection.cap_bytes,
+            "memory_profile": memory_injection.profile,
         }
+    )
+
+
+def _record_memory_profile_use(
+    *,
+    db_path: str,
+    memory_injection: MemoryInjection | None,
+    actor: str,
+    related_event_id: str | None,
+) -> None:
+    if not memory_injection or not memory_injection.profile:
+        return
+    profile = memory_injection.profile
+    request = {
+        "profile_id": profile.get("profile_id"),
+        "profile_name": profile.get("name"),
+        "resolved_filters": profile,
+    }
+    result_meta = {
+        "selected_count": memory_injection.count,
+        "selected_keys": memory_injection.keys,
+        "cap_items": memory_injection.cap_items,
+        "cap_bytes": memory_injection.cap_bytes,
+    }
+    memory_record_event(
+        db_path,
+        operation="memory.profile.use",
+        actor=actor,
+        policy_hash=policy_hash_for_path(None),
+        request=request,
+        result_meta=result_meta,
+        related_ask_event_id=related_event_id,
     )
 
 
@@ -3093,11 +3190,18 @@ def run_ask(
     explain: bool,
     debug: bool = False,
     use_memory: bool = False,
+    memory_profile: str | None = None,
     apply_memory_suggestions: bool = False,
     non_interactive: bool = False,
     policy_path: str | None = None,
 ) -> None:
-    memory_injection = _build_memory_injection(db_path) if use_memory else None
+    plan_event_id = str(uuid4())
+    memory_injection = None
+    if use_memory or memory_profile:
+        memory_injection = _build_memory_injection(
+            db_path,
+            profile_selector=memory_profile,
+        )
     plan, assessment, state_store, payload = _request_llm_plan(
         db_path,
         user_text,
@@ -3115,6 +3219,12 @@ def run_ask(
         record_event=False,
     )
     try:
+        _record_memory_profile_use(
+            db_path=db_path,
+            memory_injection=memory_injection,
+            actor="ask",
+            related_event_id=plan_event_id,
+        )
         apply_result = MemoryApplyResult(
             applied=0,
             skipped=0,
@@ -3126,14 +3236,13 @@ def run_ask(
             if not suggestions:
                 print("No suggestions to apply")
             else:
-                ask_event_id = str(uuid4())
                 apply_result = _apply_memory_suggestions(
                     db_path,
                     suggestions,
                     policy_path=policy_path,
                     yes=yes,
                     non_interactive=non_interactive,
-                    related_event_id=ask_event_id,
+                    related_event_id=plan_event_id,
                     actor="ask",
                 )
                 payload.update(
@@ -3156,7 +3265,7 @@ def run_ask(
                     event_type=EVENT_TYPE_LLM_PLAN,
                     message="LLM plan generated.",
                     json_payload=payload,
-                    event_id=ask_event_id,
+                    event_id=plan_event_id,
                 )
                 print(
                     "Memory suggestions summary: "
@@ -3190,7 +3299,7 @@ def run_ask(
                     event_type=EVENT_TYPE_LLM_PLAN,
                     message="LLM plan generated.",
                     json_payload=payload,
-                    event_id=str(uuid4()),
+                    event_id=plan_event_id,
                 )
                 return
 
@@ -3218,6 +3327,7 @@ def run_ask(
                 event_type=EVENT_TYPE_LLM_PLAN,
                 message="LLM plan generated.",
                 json_payload=payload,
+                event_id=plan_event_id,
             )
 
         if not enqueue:
@@ -3309,6 +3419,7 @@ def run_agent(
     yes: bool,
     dry_run: bool,
     use_memory: bool = False,
+    memory_profile: str | None = None,
     apply_memory_suggestions: bool = False,
     non_interactive: bool = False,
 ) -> None:
@@ -3322,7 +3433,12 @@ def run_agent(
     last_actions_count = 0
     for cycle in range(1, cycles_limit + 1):
         print(f"=== Agent Cycle {cycle} ===")
-        memory_injection = _build_memory_injection(db_path) if use_memory else None
+        memory_injection = None
+        if use_memory or memory_profile:
+            memory_injection = _build_memory_injection(
+                db_path,
+                profile_selector=memory_profile,
+            )
         plan, assessment, state_store, _payload = _request_llm_plan(
             db_path,
             goal_text,
@@ -3348,6 +3464,12 @@ def run_agent(
                 applied_items=[],
             )
             plan_event_id = str(uuid4())
+            _record_memory_profile_use(
+                db_path=db_path,
+                memory_injection=memory_injection,
+                actor="agent",
+                related_event_id=plan_event_id,
+            )
             event_recorded = False
             if apply_memory_suggestions:
                 suggestions = plan.get("memory_suggestions") or []
@@ -3760,6 +3882,22 @@ def _handle_memory_namespace_retire(args: argparse.Namespace) -> None:
     run_memory_namespace_retire(args)
 
 
+def _handle_memory_profile_list(args: argparse.Namespace) -> None:
+    memory_profile_cli.run_memory_profile_list(args)
+
+
+def _handle_memory_profile_show(args: argparse.Namespace) -> None:
+    memory_profile_cli.run_memory_profile_show(args)
+
+
+def _handle_memory_profile_create(args: argparse.Namespace) -> None:
+    memory_profile_cli.run_memory_profile_create(args)
+
+
+def _handle_memory_profile_retire(args: argparse.Namespace) -> None:
+    memory_profile_cli.run_memory_profile_retire(args)
+
+
 def _handle_memory_retention_list(args: argparse.Namespace) -> None:
     run_memory_retention_list(args)
 
@@ -3831,6 +3969,7 @@ def _handle_ask(args: argparse.Namespace) -> None:
         explain=args.explain,
         debug=args.debug,
         use_memory=args.use_memory,
+        memory_profile=args.memory_profile,
         apply_memory_suggestions=args.apply_memory_suggestions,
         non_interactive=args.non_interactive,
         policy_path=args.policy,
@@ -3849,6 +3988,7 @@ def _handle_agent(args: argparse.Namespace) -> None:
         yes=args.yes,
         dry_run=args.dry_run,
         use_memory=args.use_memory,
+        memory_profile=args.memory_profile,
         apply_memory_suggestions=args.apply_memory_suggestions,
         non_interactive=args.non_interactive,
     )
@@ -4836,6 +4976,150 @@ def build_parser() -> argparse.ArgumentParser:
     )
     memory_namespace_retire_parser.set_defaults(handler=_handle_memory_namespace_retire)
 
+    memory_profile_parser = memory_subparsers.add_parser(
+        "profile",
+        help="Manage memory profiles (read-only selection)",
+    )
+    memory_profile_subparsers = memory_profile_parser.add_subparsers(
+        dest="memory_profile_command",
+        required=True,
+    )
+    memory_profile_list_parser = memory_profile_subparsers.add_parser(
+        "list",
+        help="List memory profiles",
+        parents=[db_parent_optional],
+    )
+    memory_profile_list_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Output JSON",
+    )
+    memory_profile_list_parser.add_argument(
+        "--policy",
+        default=None,
+        help="Optional policy file path for audit hashing",
+    )
+    memory_profile_list_parser.set_defaults(handler=_handle_memory_profile_list)
+
+    memory_profile_show_parser = memory_profile_subparsers.add_parser(
+        "show",
+        help="Show memory profile details",
+        parents=[db_parent_optional],
+    )
+    memory_profile_show_parser.add_argument(
+        "selector",
+        help="Memory profile name or id",
+    )
+    memory_profile_show_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Output JSON",
+    )
+    memory_profile_show_parser.add_argument(
+        "--policy",
+        default=None,
+        help="Optional policy file path for audit hashing",
+    )
+    memory_profile_show_parser.set_defaults(handler=_handle_memory_profile_show)
+
+    memory_profile_create_parser = memory_profile_subparsers.add_parser(
+        "create",
+        help="Create a memory profile (requires confirmation)",
+        parents=[db_parent_optional],
+    )
+    memory_profile_create_parser.add_argument(
+        "--name",
+        required=True,
+        help="Profile name (unique)",
+    )
+    memory_profile_create_parser.add_argument(
+        "--description",
+        default=None,
+        help="Optional profile description",
+    )
+    memory_profile_create_parser.add_argument(
+        "--include-namespace",
+        action="append",
+        default=[],
+        help="Namespace to include (repeatable, comma-separated supported)",
+    )
+    memory_profile_create_parser.add_argument(
+        "--exclude-namespace",
+        action="append",
+        default=[],
+        help="Namespace to exclude (repeatable, comma-separated supported)",
+    )
+    memory_profile_create_parser.add_argument(
+        "--include-kind",
+        action="append",
+        default=[],
+        help="Memory kind to include (repeatable, comma-separated supported)",
+    )
+    memory_profile_create_parser.add_argument(
+        "--exclude-kind",
+        action="append",
+        default=[],
+        help="Memory kind to exclude (repeatable, comma-separated supported)",
+    )
+    memory_profile_create_parser.add_argument(
+        "--max-items",
+        type=int,
+        default=None,
+        help="Maximum number of items after filtering",
+    )
+    memory_profile_create_parser.add_argument(
+        "--yes",
+        action="store_true",
+        help="Skip confirmation prompts",
+    )
+    memory_profile_create_parser.add_argument(
+        "--non-interactive",
+        action="store_true",
+        help="Fail closed instead of prompting for confirmation",
+    )
+    memory_profile_create_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Output JSON",
+    )
+    memory_profile_create_parser.add_argument(
+        "--policy",
+        default=None,
+        help="Path to a JSON policy file",
+    )
+    memory_profile_create_parser.set_defaults(handler=_handle_memory_profile_create)
+
+    memory_profile_retire_parser = memory_profile_subparsers.add_parser(
+        "retire",
+        help="Retire a memory profile (requires confirmation)",
+        parents=[db_parent_optional],
+    )
+    memory_profile_retire_parser.add_argument(
+        "selector",
+        help="Memory profile name or id",
+    )
+    memory_profile_retire_parser.add_argument(
+        "--yes",
+        action="store_true",
+        help="Skip confirmation prompts",
+    )
+    memory_profile_retire_parser.add_argument(
+        "--non-interactive",
+        action="store_true",
+        help="Fail closed instead of prompting for confirmation",
+    )
+    memory_profile_retire_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Output JSON",
+    )
+    memory_profile_retire_parser.add_argument(
+        "--policy",
+        default=None,
+        help="Path to a JSON policy file",
+    )
+    memory_profile_retire_parser.set_defaults(handler=_handle_memory_profile_retire)
+
     memory_retention_parser = memory_subparsers.add_parser(
         "retention",
         help="Manage memory retention rules",
@@ -5239,6 +5523,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Inject eligible memory items into the planner prompt (read-only)",
     )
     ask_parser.add_argument(
+        "--memory-profile",
+        dest="memory_profile",
+        default=None,
+        help="Inject memory using a named profile (read-only)",
+    )
+    ask_parser.add_argument(
         "--apply-memory-suggestions",
         action="store_true",
         help="Apply memory suggestions from the plan (policy-gated)",
@@ -5318,6 +5608,12 @@ def build_parser() -> argparse.ArgumentParser:
         dest="use_memory",
         action="store_true",
         help="Inject eligible memory items into the planner prompt (read-only)",
+    )
+    agent_parser.add_argument(
+        "--memory-profile",
+        dest="memory_profile",
+        default=None,
+        help="Inject memory using a named profile (read-only)",
     )
     agent_parser.add_argument(
         "--apply-memory-suggestions",

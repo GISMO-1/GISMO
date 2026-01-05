@@ -88,6 +88,22 @@ def canonical_json(payload: dict[str, object]) -> str:
     return json.dumps(payload, **_CANONICAL_KWARGS)
 
 
+def memory_item_hash(item: MemoryItem) -> str:
+    payload = _normalized_payload(
+        namespace=item.namespace,
+        key=item.key,
+        kind=item.kind,
+        value=item.value,
+        confidence=item.confidence,
+        source=item.source,
+        tags=item.tags,
+        created_at=item.created_at,
+        updated_at=item.updated_at,
+        is_tombstoned=item.is_tombstoned,
+    )
+    return _item_hash(payload)
+
+
 def _parse_namespace_filter(namespace_filter: str) -> tuple[str | None, str | None]:
     if namespace_filter == "*":
         return None, ""

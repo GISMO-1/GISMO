@@ -127,7 +127,11 @@ Memory management (policy-gated; confirmation required for high-risk namespaces)
   gismo memory delete --namespace global key --policy policy/dev-safe.json --yes
   gismo memory snapshot export --namespace project:* --out snapshots/project.json \
     --policy policy/dev-safe.json
+  gismo memory snapshot diff --in snapshots/project.json --db .gismo/state.db \
+    --policy policy/dev-safe.json
   gismo memory snapshot import --in snapshots/project.json --mode merge \
+    --policy policy/dev-safe.json --yes --non-interactive
+  gismo memory snapshot import --in snapshots/project.json --mode merge --dry-run \
     --policy policy/dev-safe.json --yes --non-interactive
 
 Notes:

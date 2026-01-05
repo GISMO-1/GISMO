@@ -58,6 +58,7 @@ from gismo.memory.snapshot import (
     SnapshotItem,
     export_snapshot,
     load_snapshot,
+    memory_item_hash,
     validate_snapshot,
 )
 
@@ -1133,6 +1134,17 @@ class MemoryApplyResult:
     decision_path: str | None = None
 
 
+@dataclass(frozen=True)
+class SnapshotDiffEntry:
+    namespace: str
+    key: str
+    action: str
+    snapshot_hash: str
+    existing_hash: str | None
+    snapshot_tombstoned: bool
+    existing_tombstoned: bool | None
+
+
 def _memory_policy_hash(policy_path: str | None) -> str:
     try:
         return policy_hash_for_path(policy_path)
@@ -1223,6 +1235,46 @@ def _validate_snapshot_namespace_filter(namespace_filter: str) -> None:
 
 def _snapshot_item_action(item: SnapshotItem) -> str:
     return "memory.delete" if item.is_tombstoned else "memory.put"
+
+
+def _record_snapshot_import_audit(
+    *,
+    db_path: str,
+    event_id: str,
+    actor: str,
+    policy_hash: str,
+    request: dict[str, object],
+    result_meta: dict[str, object],
+    dry_run: bool,
+) -> None:
+    if dry_run:
+        state_store = StateStore(db_path)
+        try:
+            state_store.record_event(
+                actor=actor,
+                event_type="memory.snapshot_import",
+                message="Dry-run memory snapshot import",
+                json_payload={
+                    "event_id": event_id,
+                    "operation": "snapshot_import",
+                    "policy_hash": policy_hash,
+                    "request": request,
+                    "result_meta": result_meta,
+                    "dry_run": True,
+                },
+            )
+        finally:
+            state_store.close()
+        return
+    memory_record_event(
+        db_path,
+        event_id=event_id,
+        operation="snapshot_import",
+        actor=actor,
+        policy_hash=policy_hash,
+        request=request,
+        result_meta=result_meta,
+    )
 
 
 def _apply_memory_suggestions(
@@ -1720,12 +1772,23 @@ def run_memory_snapshot_export(args: argparse.Namespace) -> None:
     print(f"Items: {len(snapshot['items'])}")
 
 
-def run_memory_snapshot_import(args: argparse.Namespace) -> None:
+def _snapshot_diff_entry_payload(entry: SnapshotDiffEntry) -> dict[str, object]:
+    return {
+        "namespace": entry.namespace,
+        "key": entry.key,
+        "snapshot_hash": entry.snapshot_hash,
+        "existing_hash": entry.existing_hash,
+        "snapshot_tombstoned": entry.snapshot_tombstoned,
+        "existing_tombstoned": entry.existing_tombstoned,
+    }
+
+
+def run_memory_snapshot_diff(args: argparse.Namespace) -> None:
     actor = "operator"
-    policy, resolved_policy_path = _load_memory_policy(args.policy)
+    _, resolved_policy_path = _load_memory_policy(args.policy)
     policy_hash = _memory_policy_hash(resolved_policy_path)
-    snapshot_event_id = str(uuid4())
     snapshot_path = Path(args.in_path)
+    snapshot_event_id = str(uuid4())
     try:
         snapshot_payload = load_snapshot(snapshot_path)
         items, snapshot_hash = validate_snapshot(snapshot_payload)
@@ -1733,7 +1796,127 @@ def run_memory_snapshot_import(args: argparse.Namespace) -> None:
         memory_record_event(
             args.db_path,
             event_id=snapshot_event_id,
-            operation="snapshot_import",
+            operation="snapshot_diff",
+            actor=actor,
+            policy_hash=policy_hash,
+            request={
+                "in_path": str(snapshot_path),
+            },
+            result_meta={
+                "status": "failed",
+                "error": str(exc),
+            },
+        )
+        print(f"Invalid snapshot: {exc}", file=sys.stderr)
+        raise SystemExit(2) from exc
+
+    entries: list[SnapshotDiffEntry] = []
+    for item in items:
+        existing = fetch_item_raw(args.db_path, namespace=item.namespace, key=item.key)
+        existing_hash = memory_item_hash(existing) if existing else None
+        if existing_hash == item.item_hash:
+            action = "unchanged"
+        elif item.is_tombstoned:
+            action = "tombstone"
+        elif existing is None:
+            action = "add"
+        else:
+            action = "update"
+        entries.append(
+            SnapshotDiffEntry(
+                namespace=item.namespace,
+                key=item.key,
+                action=action,
+                snapshot_hash=item.item_hash,
+                existing_hash=existing_hash,
+                snapshot_tombstoned=item.is_tombstoned,
+                existing_tombstoned=existing.is_tombstoned if existing else None,
+            )
+        )
+
+    entries.sort(key=lambda entry: (entry.namespace, entry.key))
+    grouped: dict[str, dict[str, list[SnapshotDiffEntry]]] = {}
+    for entry in entries:
+        grouped.setdefault(entry.namespace, {}).setdefault(entry.action, []).append(entry)
+
+    summary = {
+        "adds": len([entry for entry in entries if entry.action == "add"]),
+        "updates": len([entry for entry in entries if entry.action == "update"]),
+        "tombstones": len([entry for entry in entries if entry.action == "tombstone"]),
+        "unchanged": len([entry for entry in entries if entry.action == "unchanged"]),
+    }
+
+    if args.json:
+        payload = {
+            "adds": [_snapshot_diff_entry_payload(entry) for entry in entries if entry.action == "add"],
+            "updates": [_snapshot_diff_entry_payload(entry) for entry in entries if entry.action == "update"],
+            "tombstones": [
+                _snapshot_diff_entry_payload(entry)
+                for entry in entries
+                if entry.action == "tombstone"
+            ],
+            "unchanged": [
+                _snapshot_diff_entry_payload(entry)
+                for entry in entries
+                if entry.action == "unchanged"
+            ],
+            "summary": summary,
+        }
+        print(json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2))
+    else:
+        print(f"Snapshot diff for {snapshot_path}")
+        print(f"DB: {args.db_path}")
+        for namespace in sorted(grouped):
+            print(f"Namespace: {namespace}")
+            for label, action in (
+                ("ADD", "add"),
+                ("UPDATE", "update"),
+                ("TOMBSTONE", "tombstone"),
+                ("UNCHANGED", "unchanged"),
+            ):
+                items_for_action = grouped[namespace].get(action, [])
+                print(f"  {label} ({len(items_for_action)})")
+                for entry in items_for_action:
+                    print(f"    - {entry.key}")
+        print(
+            "Summary: "
+            f"adds={summary['adds']} "
+            f"updates={summary['updates']} "
+            f"tombstones={summary['tombstones']} "
+            f"unchanged={summary['unchanged']}"
+        )
+
+    memory_record_event(
+        args.db_path,
+        event_id=snapshot_event_id,
+        operation="snapshot_diff",
+        actor=actor,
+        policy_hash=policy_hash,
+        request={
+            "in_path": str(snapshot_path),
+            "snapshot_hash": snapshot_hash,
+        },
+        result_meta={
+            "status": "completed",
+            "summary": summary,
+        },
+    )
+
+
+def run_memory_snapshot_import(args: argparse.Namespace) -> None:
+    actor = "operator"
+    policy, resolved_policy_path = _load_memory_policy(args.policy)
+    policy_hash = _memory_policy_hash(resolved_policy_path)
+    snapshot_event_id = str(uuid4())
+    snapshot_path = Path(args.in_path)
+    dry_run = bool(getattr(args, "dry_run", False))
+    try:
+        snapshot_payload = load_snapshot(snapshot_path)
+        items, snapshot_hash = validate_snapshot(snapshot_payload)
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        _record_snapshot_import_audit(
+            db_path=args.db_path,
+            event_id=snapshot_event_id,
             actor=actor,
             policy_hash=policy_hash,
             request={
@@ -1741,6 +1924,7 @@ def run_memory_snapshot_import(args: argparse.Namespace) -> None:
                 "mode": args.mode,
                 "yes": args.yes,
                 "non_interactive": args.non_interactive,
+                "dry_run": dry_run,
             },
             result_meta={
                 "status": "failed",
@@ -1750,7 +1934,9 @@ def run_memory_snapshot_import(args: argparse.Namespace) -> None:
                 "skipped": 0,
                 "denied": 0,
                 "mode": args.mode,
+                "dry_run": dry_run,
             },
+            dry_run=dry_run,
         )
         print(f"Invalid snapshot: {exc}", file=sys.stderr)
         raise SystemExit(2) from exc
@@ -1772,21 +1958,22 @@ def run_memory_snapshot_import(args: argparse.Namespace) -> None:
         decision = _evaluate_memory_policy(policy, action, item.namespace)
         request = _memory_request_from_snapshot_item(item)
         if not decision.allowed:
-            meta = _memory_policy_result_meta(decision)
-            meta.update(
-                {
-                    "snapshot_import_event_id": snapshot_event_id,
-                    "snapshot_mode": args.mode,
-                }
-            )
-            memory_record_event(
-                args.db_path,
-                operation="delete" if item.is_tombstoned else "put",
-                actor=actor,
-                policy_hash=policy_hash,
-                request=request,
-                result_meta=meta,
-            )
+            if not dry_run:
+                meta = _memory_policy_result_meta(decision)
+                meta.update(
+                    {
+                        "snapshot_import_event_id": snapshot_event_id,
+                        "snapshot_mode": args.mode,
+                    }
+                )
+                memory_record_event(
+                    args.db_path,
+                    operation="delete" if item.is_tombstoned else "put",
+                    actor=actor,
+                    policy_hash=policy_hash,
+                    request=request,
+                    result_meta=meta,
+                )
             denied += 1
             exit_code = 2
             continue
@@ -1803,21 +1990,22 @@ def run_memory_snapshot_import(args: argparse.Namespace) -> None:
                     confirmation_mode=None,
                     reason="confirmation_required",
                 )
-                meta = _memory_policy_result_meta(denied_decision)
-                meta.update(
-                    {
-                        "snapshot_import_event_id": snapshot_event_id,
-                        "snapshot_mode": args.mode,
-                    }
-                )
-                memory_record_event(
-                    args.db_path,
-                    operation="delete" if item.is_tombstoned else "put",
-                    actor=actor,
-                    policy_hash=policy_hash,
-                    request=request,
-                    result_meta=meta,
-                )
+                if not dry_run:
+                    meta = _memory_policy_result_meta(denied_decision)
+                    meta.update(
+                        {
+                            "snapshot_import_event_id": snapshot_event_id,
+                            "snapshot_mode": args.mode,
+                        }
+                    )
+                    memory_record_event(
+                        args.db_path,
+                        operation="delete" if item.is_tombstoned else "put",
+                        actor=actor,
+                        policy_hash=policy_hash,
+                        request=request,
+                        result_meta=meta,
+                    )
                 denied += 1
                 exit_code = 2
                 continue
@@ -1834,21 +2022,22 @@ def run_memory_snapshot_import(args: argparse.Namespace) -> None:
                         confirmation_mode=None,
                         reason="confirmation_declined",
                     )
-                    meta = _memory_policy_result_meta(denied_decision)
-                    meta.update(
-                        {
-                            "snapshot_import_event_id": snapshot_event_id,
-                            "snapshot_mode": args.mode,
-                        }
-                    )
-                    memory_record_event(
-                        args.db_path,
-                        operation="delete" if item.is_tombstoned else "put",
-                        actor=actor,
-                        policy_hash=policy_hash,
-                        request=request,
-                        result_meta=meta,
-                    )
+                    if not dry_run:
+                        meta = _memory_policy_result_meta(denied_decision)
+                        meta.update(
+                            {
+                                "snapshot_import_event_id": snapshot_event_id,
+                                "snapshot_mode": args.mode,
+                            }
+                        )
+                        memory_record_event(
+                            args.db_path,
+                            operation="delete" if item.is_tombstoned else "put",
+                            actor=actor,
+                            policy_hash=policy_hash,
+                            request=request,
+                            result_meta=meta,
+                        )
                     denied += 1
                     exit_code = 2
                     continue
@@ -1861,31 +2050,31 @@ def run_memory_snapshot_import(args: argparse.Namespace) -> None:
                 "snapshot_mode": args.mode,
             }
         )
-        upsert_item_with_timestamps(
-            args.db_path,
-            namespace=item.namespace,
-            key=item.key,
-            kind=item.kind,
-            value=item.value,
-            tags=item.tags,
-            confidence=item.confidence,
-            source=item.source,
-            ttl_seconds=None,
-            is_tombstoned=item.is_tombstoned,
-            created_at=item.created_at,
-            updated_at=item.updated_at,
-            update_created_at=update_created_at,
-            actor=actor,
-            policy_hash=policy_hash,
-            operation="delete" if item.is_tombstoned else "put",
-            result_meta_extra=result_meta_extra,
-        )
+        if not dry_run:
+            upsert_item_with_timestamps(
+                args.db_path,
+                namespace=item.namespace,
+                key=item.key,
+                kind=item.kind,
+                value=item.value,
+                tags=item.tags,
+                confidence=item.confidence,
+                source=item.source,
+                ttl_seconds=None,
+                is_tombstoned=item.is_tombstoned,
+                created_at=item.created_at,
+                updated_at=item.updated_at,
+                update_created_at=update_created_at,
+                actor=actor,
+                policy_hash=policy_hash,
+                operation="delete" if item.is_tombstoned else "put",
+                result_meta_extra=result_meta_extra,
+            )
         applied += 1
 
-    memory_record_event(
-        args.db_path,
+    _record_snapshot_import_audit(
+        db_path=args.db_path,
         event_id=snapshot_event_id,
-        operation="snapshot_import",
         actor=actor,
         policy_hash=policy_hash,
         request={
@@ -1895,6 +2084,7 @@ def run_memory_snapshot_import(args: argparse.Namespace) -> None:
             "yes": args.yes,
             "non_interactive": args.non_interactive,
             "decision_path": decision_path,
+            "dry_run": dry_run,
         },
         result_meta={
             "status": "completed",
@@ -1903,7 +2093,9 @@ def run_memory_snapshot_import(args: argparse.Namespace) -> None:
             "skipped": skipped,
             "denied": denied,
             "mode": args.mode,
+            "dry_run": dry_run,
         },
+        dry_run=dry_run,
     )
     print(
         "Snapshot import summary: "
@@ -2909,6 +3101,10 @@ def _handle_memory_delete(args: argparse.Namespace) -> None:
 
 def _handle_memory_snapshot_export(args: argparse.Namespace) -> None:
     run_memory_snapshot_export(args)
+
+
+def _handle_memory_snapshot_diff(args: argparse.Namespace) -> None:
+    run_memory_snapshot_diff(args)
 
 
 def _handle_memory_snapshot_import(args: argparse.Namespace) -> None:
@@ -3929,6 +4125,29 @@ def build_parser() -> argparse.ArgumentParser:
     )
     memory_snapshot_export_parser.set_defaults(handler=_handle_memory_snapshot_export)
 
+    memory_snapshot_diff_parser = memory_snapshot_subparsers.add_parser(
+        "diff",
+        help="Diff a snapshot against the current memory store",
+        parents=[db_parent_optional],
+    )
+    memory_snapshot_diff_parser.add_argument(
+        "--in",
+        dest="in_path",
+        required=True,
+        help="Input snapshot file path",
+    )
+    memory_snapshot_diff_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Output JSON",
+    )
+    memory_snapshot_diff_parser.add_argument(
+        "--policy",
+        default=None,
+        help="Optional policy file path for audit hashing",
+    )
+    memory_snapshot_diff_parser.set_defaults(handler=_handle_memory_snapshot_diff)
+
     memory_snapshot_import_parser = memory_snapshot_subparsers.add_parser(
         "import",
         help="Import memory items from a snapshot",
@@ -3945,6 +4164,11 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["merge", "overwrite", "skip-existing"],
         default="merge",
         help="Import mode (default: merge)",
+    )
+    memory_snapshot_import_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Validate and report without writing memory items",
     )
     memory_snapshot_import_parser.add_argument(
         "--yes",

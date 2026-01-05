@@ -172,12 +172,12 @@ Plan assessment gate:
 LATEST UPDATE (OPERATOR NOTES)
 
 Status:
-- Added deterministic memory snapshot export/import with policy-gated restores and hash validation.
-- Snapshot imports write per-item memory events linked to a snapshot import audit entry.
+- Added snapshot diff CLI with hash-based change classification.
+- Added dry-run snapshot import that audits without writing memory items.
 
 Next steps:
-- Validate snapshot import flows with larger namespace exports in operator workflows.
-- Consider operator-facing docs for snapshot retention practices if needed.
+- Validate dry-run snapshot workflows in operator playbooks.
+- Consider operator-facing docs for snapshot retention/diff review practices if needed.
 
 Tests run:
 - python scripts/verify.py

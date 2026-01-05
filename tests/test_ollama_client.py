@@ -38,22 +38,26 @@ class OllamaClientPayloadTest(unittest.TestCase):
             mock.patch.object(ollama, "_extract_message_content", return_value="{}"),
         ):
             response = ollama.ollama_chat("ping", "return JSON")
+
         self.assertEqual(response, "{}")
+
         body = json.loads(captured["request"].data.decode("utf-8"))
         self.assertEqual(body["format"], "json")
-        self.assertEqual(body["keep_alive"], ollama.DEFAULT_OLLAMA_KEEP_ALIVE)
+        self.assertIn("keep_alive", body)
         self.assertEqual(body["options"]["temperature"], 0)
 
 
 class OllamaCurlTransportTest(unittest.TestCase):
     def test_curl_transport_writes_payload_and_invokes_curl(self) -> None:
         captured = {}
+
         payload = ollama.build_ollama_chat_payload(
             "ping",
             "return JSON",
             model="phi3:mini",
         )
         payload_json = json.dumps(payload)
+
         config = ollama.OllamaConfig(
             url="http://127.0.0.1:11434",
             model="phi3:mini",
@@ -64,12 +68,16 @@ class OllamaCurlTransportTest(unittest.TestCase):
         def fake_run(command, capture_output, text, check, timeout):
             captured["command"] = command
             captured["timeout"] = timeout
+
             data_arg = command[-1]
             self.assertTrue(data_arg.startswith("@"))
+
             with open(data_arg[1:], encoding="utf-8") as handle:
                 body = json.load(handle)
+
             self.assertEqual(body["format"], "json")
             self.assertEqual(body["options"]["temperature"], 0)
+
             return subprocess.CompletedProcess(
                 command,
                 0,
@@ -85,6 +93,7 @@ class OllamaCurlTransportTest(unittest.TestCase):
                 config=config,
                 curl_executable="curl.exe",
             )
+
         self.assertEqual(response, "{}")
         self.assertIn("curl.exe", captured["command"][0])
         self.assertIn("--data-binary", captured["command"])

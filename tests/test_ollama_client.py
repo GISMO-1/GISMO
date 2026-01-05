@@ -1,4 +1,5 @@
 import json
+import os
 import subprocess
 import unittest
 from unittest import mock
@@ -30,6 +31,7 @@ class OllamaClientPayloadTest(unittest.TestCase):
             return DummyResponse("{}")
 
         with (
+            mock.patch.dict(os.environ, {"GISMO_OLLAMA_TRANSPORT": "python"}),
             mock.patch.object(
                 ollama.urllib.request,
                 "urlopen",

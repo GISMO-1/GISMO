@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
 import json
 import shlex
 import re
@@ -10,6 +11,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Iterator
 from uuid import UUID, uuid4
 
 from gismo.cli.operator import (
@@ -664,122 +666,137 @@ def _tool_output_metadata(output: object) -> str:
     return f"type={type(output).__name__}"
 
 
+@contextmanager
+def _open_state_store(db_path: str) -> Iterator[StateStore]:
+    state_store = StateStore(db_path)
+    try:
+        yield state_store
+    finally:
+        state_store.close()
+
+
 def run_demo(db_path: str, policy_path: str | None) -> None:
     repo_root = Path(__file__).resolve().parents[2]
     state_store = StateStore(db_path)
-    policy_path, warn = _resolve_default_policy_path(policy_path, repo_root)
-    if warn:
-        _warn_missing_default_policy()
-    policy = load_policy(policy_path, repo_root=repo_root, default_allowed_tools={"echo"})
-    registry = _build_registry(state_store, policy)
+    try:
+        policy_path, warn = _resolve_default_policy_path(policy_path, repo_root)
+        if warn:
+            _warn_missing_default_policy()
+        policy = load_policy(policy_path, repo_root=repo_root, default_allowed_tools={"echo"})
+        registry = _build_registry(state_store, policy)
 
-    agent = SimpleAgent(registry=registry)
-    orchestrator = Orchestrator(
-        state_store=state_store,
-        registry=registry,
-        policy=policy,
-        agent=agent,
-    )
-
-    run = state_store.create_run(label="demo", metadata={"purpose": "quickstart"})
-
-    echo_task = state_store.create_task(
-        run_id=run.id,
-        title="Echo input",
-        description="Echo the provided payload",
-        input_json={"tool": "echo", "payload": {"message": "hello"}},
-    )
-    orchestrator.run_tool(run.id, echo_task, "echo", {"message": "hello"})
-
-    note_task = state_store.create_task(
-        run_id=run.id,
-        title="Write note",
-        description="Attempt to write a note",
-        input_json={"tool": "write_note", "payload": {"note": "Hello, GISMO."}},
-    )
-    orchestrator.run_tool(run.id, note_task, "write_note", {"note": "Hello, GISMO."})
-
-    policy.allow("write_note")
-    orchestrator.run_tool(run.id, note_task, "write_note", {"note": "Hello, GISMO."})
-
-    print("=== GISMO Demo Summary ===")
-    print(f"Run: {run.id} ({run.label})")
-    print("Tasks:")
-    for task in state_store.list_tasks(run.id):
-        print(f"- {task.id} {task.title} [{task.status}]")
-        if task.error:
-            print(f"  error: {task.error}")
-        if task.output_json:
-            print(f"  output: {task.output_json}")
-
-    print("Tool Calls:")
-    for call in state_store.list_tool_calls(run.id):
-        print(
-            f"- {call.id} tool={call.tool_name} status={call.status} "
-            f"started={call.started_at.isoformat()}"
+        agent = SimpleAgent(registry=registry)
+        orchestrator = Orchestrator(
+            state_store=state_store,
+            registry=registry,
+            policy=policy,
+            agent=agent,
         )
-        if call.error:
-            print(f"  error: {call.error}")
-        if call.output_json:
-            print(f"  output: {call.output_json}")
+
+        run = state_store.create_run(label="demo", metadata={"purpose": "quickstart"})
+
+        echo_task = state_store.create_task(
+            run_id=run.id,
+            title="Echo input",
+            description="Echo the provided payload",
+            input_json={"tool": "echo", "payload": {"message": "hello"}},
+        )
+        orchestrator.run_tool(run.id, echo_task, "echo", {"message": "hello"})
+
+        note_task = state_store.create_task(
+            run_id=run.id,
+            title="Write note",
+            description="Attempt to write a note",
+            input_json={"tool": "write_note", "payload": {"note": "Hello, GISMO."}},
+        )
+        orchestrator.run_tool(run.id, note_task, "write_note", {"note": "Hello, GISMO."})
+
+        policy.allow("write_note")
+        orchestrator.run_tool(run.id, note_task, "write_note", {"note": "Hello, GISMO."})
+
+        print("=== GISMO Demo Summary ===")
+        print(f"Run: {run.id} ({run.label})")
+        print("Tasks:")
+        for task in state_store.list_tasks(run.id):
+            print(f"- {task.id} {task.title} [{task.status}]")
+            if task.error:
+                print(f"  error: {task.error}")
+            if task.output_json:
+                print(f"  output: {task.output_json}")
+
+        print("Tool Calls:")
+        for call in state_store.list_tool_calls(run.id):
+            print(
+                f"- {call.id} tool={call.tool_name} status={call.status} "
+                f"started={call.started_at.isoformat()}"
+            )
+            if call.error:
+                print(f"  error: {call.error}")
+            if call.output_json:
+                print(f"  output: {call.output_json}")
+    finally:
+        state_store.close()
 
 
 def run_demo_graph(db_path: str, policy_path: str | None) -> None:
     repo_root = Path(__file__).resolve().parents[2]
     state_store = StateStore(db_path)
-    policy_path, warn = _resolve_default_policy_path(policy_path, repo_root)
-    if warn:
-        _warn_missing_default_policy()
-    policy = load_policy(
-        policy_path,
-        repo_root=repo_root,
-        default_allowed_tools={"echo", "write_note"},
-    )
-    registry = _build_registry(state_store, policy)
+    try:
+        policy_path, warn = _resolve_default_policy_path(policy_path, repo_root)
+        if warn:
+            _warn_missing_default_policy()
+        policy = load_policy(
+            policy_path,
+            repo_root=repo_root,
+            default_allowed_tools={"echo", "write_note"},
+        )
+        registry = _build_registry(state_store, policy)
 
-    agent = SimpleAgent(registry=registry)
-    orchestrator = Orchestrator(
-        state_store=state_store,
-        registry=registry,
-        policy=policy,
-        agent=agent,
-    )
+        agent = SimpleAgent(registry=registry)
+        orchestrator = Orchestrator(
+            state_store=state_store,
+            registry=registry,
+            policy=policy,
+            agent=agent,
+        )
 
-    run = state_store.create_run(label="demo-graph", metadata={"purpose": "dag-demo"})
+        run = state_store.create_run(label="demo-graph", metadata={"purpose": "dag-demo"})
 
-    task_a = state_store.create_task(
-        run_id=run.id,
-        title="Echo A",
-        description="Echo A",
-        input_json={"tool": "echo", "payload": {"message": "A"}},
-    )
-    task_b = state_store.create_task(
-        run_id=run.id,
-        title="Note B",
-        description="Write note B",
-        input_json={"tool": "write_note", "payload": {"note": "B"}},
-        depends_on=[task_a.id],
-    )
-    task_c = state_store.create_task(
-        run_id=run.id,
-        title="Echo C",
-        description="Echo C",
-        input_json={"tool": "echo", "payload": {"message": "C"}},
-        depends_on=[task_b.id],
-    )
+        task_a = state_store.create_task(
+            run_id=run.id,
+            title="Echo A",
+            description="Echo A",
+            input_json={"tool": "echo", "payload": {"message": "A"}},
+        )
+        task_b = state_store.create_task(
+            run_id=run.id,
+            title="Note B",
+            description="Write note B",
+            input_json={"tool": "write_note", "payload": {"note": "B"}},
+            depends_on=[task_a.id],
+        )
+        task_c = state_store.create_task(
+            run_id=run.id,
+            title="Echo C",
+            description="Echo C",
+            input_json={"tool": "echo", "payload": {"message": "C"}},
+            depends_on=[task_b.id],
+        )
 
-    orchestrator.run_task_graph(run.id)
+        orchestrator.run_task_graph(run.id)
 
-    print("=== GISMO Demo Graph Summary ===")
-    print(f"Run: {run.id} ({run.label})")
-    print("Tasks:")
-    for task in state_store.list_tasks(run.id):
-        deps = ", ".join(task.depends_on) if task.depends_on else "none"
-        print(f"- {task.id} {task.title} [{task.status}] depends_on={deps}")
-        if task.error:
-            print(f"  error: {task.error}")
-        if task.output_json:
-            print(f"  output: {task.output_json}")
+        print("=== GISMO Demo Graph Summary ===")
+        print(f"Run: {run.id} ({run.label})")
+        print("Tasks:")
+        for task in state_store.list_tasks(run.id):
+            deps = ", ".join(task.depends_on) if task.depends_on else "none"
+            print(f"- {task.id} {task.title} [{task.status}] depends_on={deps}")
+            if task.error:
+                print(f"  error: {task.error}")
+            if task.output_json:
+                print(f"  output: {task.output_json}")
+    finally:
+        state_store.close()
 
 
 def run_operator(db_path: str, command_parts: list[str], policy_path: str | None) -> None:
@@ -789,141 +806,159 @@ def run_operator(db_path: str, command_parts: list[str], policy_path: str | None
 
     repo_root = Path(__file__).resolve().parents[2]
     state_store = StateStore(db_path)
-    plan = parse_command(command_text)
-    normalized = normalize_command(command_text)
-    default_tools = required_tools(plan) if policy_path is None else set()
-    default_tools.discard("run_shell")
-    policy_path, warn = _resolve_default_policy_path(policy_path, repo_root)
-    if warn:
-        _warn_missing_default_policy()
-    policy = load_policy(policy_path, repo_root=repo_root, default_allowed_tools=default_tools)
-    registry = _build_registry(state_store, policy)
-    agent = SimpleAgent(registry=registry)
-    orchestrator = Orchestrator(
-        state_store=state_store,
-        registry=registry,
-        policy=policy,
-        agent=agent,
-    )
-
-    run = state_store.create_run(label="operator-run", metadata={"command": normalized})
-
-    created_tasks = []
-    previous_task_id = None
-    for index, step in enumerate(plan["steps"]):
-        tool_name = step["tool_name"]
-        tool_input = step["input_json"]
-        idempotency_key = make_idempotency_key(step, normalized, index)
-        depends_on = [previous_task_id] if plan["mode"] == "graph" and previous_task_id else None
-        task = state_store.create_task(
-            run_id=run.id,
-            title=step["title"],
-            description="Operator command step",
-            input_json={"tool": tool_name, "payload": tool_input},
-            depends_on=depends_on,
-            idempotency_key=idempotency_key,
+    try:
+        plan = parse_command(command_text)
+        normalized = normalize_command(command_text)
+        default_tools = required_tools(plan) if policy_path is None else set()
+        default_tools.discard("run_shell")
+        policy_path, warn = _resolve_default_policy_path(policy_path, repo_root)
+        if warn:
+            _warn_missing_default_policy()
+        policy = load_policy(
+            policy_path,
+            repo_root=repo_root,
+            default_allowed_tools=default_tools,
         )
-        created_tasks.append(task)
-        previous_task_id = task.id
+        registry = _build_registry(state_store, policy)
+        agent = SimpleAgent(registry=registry)
+        orchestrator = Orchestrator(
+            state_store=state_store,
+            registry=registry,
+            policy=policy,
+            agent=agent,
+        )
 
-    if plan["mode"] == "single":
-        task = created_tasks[0]
-        orchestrator.run_tool(run.id, task, task.input_json["tool"], task.input_json["payload"])
-    else:
-        orchestrator.run_task_graph(run.id)
+        run = state_store.create_run(label="operator-run", metadata={"command": normalized})
 
-    _print_operator_summary(state_store, run.id)
+        created_tasks = []
+        previous_task_id = None
+        for index, step in enumerate(plan["steps"]):
+            tool_name = step["tool_name"]
+            tool_input = step["input_json"]
+            idempotency_key = make_idempotency_key(step, normalized, index)
+            depends_on = [previous_task_id] if plan["mode"] == "graph" and previous_task_id else None
+            task = state_store.create_task(
+                run_id=run.id,
+                title=step["title"],
+                description="Operator command step",
+                input_json={"tool": tool_name, "payload": tool_input},
+                depends_on=depends_on,
+                idempotency_key=idempotency_key,
+            )
+            created_tasks.append(task)
+            previous_task_id = task.id
+
+        if plan["mode"] == "single":
+            task = created_tasks[0]
+            orchestrator.run_tool(
+                run.id,
+                task,
+                task.input_json["tool"],
+                task.input_json["payload"],
+            )
+        else:
+            orchestrator.run_task_graph(run.id)
+
+        _print_operator_summary(state_store, run.id)
+    finally:
+        state_store.close()
 
 
 def run_show(db_path: str, run_id: str) -> None:
     state_store = StateStore(db_path)
-    run = state_store.get_run(run_id)
-    if run is None:
-        print(f"Run not found: {run_id}")
-        raise SystemExit(2)
+    try:
+        run = state_store.get_run(run_id)
+        if run is None:
+            print(f"Run not found: {run_id}")
+            raise SystemExit(2)
 
-    tasks = list(state_store.list_tasks(run.id))
-    tool_calls = list(state_store.list_tool_calls(run.id))
-    status = _run_status(tasks)
-    start_time, end_time = _run_time_bounds(run, tasks, tool_calls)
-    counts = _task_status_counts(tasks)
+        tasks = list(state_store.list_tasks(run.id))
+        tool_calls = list(state_store.list_tool_calls(run.id))
+        status = _run_status(tasks)
+        start_time, end_time = _run_time_bounds(run, tasks, tool_calls)
+        counts = _task_status_counts(tasks)
 
-    print("=== GISMO Run Summary ===")
-    print(f"Run ID:     {run.id}")
-    print(f"Status:     {status}")
-    print(f"Started:    {_fmt_dt(start_time)}")
-    print(f"Finished:   {_fmt_dt(end_time)}")
-    print(
-        "Tasks:      "
-        f"{counts['total']} "
-        f"(pending={counts['pending']} running={counts['running']} "
-        f"succeeded={counts['succeeded']} failed={counts['failed']})"
-    )
-    print("Tasks:")
-    if not tasks:
-        print("  (no tasks)")
-        return
+        print("=== GISMO Run Summary ===")
+        print(f"Run ID:     {run.id}")
+        print(f"Status:     {status}")
+        print(f"Started:    {_fmt_dt(start_time)}")
+        print(f"Finished:   {_fmt_dt(end_time)}")
+        print(
+            "Tasks:      "
+            f"{counts['total']} "
+            f"(pending={counts['pending']} running={counts['running']} "
+            f"succeeded={counts['succeeded']} failed={counts['failed']})"
+        )
+        print("Tasks:")
+        if not tasks:
+            print("  (no tasks)")
+            return
 
-    for task in tasks:
-        print(f"- {task.id} {task.title} [{task.status.value}]")
-        if task.failure_type and task.failure_type.value != "NONE":
-            print(f"  failure_type: {task.failure_type.value}")
-        if task.status_reason:
-            print(f"  status_reason: {_summarize_value(task.status_reason, 200)}")
-        if task.error:
-            print(f"  error: {_summarize_value(task.error, 200)}")
-        if task.output_json:
-            print(f"  output: {_summarize_value(task.output_json, 200)}")
-        task_calls = list(state_store.list_tool_calls_for_task(task.id))
-        if not task_calls:
-            print("  Tool Calls: none")
-            continue
-        print("  Tool Calls:")
-        for call in task_calls:
-            print(
-                f"    - {call.id} tool={call.tool_name} status={call.status.value} "
-                f"started={_fmt_dt(call.started_at)} finished={_fmt_dt(call.finished_at)}"
-            )
-            if call.failure_type and call.failure_type.value != "NONE":
-                print(f"      failure_type: {call.failure_type.value}")
-            if call.output_json is not None:
-                print(f"      output_meta: {_tool_output_metadata(call.output_json)}")
-            if call.output_json:
-                print(f"      output: {_summarize_value(call.output_json, 200)}")
-            if call.error:
-                print(f"      error: {_summarize_value(call.error, 200)}")
+        for task in tasks:
+            print(f"- {task.id} {task.title} [{task.status.value}]")
+            if task.failure_type and task.failure_type.value != "NONE":
+                print(f"  failure_type: {task.failure_type.value}")
+            if task.status_reason:
+                print(f"  status_reason: {_summarize_value(task.status_reason, 200)}")
+            if task.error:
+                print(f"  error: {_summarize_value(task.error, 200)}")
+            if task.output_json:
+                print(f"  output: {_summarize_value(task.output_json, 200)}")
+            task_calls = list(state_store.list_tool_calls_for_task(task.id))
+            if not task_calls:
+                print("  Tool Calls: none")
+                continue
+            print("  Tool Calls:")
+            for call in task_calls:
+                print(
+                    f"    - {call.id} tool={call.tool_name} status={call.status.value} "
+                    f"started={_fmt_dt(call.started_at)} finished={_fmt_dt(call.finished_at)}"
+                )
+                if call.failure_type and call.failure_type.value != "NONE":
+                    print(f"      failure_type: {call.failure_type.value}")
+                if call.output_json is not None:
+                    print(f"      output_meta: {_tool_output_metadata(call.output_json)}")
+                if call.output_json:
+                    print(f"      output: {_summarize_value(call.output_json, 200)}")
+                if call.error:
+                    print(f"      error: {_summarize_value(call.error, 200)}")
+    finally:
+        state_store.close()
 
 
 def run_list(db_path: str, limit: int, newest_first: bool) -> None:
     state_store = StateStore(db_path)
-    runs = list(state_store.list_runs(limit=limit, newest_first=newest_first))
+    try:
+        runs = list(state_store.list_runs(limit=limit, newest_first=newest_first))
 
-    print(f"DB: {db_path}")
-    print(f"Runs: {len(runs)} (limit={limit})")
-    header = (
-        f"{'RUN ID':8}  {'STATUS':10}  {'CREATED':20}  {'UPDATED':20}  "
-        f"{'TASKS':24}  {'LAST ERROR':40}"
-    )
-    print(header)
-    print("-" * len(header))
-    for run in runs:
-        tasks = list(state_store.list_tasks(run.id))
-        tool_calls = list(state_store.list_tool_calls(run.id))
-        status = _run_status(tasks)
-        _, end_time = _run_time_bounds(run, tasks, tool_calls)
-        updated_at = end_time or run.created_at
-        counts = _task_status_counts(tasks)
-        tasks_summary = (
-            f"{counts['total']} "
-            f"p{counts['pending']} r{counts['running']} "
-            f"s{counts['succeeded']} f{counts['failed']}"
+        print(f"DB: {db_path}")
+        print(f"Runs: {len(runs)} (limit={limit})")
+        header = (
+            f"{'RUN ID':8}  {'STATUS':10}  {'CREATED':20}  {'UPDATED':20}  "
+            f"{'TASKS':24}  {'LAST ERROR':40}"
         )
-        last_error = _run_last_error(tasks, tool_calls)
-        print(
-            f"{run.id[:8]:8}  {status:10}  {_fmt_dt(run.created_at):20}  "
-            f"{_fmt_dt(updated_at):20}  "
-            f"{tasks_summary:24}  {_summarize_value(last_error, 40)}"
-        )
+        print(header)
+        print("-" * len(header))
+        for run in runs:
+            tasks = list(state_store.list_tasks(run.id))
+            tool_calls = list(state_store.list_tool_calls(run.id))
+            status = _run_status(tasks)
+            _, end_time = _run_time_bounds(run, tasks, tool_calls)
+            updated_at = end_time or run.created_at
+            counts = _task_status_counts(tasks)
+            tasks_summary = (
+                f"{counts['total']} "
+                f"p{counts['pending']} r{counts['running']} "
+                f"s{counts['succeeded']} f{counts['failed']}"
+            )
+            last_error = _run_last_error(tasks, tool_calls)
+            print(
+                f"{run.id[:8]:8}  {status:10}  {_fmt_dt(run.created_at):20}  "
+                f"{_fmt_dt(updated_at):20}  "
+                f"{tasks_summary:24}  {_summarize_value(last_error, 40)}"
+            )
+    finally:
+        state_store.close()
 
 
 @dataclass
@@ -1471,24 +1506,27 @@ def run_export(
 
     repo_root = Path(__file__).resolve().parents[2]
     state_store = StateStore(db_path)
-    policy_path, warn = _resolve_default_policy_path(policy_path, repo_root)
-    if warn:
-        _warn_missing_default_policy()
-    load_policy(policy_path, repo_root=repo_root)
-    if use_latest:
-        export_path = export_latest_run_jsonl(
-            state_store,
-            out_path=out_path,
-            redact=redact,
-        )
-    else:
-        export_path = export_run_jsonl(
-            state_store,
-            run_id,
-            out_path=out_path,
-            redact=redact,
-        )
-    print(f"Exported run audit to {export_path}")
+    try:
+        policy_path, warn = _resolve_default_policy_path(policy_path, repo_root)
+        if warn:
+            _warn_missing_default_policy()
+        load_policy(policy_path, repo_root=repo_root)
+        if use_latest:
+            export_path = export_latest_run_jsonl(
+                state_store,
+                out_path=out_path,
+                redact=redact,
+            )
+        else:
+            export_path = export_run_jsonl(
+                state_store,
+                run_id,
+                out_path=out_path,
+                redact=redact,
+            )
+        print(f"Exported run audit to {export_path}")
+    finally:
+        state_store.close()
 
 
 def run_enqueue(
@@ -1500,13 +1538,16 @@ def run_enqueue(
     timeout_seconds: int,
 ) -> None:
     state_store = StateStore(db_path)
-    item = state_store.enqueue_command(
-        command_text=command_text,
-        run_id=run_id,
-        max_retries=max_retries,
-        timeout_seconds=timeout_seconds,
-    )
-    print(f"Enqueued {item.id} status={item.status.value}")
+    try:
+        item = state_store.enqueue_command(
+            command_text=command_text,
+            run_id=run_id,
+            max_retries=max_retries,
+            timeout_seconds=timeout_seconds,
+        )
+        print(f"Enqueued {item.id} status={item.status.value}")
+    finally:
+        state_store.close()
 
 
 @dataclass(frozen=True)
@@ -1605,55 +1646,85 @@ def _request_llm_plan(
         raise ValueError(f"{actor} requires a natural language request.")
     config = resolve_ollama_config(url=host, model=model, timeout_s=timeout_s)
     state_store = StateStore(db_path)
-    system_prompt = build_system_prompt()
-    user_prompt = build_user_prompt(
-        user_text,
-        memory_block=memory_injection.block if memory_injection else None,
-    )
-    print(f"LLM: {config.model} url={config.url} timeout={config.timeout_s}s")
     try:
-        raw_response = ollama_chat(
-            user_prompt,
-            system_prompt,
-            model=config.model,
-            host=config.url,
-            timeout_s=config.timeout_s,
+        system_prompt = build_system_prompt()
+        user_prompt = build_user_prompt(
+            user_text,
+            memory_block=memory_injection.block if memory_injection else None,
         )
-    except OllamaError as exc:
-        payload = {
-            "model": config.model,
-            "host": config.url,
-            "timeout_s": config.timeout_s,
-            "user_text": user_text,
-            "error": _truncate(str(exc), 200),
-            "enqueue": enqueue,
-            "dry_run": dry_run,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-        }
-        _apply_memory_injection_payload(payload, memory_injection)
-        state_store.record_event(
-            actor=actor,
-            event_type=EVENT_TYPE_ASK_FAILED,
-            message="LLM request failed.",
-            json_payload=payload,
-        )
-        print(f"ERROR: {exc}", file=sys.stderr)
-        if debug:
-            raise
-        raise SystemExit(1)
-    parsed: dict | None = None
-    parse_error: str | None = None
-    try:
-        parsed = json.loads(raw_response)
-    except json.JSONDecodeError as exc:
-        parse_error = str(exc)
-        extracted = extract_json_object(raw_response)
-        if extracted:
-            try:
-                parsed = json.loads(extracted)
-            except json.JSONDecodeError as exc_extracted:
-                parse_error = str(exc_extracted)
-        if parsed is None:
+        print(f"LLM: {config.model} url={config.url} timeout={config.timeout_s}s")
+        try:
+            raw_response = ollama_chat(
+                user_prompt,
+                system_prompt,
+                model=config.model,
+                host=config.url,
+                timeout_s=config.timeout_s,
+            )
+        except OllamaError as exc:
+            payload = {
+                "model": config.model,
+                "host": config.url,
+                "timeout_s": config.timeout_s,
+                "user_text": user_text,
+                "error": _truncate(str(exc), 200),
+                "enqueue": enqueue,
+                "dry_run": dry_run,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            }
+            _apply_memory_injection_payload(payload, memory_injection)
+            state_store.record_event(
+                actor=actor,
+                event_type=EVENT_TYPE_ASK_FAILED,
+                message="LLM request failed.",
+                json_payload=payload,
+            )
+            print(f"ERROR: {exc}", file=sys.stderr)
+            if debug:
+                raise
+            raise SystemExit(1)
+        parsed: dict | None = None
+        parse_error: str | None = None
+        try:
+            parsed = json.loads(raw_response)
+        except json.JSONDecodeError as exc:
+            parse_error = str(exc)
+            extracted = extract_json_object(raw_response)
+            if extracted:
+                try:
+                    parsed = json.loads(extracted)
+                except json.JSONDecodeError as exc_extracted:
+                    parse_error = str(exc_extracted)
+            if parsed is None:
+                payload = {
+                    "model": config.model,
+                    "host": config.url,
+                    "timeout_s": config.timeout_s,
+                    "user_text": user_text,
+                    "plan": None,
+                    "raw_response": raw_response,
+                    "parse_error": parse_error,
+                    "enqueue": enqueue,
+                    "dry_run": dry_run,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                }
+                _apply_memory_injection_payload(payload, memory_injection)
+                state_store.record_event(
+                    actor=actor,
+                    event_type=EVENT_TYPE_LLM_PLAN,
+                    message="LLM plan parsing failed.",
+                    json_payload=payload,
+                )
+                raw_preview = raw_response[:200]
+                message = (
+                    "LLM response was not valid JSON. "
+                    f"model={config.model} timeout={config.timeout_s}s "
+                    f"raw_response={raw_preview} "
+                    "Model violated JSON-only contract; try another model or transport=curl"
+                )
+                raise ValueError(message) from exc
+
+        if not isinstance(parsed, dict):
             payload = {
                 "model": config.model,
                 "host": config.url,
@@ -1661,7 +1732,7 @@ def _request_llm_plan(
                 "user_text": user_text,
                 "plan": None,
                 "raw_response": raw_response,
-                "parse_error": parse_error,
+                "parse_error": "Response JSON was not an object.",
                 "enqueue": enqueue,
                 "dry_run": dry_run,
                 "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -1673,90 +1744,64 @@ def _request_llm_plan(
                 message="LLM plan parsing failed.",
                 json_payload=payload,
             )
-            raw_preview = raw_response[:200]
             message = (
-                "LLM response was not valid JSON. "
-                f"model={config.model} timeout={config.timeout_s}s "
-                f"raw_response={raw_preview} "
-                "Model violated JSON-only contract; try another model or transport=curl"
+                "LLM response was not a JSON object. "
+                f"model={config.model} endpoint={config.url} timeout={config.timeout_s}s."
             )
-            raise ValueError(message) from exc
-
-    if not isinstance(parsed, dict):
+            print(f"ERROR: {message}", file=sys.stderr)
+            if debug:
+                raise ValueError(message)
+            raise SystemExit(1)
+        try:
+            plan = _normalize_llm_plan(parsed, max_actions=max_actions)
+        except ValueError as exc:
+            payload = {
+                "model": config.model,
+                "host": config.url,
+                "timeout_s": config.timeout_s,
+                "user_text": user_text,
+                "plan": None,
+                "raw_response": raw_response,
+                "parse_error": str(exc),
+                "enqueue": enqueue,
+                "dry_run": dry_run,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            }
+            _apply_memory_injection_payload(payload, memory_injection)
+            state_store.record_event(
+                actor=actor,
+                event_type=EVENT_TYPE_LLM_PLAN,
+                message="LLM plan parsing failed.",
+                json_payload=payload,
+            )
+            raise
+        _print_llm_plan(plan)
+        policy = _load_assessment_policy(assessment_policy_path)
+        assessment = assess_plan(plan.get("actions", []), policy=policy)
+        _print_plan_assessment(assessment, explain=explain)
         payload = {
             "model": config.model,
             "host": config.url,
             "timeout_s": config.timeout_s,
             "user_text": user_text,
-            "plan": None,
-            "raw_response": raw_response,
-            "parse_error": "Response JSON was not an object.",
+            "plan": plan,
+            "assessment": assessment.to_dict(),
             "enqueue": enqueue,
             "dry_run": dry_run,
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
         _apply_memory_injection_payload(payload, memory_injection)
-        state_store.record_event(
-            actor=actor,
-            event_type=EVENT_TYPE_LLM_PLAN,
-            message="LLM plan parsing failed.",
-            json_payload=payload,
-        )
-        message = (
-            "LLM response was not a JSON object. "
-            f"model={config.model} endpoint={config.url} timeout={config.timeout_s}s."
-        )
-        print(f"ERROR: {message}", file=sys.stderr)
-        if debug:
-            raise ValueError(message)
-        raise SystemExit(1)
-    try:
-        plan = _normalize_llm_plan(parsed, max_actions=max_actions)
-    except ValueError as exc:
-        payload = {
-            "model": config.model,
-            "host": config.url,
-            "timeout_s": config.timeout_s,
-            "user_text": user_text,
-            "plan": None,
-            "raw_response": raw_response,
-            "parse_error": str(exc),
-            "enqueue": enqueue,
-            "dry_run": dry_run,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-        }
-        _apply_memory_injection_payload(payload, memory_injection)
-        state_store.record_event(
-            actor=actor,
-            event_type=EVENT_TYPE_LLM_PLAN,
-            message="LLM plan parsing failed.",
-            json_payload=payload,
-        )
+        if record_event:
+            state_store.record_event(
+                actor=actor,
+                event_type=EVENT_TYPE_LLM_PLAN,
+                message="LLM plan generated.",
+                json_payload=payload,
+            )
+        return plan, assessment, state_store, payload
+    except BaseException:
+        state_store.close()
         raise
-    _print_llm_plan(plan)
-    policy = _load_assessment_policy(assessment_policy_path)
-    assessment = assess_plan(plan.get("actions", []), policy=policy)
-    _print_plan_assessment(assessment, explain=explain)
-    payload = {
-        "model": config.model,
-        "host": config.url,
-        "timeout_s": config.timeout_s,
-        "user_text": user_text,
-        "plan": plan,
-        "assessment": assessment.to_dict(),
-        "enqueue": enqueue,
-        "dry_run": dry_run,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-    }
-    _apply_memory_injection_payload(payload, memory_injection)
-    if record_event:
-        state_store.record_event(
-            actor=actor,
-            event_type=EVENT_TYPE_LLM_PLAN,
-            message="LLM plan generated.",
-            json_payload=payload,
-        )
-    return plan, assessment, state_store, payload
 
 
 def _enqueue_plan_actions(
@@ -1824,57 +1869,78 @@ def run_ask(
         assessment_policy_path=None,
         record_event=False,
     )
+    try:
+        apply_result = MemoryApplyResult(
+            applied=0,
+            skipped=0,
+            denied=0,
+            applied_items=[],
+        )
+        if apply_memory_suggestions:
+            suggestions = plan.get("memory_suggestions") or []
+            if not suggestions:
+                print("No suggestions to apply")
+            else:
+                ask_event_id = str(uuid4())
+                apply_result = _apply_memory_suggestions(
+                    db_path,
+                    suggestions,
+                    policy_path=policy_path,
+                    yes=yes,
+                    non_interactive=non_interactive,
+                    related_ask_event_id=ask_event_id,
+                )
+                payload.update(
+                    {
+                        "apply_memory_suggestions_requested": True,
+                        "apply_memory_suggestions_result": {
+                            "applied": apply_result.applied,
+                            "skipped": apply_result.skipped,
+                            "denied": apply_result.denied,
+                        },
+                        "apply_memory_suggestions_applied": apply_result.applied_items,
+                    }
+                )
+                state_store.record_event(
+                    actor="ask",
+                    event_type=EVENT_TYPE_LLM_PLAN,
+                    message="LLM plan generated.",
+                    json_payload=payload,
+                    event_id=ask_event_id,
+                )
+                print(
+                    "Memory suggestions summary: "
+                    f"applied={apply_result.applied} "
+                    f"skipped={apply_result.skipped} "
+                    f"denied={apply_result.denied}"
+                )
+                if apply_result.exit_code is not None:
+                    raise SystemExit(apply_result.exit_code)
+            if not suggestions:
+                payload.update(
+                    {
+                        "apply_memory_suggestions_requested": True,
+                        "apply_memory_suggestions_result": {
+                            "applied": 0,
+                            "skipped": 0,
+                            "denied": 0,
+                        },
+                        "apply_memory_suggestions_applied": [],
+                    }
+                )
+                state_store.record_event(
+                    actor="ask",
+                    event_type=EVENT_TYPE_LLM_PLAN,
+                    message="LLM plan generated.",
+                    json_payload=payload,
+                    event_id=str(uuid4()),
+                )
+                return
 
-    apply_result = MemoryApplyResult(
-        applied=0,
-        skipped=0,
-        denied=0,
-        applied_items=[],
-    )
-    if apply_memory_suggestions:
-        suggestions = plan.get("memory_suggestions") or []
-        if not suggestions:
-            print("No suggestions to apply")
-        else:
-            ask_event_id = str(uuid4())
-            apply_result = _apply_memory_suggestions(
-                db_path,
-                suggestions,
-                policy_path=policy_path,
-                yes=yes,
-                non_interactive=non_interactive,
-                related_ask_event_id=ask_event_id,
-            )
+        if not apply_memory_suggestions:
             payload.update(
                 {
-                    "apply_memory_suggestions_requested": True,
-                    "apply_memory_suggestions_result": {
-                        "applied": apply_result.applied,
-                        "skipped": apply_result.skipped,
-                        "denied": apply_result.denied,
-                    },
-                    "apply_memory_suggestions_applied": apply_result.applied_items,
-                }
-            )
-            state_store.record_event(
-                actor="ask",
-                event_type=EVENT_TYPE_LLM_PLAN,
-                message="LLM plan generated.",
-                json_payload=payload,
-                event_id=ask_event_id,
-            )
-            print(
-                "Memory suggestions summary: "
-                f"applied={apply_result.applied} "
-                f"skipped={apply_result.skipped} "
-                f"denied={apply_result.denied}"
-            )
-            if apply_result.exit_code is not None:
-                raise SystemExit(apply_result.exit_code)
-        if not suggestions:
-            payload.update(
-                {
-                    "apply_memory_suggestions_requested": True,
+                    "apply_memory_suggestions_requested": False,
                     "apply_memory_suggestions_result": {
                         "applied": 0,
                         "skipped": 0,
@@ -1888,47 +1954,28 @@ def run_ask(
                 event_type=EVENT_TYPE_LLM_PLAN,
                 message="LLM plan generated.",
                 json_payload=payload,
-                event_id=str(uuid4()),
             )
+
+        if not enqueue:
             return
+        if dry_run:
+            print("Dry run: enqueue requested but no items were enqueued.")
+            return
+        _confirm_assessment(assessment, yes=yes)
 
-    if not apply_memory_suggestions:
-        payload.update(
-            {
-                "apply_memory_suggestions_requested": False,
-                "apply_memory_suggestions_result": {
-                    "applied": 0,
-                    "skipped": 0,
-                    "denied": 0,
-                },
-                "apply_memory_suggestions_applied": [],
-            }
-        )
-        state_store.record_event(
-            actor="ask",
-            event_type=EVENT_TYPE_LLM_PLAN,
-            message="LLM plan generated.",
-            json_payload=payload,
-        )
-
-    if not enqueue:
-        return
-    if dry_run:
-        print("Dry run: enqueue requested but no items were enqueued.")
-        return
-    _confirm_assessment(assessment, yes=yes)
-
-    enqueued_ids, skipped = _enqueue_plan_actions(state_store, plan)
-    if skipped:
-        print("Enqueue notes:")
-        for note in skipped:
-            print(f"- {note}")
-    if enqueued_ids:
-        print("Enqueued items:")
-        for item_id in enqueued_ids:
-            print(f"- {item_id}")
-    else:
-        print("No items enqueued.")
+        enqueued_ids, skipped = _enqueue_plan_actions(state_store, plan)
+        if skipped:
+            print("Enqueue notes:")
+            for note in skipped:
+                print(f"- {note}")
+        if enqueued_ids:
+            print("Enqueued items:")
+            for item_id in enqueued_ids:
+                print(f"- {item_id}")
+        else:
+            print("No items enqueued.")
+    finally:
+        state_store.close()
 
 
 def _run_daemon_once(db_path: str, policy_path: str | None) -> None:
@@ -1951,27 +1998,27 @@ def _drain_queue_items(
     if not item_ids:
         return []
     for _ in range(max_passes):
-        state_store = StateStore(db_path)
-        items = [state_store.get_queue_item(item_id) for item_id in item_ids]
-        pending = [
-            item
-            for item in items
-            if item and item.status in {QueueStatus.QUEUED, QueueStatus.IN_PROGRESS}
-        ]
-        if not pending:
-            break
-        now = datetime.now(timezone.utc)
-        if all(
-            item.status == QueueStatus.QUEUED
-            and item.next_attempt_at
-            and item.next_attempt_at > now
-            for item in pending
-        ):
-            break
+        with _open_state_store(db_path) as state_store:
+            items = [state_store.get_queue_item(item_id) for item_id in item_ids]
+            pending = [
+                item
+                for item in items
+                if item and item.status in {QueueStatus.QUEUED, QueueStatus.IN_PROGRESS}
+            ]
+            if not pending:
+                break
+            now = datetime.now(timezone.utc)
+            if all(
+                item.status == QueueStatus.QUEUED
+                and item.next_attempt_at
+                and item.next_attempt_at > now
+                for item in pending
+            ):
+                break
         _run_daemon_once(db_path, policy_path)
-    state_store = StateStore(db_path)
-    final_items = [state_store.get_queue_item(item_id) for item_id in item_ids]
-    return [item.status for item in final_items if item]
+    with _open_state_store(db_path) as state_store:
+        final_items = [state_store.get_queue_item(item_id) for item_id in item_ids]
+        return [item.status for item in final_items if item]
 
 
 def _queue_status_summary(statuses: list[QueueStatus]) -> tuple[str, QueueStatus | None]:
@@ -2022,58 +2069,61 @@ def run_agent(
             actor="agent",
             assessment_policy_path=policy_path,
         )
-        actions = plan.get("actions", [])
-        last_actions_count = len(actions)
-        last_assessment = assessment
+        try:
+            actions = plan.get("actions", [])
+            last_actions_count = len(actions)
+            last_assessment = assessment
 
-        if dry_run:
-            final_status = "dry-run"
-            break
-
-        _confirm_agent_assessment(assessment, actions, yes=yes)
-
-        run = state_store.create_run(
-            label="agent-cycle",
-            metadata={"goal": goal_text, "cycle": cycle, "source": "agent"},
-        )
-        run_ids.append(run.id)
-
-        enqueued_ids, skipped = _enqueue_plan_actions(state_store, plan, run_id=run.id)
-        if skipped:
-            print("Enqueue notes:")
-            for note in skipped:
-                print(f"- {note}")
-        if enqueued_ids:
-            print("Enqueued items:")
-            for item_id in enqueued_ids:
-                print(f"- {item_id}")
-        else:
-            final_status = "no-actions"
-            final_error = "No enqueue actions were generated."
-            break
-
-        statuses = _drain_queue_items(db_path, policy_path, enqueued_ids)
-        status_label, _ = _queue_status_summary(statuses)
-        if status_label == "succeeded":
-            final_status = "succeeded"
-            if cycle >= cycles_limit:
+            if dry_run:
+                final_status = "dry-run"
                 break
-            continue
-        if status_label == "failed":
-            final_status = "failed"
-            last_error = None
-            for item_id in enqueued_ids:
-                item = state_store.get_queue_item(item_id)
-                if item and item.last_error:
-                    last_error = item.last_error
+
+            _confirm_agent_assessment(assessment, actions, yes=yes)
+
+            run = state_store.create_run(
+                label="agent-cycle",
+                metadata={"goal": goal_text, "cycle": cycle, "source": "agent"},
+            )
+            run_ids.append(run.id)
+
+            enqueued_ids, skipped = _enqueue_plan_actions(state_store, plan, run_id=run.id)
+            if skipped:
+                print("Enqueue notes:")
+                for note in skipped:
+                    print(f"- {note}")
+            if enqueued_ids:
+                print("Enqueued items:")
+                for item_id in enqueued_ids:
+                    print(f"- {item_id}")
+            else:
+                final_status = "no-actions"
+                final_error = "No enqueue actions were generated."
+                break
+
+            statuses = _drain_queue_items(db_path, policy_path, enqueued_ids)
+            status_label, _ = _queue_status_summary(statuses)
+            if status_label == "succeeded":
+                final_status = "succeeded"
+                if cycle >= cycles_limit:
                     break
-            final_error = last_error or "One or more queue items failed."
-            if cycle >= cycles_limit:
-                break
-            continue
-        final_status = status_label
-        final_error = "Queue items did not complete within the agent loop."
-        break
+                continue
+            if status_label == "failed":
+                final_status = "failed"
+                last_error = None
+                for item_id in enqueued_ids:
+                    item = state_store.get_queue_item(item_id)
+                    if item and item.last_error:
+                        last_error = item.last_error
+                        break
+                final_error = last_error or "One or more queue items failed."
+                if cycle >= cycles_limit:
+                    break
+                continue
+            final_status = status_label
+            final_error = "Queue items did not complete within the agent loop."
+            break
+        finally:
+            state_store.close()
 
     if last_assessment is None:
         last_assessment = PlanAssessment(
@@ -2100,14 +2150,14 @@ def run_daemon(
     once: bool,
     requeue_stale_seconds: int,
 ) -> None:
-    state_store = StateStore(db_path)
-    state_store.requeue_stale_in_progress(older_than_seconds=requeue_stale_seconds)
-    run_daemon_loop(
-        state_store,
-        policy_path=policy_path,
-        sleep_seconds=sleep_seconds,
-        once=once,
-    )
+    with _open_state_store(db_path) as state_store:
+        state_store.requeue_stale_in_progress(older_than_seconds=requeue_stale_seconds)
+        run_daemon_loop(
+            state_store,
+            policy_path=policy_path,
+            sleep_seconds=sleep_seconds,
+            once=once,
+        )
 
 
 def run_maintain(
@@ -2122,40 +2172,39 @@ def run_maintain(
         raise ValueError("stale_minutes must be >= 0")
     if interval_seconds <= 0 and not once:
         raise ValueError("interval_seconds must be > 0")
-    state_store = StateStore(db_path)
-
-    def _run_iteration() -> None:
-        summary = run_maintenance_iteration(
-            state_store,
-            stale_minutes=stale_minutes,
-            dry_run=dry_run,
-        )
-        if dry_run:
-            if summary.requeued_ids:
+    with _open_state_store(db_path) as state_store:
+        def _run_iteration() -> None:
+            summary = run_maintenance_iteration(
+                state_store,
+                stale_minutes=stale_minutes,
+                dry_run=dry_run,
+            )
+            if dry_run:
+                if summary.requeued_ids:
+                    print(
+                        "maintain: dry-run would requeue "
+                        f"{len(summary.requeued_ids)} stale items (stale_minutes={stale_minutes})"
+                    )
+                else:
+                    print(f"maintain: dry-run no stale items (stale_minutes={stale_minutes})")
+            elif summary.requeued_count:
                 print(
-                    "maintain: dry-run would requeue "
-                    f"{len(summary.requeued_ids)} stale items (stale_minutes={stale_minutes})"
+                    "maintain: requeued "
+                    f"{summary.requeued_count} stale items (stale_minutes={stale_minutes})"
                 )
             else:
-                print(f"maintain: dry-run no stale items (stale_minutes={stale_minutes})")
-        elif summary.requeued_count:
-            print(
-                "maintain: requeued "
-                f"{summary.requeued_count} stale items (stale_minutes={stale_minutes})"
-            )
-        else:
-            print(f"maintain: no stale items (stale_minutes={stale_minutes})")
+                print(f"maintain: no stale items (stale_minutes={stale_minutes})")
 
-    if once:
-        _run_iteration()
-        return
-
-    try:
-        while True:
+        if once:
             _run_iteration()
-            time.sleep(interval_seconds)
-    except KeyboardInterrupt:
-        print("maintain: stopped")
+            return
+
+        try:
+            while True:
+                _run_iteration()
+                time.sleep(interval_seconds)
+        except KeyboardInterrupt:
+            print("maintain: stopped")
 
 
 def run_daemon_install_windows_task(
@@ -2408,195 +2457,194 @@ def _handle_daemon_uninstall_windows_startup(args: argparse.Namespace) -> None:
 
 
 def _handle_queue_stats(args: argparse.Namespace) -> None:
-    state_store = StateStore(args.db_path)
-    stats = state_store.queue_stats()
+    with _open_state_store(args.db_path) as state_store:
+        stats = state_store.queue_stats()
 
-    if args.json:
-        def _dt(v):
-            return v.isoformat() if v else None
-        out = {
-            "db_path": args.db_path,
-            "total": stats["total"],
-            "by_status": stats["by_status"],
-            "created_at": {
-                "oldest": _dt(stats["created_at"]["oldest"]),
-                "newest": _dt(stats["created_at"]["newest"]),
-            },
-            "updated_at": {
-                "oldest": _dt(stats["updated_at"]["oldest"]),
-                "newest": _dt(stats["updated_at"]["newest"]),
-            },
-            "attempts": stats["attempts"],
-        }
-        print(json.dumps(out, indent=2))
-        return
+        if args.json:
+            def _dt(v):
+                return v.isoformat() if v else None
+            out = {
+                "db_path": args.db_path,
+                "total": stats["total"],
+                "by_status": stats["by_status"],
+                "created_at": {
+                    "oldest": _dt(stats["created_at"]["oldest"]),
+                    "newest": _dt(stats["created_at"]["newest"]),
+                },
+                "updated_at": {
+                    "oldest": _dt(stats["updated_at"]["oldest"]),
+                    "newest": _dt(stats["updated_at"]["newest"]),
+                },
+                "attempts": stats["attempts"],
+            }
+            print(json.dumps(out, indent=2))
+            return
 
-    print(f"DB: {args.db_path}")
-    print(f"Total: {stats['total']}")
-    print("By status:")
-    for status in QueueStatus:
-        print(f"  {status.value:12} {stats['by_status'].get(status.value, 0)}")
-    print(
-        f"Created: oldest={_fmt_dt(stats['created_at']['oldest'])} "
-        f"newest={_fmt_dt(stats['created_at']['newest'])}"
-    )
-    print(
-        f"Updated: oldest={_fmt_dt(stats['updated_at']['oldest'])} "
-        f"newest={_fmt_dt(stats['updated_at']['newest'])}"
-    )
-    print(
-        f"Attempts: items_with_attempts={stats['attempts']['items_with_attempts']} "
-        f"max_attempt_count={stats['attempts']['max_attempt_count']}"
-    )
+        print(f"DB: {args.db_path}")
+        print(f"Total: {stats['total']}")
+        print("By status:")
+        for status in QueueStatus:
+            print(f"  {status.value:12} {stats['by_status'].get(status.value, 0)}")
+        print(
+            f"Created: oldest={_fmt_dt(stats['created_at']['oldest'])} "
+            f"newest={_fmt_dt(stats['created_at']['newest'])}"
+        )
+        print(
+            f"Updated: oldest={_fmt_dt(stats['updated_at']['oldest'])} "
+            f"newest={_fmt_dt(stats['updated_at']['newest'])}"
+        )
+        print(
+            f"Attempts: items_with_attempts={stats['attempts']['items_with_attempts']} "
+            f"max_attempt_count={stats['attempts']['max_attempt_count']}"
+        )
 
 
 def _handle_queue_list(args: argparse.Namespace) -> None:
-    state_store = StateStore(args.db_path)
-    status = QueueStatus(args.status) if args.status else None
-    items = state_store.list_queue_items(
-        status=status,
-        limit=args.limit,
-        newest_first=not args.oldest,
-    )
-
-    if args.json:
-        out = []
-        for it in items:
-            out.append(
-                {
-                    "id": it.id,
-                    "run_id": it.run_id,
-                    "status": it.status.value,
-                    "created_at": it.created_at.isoformat(),
-                    "updated_at": it.updated_at.isoformat(),
-                    "started_at": it.started_at.isoformat() if it.started_at else None,
-                    "finished_at": it.finished_at.isoformat() if it.finished_at else None,
-                    "attempt_count": it.attempt_count,
-                    "max_attempts": it.max_retries,
-                    "max_retries": it.max_retries,
-                    "next_attempt_at": it.next_attempt_at.isoformat()
-                    if it.next_attempt_at
-                    else None,
-                    "timeout_seconds": it.timeout_seconds,
-                    "cancel_requested": it.cancel_requested,
-                    "last_error": it.last_error,
-                    "command_text": it.command_text,
-                }
-            )
-        print(json.dumps(out, indent=2))
-        return
-
-    print(f"DB: {args.db_path}")
-    print(f"Items: {len(items)} (limit={args.limit})")
-    header = (
-        f"{'ID':8}  {'STATUS':12}  {'ATT':7}  {'CREATED':20}  "
-        f"{'UPDATED':20}  {'LAST ERROR':30}  COMMAND"
-    )
-    print(header)
-    print("-" * len(header))
-    cmd_width = 200 if args.full else 60
-    error_width = 80 if args.full else 30
-    for it in items:
-        att = f"{it.attempt_count}/{it.max_retries}"
-        last_error = _summarize_value(it.last_error, error_width)
-        cmd = it.command_text if args.full else _truncate(it.command_text, cmd_width)
-        print(
-            f"{it.id[:8]:8}  {it.status.value:12}  {att:7}  "
-            f"{_fmt_dt(it.created_at):20}  {_fmt_dt(it.updated_at):20}  "
-            f"{last_error:{error_width}}  {cmd}"
+    with _open_state_store(args.db_path) as state_store:
+        status = QueueStatus(args.status) if args.status else None
+        items = state_store.list_queue_items(
+            status=status,
+            limit=args.limit,
+            newest_first=not args.oldest,
         )
+
+        if args.json:
+            out = []
+            for it in items:
+                out.append(
+                    {
+                        "id": it.id,
+                        "run_id": it.run_id,
+                        "status": it.status.value,
+                        "created_at": it.created_at.isoformat(),
+                        "updated_at": it.updated_at.isoformat(),
+                        "started_at": it.started_at.isoformat() if it.started_at else None,
+                        "finished_at": it.finished_at.isoformat() if it.finished_at else None,
+                        "attempt_count": it.attempt_count,
+                        "max_attempts": it.max_retries,
+                        "max_retries": it.max_retries,
+                        "next_attempt_at": it.next_attempt_at.isoformat()
+                        if it.next_attempt_at
+                        else None,
+                        "timeout_seconds": it.timeout_seconds,
+                        "cancel_requested": it.cancel_requested,
+                        "last_error": it.last_error,
+                        "command_text": it.command_text,
+                    }
+                )
+            print(json.dumps(out, indent=2))
+            return
+
+        print(f"DB: {args.db_path}")
+        print(f"Items: {len(items)} (limit={args.limit})")
+        header = (
+            f"{'ID':8}  {'STATUS':12}  {'ATT':7}  {'CREATED':20}  "
+            f"{'UPDATED':20}  {'LAST ERROR':30}  COMMAND"
+        )
+        print(header)
+        print("-" * len(header))
+        cmd_width = 200 if args.full else 60
+        error_width = 80 if args.full else 30
+        for it in items:
+            att = f"{it.attempt_count}/{it.max_retries}"
+            last_error = _summarize_value(it.last_error, error_width)
+            cmd = it.command_text if args.full else _truncate(it.command_text, cmd_width)
+            print(
+                f"{it.id[:8]:8}  {it.status.value:12}  {att:7}  "
+                f"{_fmt_dt(it.created_at):20}  {_fmt_dt(it.updated_at):20}  "
+                f"{last_error:{error_width}}  {cmd}"
+            )
 
 
 def _handle_queue_show(args: argparse.Namespace) -> None:
-    state_store = StateStore(args.db_path)
-
-    matches = state_store.resolve_queue_item_id(args.id)
-    if not matches:
-        if state_store.get_run(args.id) is not None:
-            print(
-                "That looks like a RUN id; use `runs show <id>` or `export --run <id>`."
-            )
+    with _open_state_store(args.db_path) as state_store:
+        matches = state_store.resolve_queue_item_id(args.id)
+        if not matches:
+            if state_store.get_run(args.id) is not None:
+                print(
+                    "That looks like a RUN id; use `runs show <id>` or `export --run <id>`."
+                )
+                raise SystemExit(2)
+            print(f"Queue item not found: {args.id}")
             raise SystemExit(2)
-        print(f"Queue item not found: {args.id}")
-        raise SystemExit(2)
 
-    if len(matches) > 1:
-        print(f"Ambiguous id prefix: {args.id}")
-        print("Matches:")
-        for mid in matches[:10]:
-            print(f"  {mid}")
-        if len(matches) > 10:
-            print(f"  ... ({len(matches) - 10} more)")
-        print("Provide a longer prefix.")
-        raise SystemExit(2)
+        if len(matches) > 1:
+            print(f"Ambiguous id prefix: {args.id}")
+            print("Matches:")
+            for mid in matches[:10]:
+                print(f"  {mid}")
+            if len(matches) > 10:
+                print(f"  ... ({len(matches) - 10} more)")
+            print("Provide a longer prefix.")
+            raise SystemExit(2)
 
-    item = state_store.get_queue_item(matches[0])
-    if item is None:
-        print(f"Queue item not found: {args.id}")
-        raise SystemExit(2)
+        item = state_store.get_queue_item(matches[0])
+        if item is None:
+            print(f"Queue item not found: {args.id}")
+            raise SystemExit(2)
 
-    if args.json:
-        out = {
-            "id": item.id,
-            "run_id": item.run_id,
-            "status": item.status.value,
-            "created_at": item.created_at.isoformat(),
-            "updated_at": item.updated_at.isoformat(),
-            "started_at": item.started_at.isoformat() if item.started_at else None,
-            "finished_at": item.finished_at.isoformat() if item.finished_at else None,
-            "attempt_count": item.attempt_count,
-            "max_attempts": item.max_retries,
-            "max_retries": item.max_retries,
-            "next_attempt_at": item.next_attempt_at.isoformat()
-            if item.next_attempt_at
-            else None,
-            "timeout_seconds": item.timeout_seconds,
-            "cancel_requested": item.cancel_requested,
-            "last_error": item.last_error,
-            "command_text": item.command_text,
-        }
-        print(json.dumps(out, indent=2))
-        return
+        if args.json:
+            out = {
+                "id": item.id,
+                "run_id": item.run_id,
+                "status": item.status.value,
+                "created_at": item.created_at.isoformat(),
+                "updated_at": item.updated_at.isoformat(),
+                "started_at": item.started_at.isoformat() if item.started_at else None,
+                "finished_at": item.finished_at.isoformat() if item.finished_at else None,
+                "attempt_count": item.attempt_count,
+                "max_attempts": item.max_retries,
+                "max_retries": item.max_retries,
+                "next_attempt_at": item.next_attempt_at.isoformat()
+                if item.next_attempt_at
+                else None,
+                "timeout_seconds": item.timeout_seconds,
+                "cancel_requested": item.cancel_requested,
+                "last_error": item.last_error,
+                "command_text": item.command_text,
+            }
+            print(json.dumps(out, indent=2))
+            return
 
-    print(f"DB: {args.db_path}")
-    print(f"ID:         {item.id}")
-    print(f"Run ID:     {item.run_id or '-'}")
-    print(f"Status:     {item.status.value}")
-    print(f"Created:    {_fmt_dt(item.created_at)}")
-    print(f"Updated:    {_fmt_dt(item.updated_at)}")
-    print(f"Started:    {_fmt_dt(item.started_at)}")
-    print(f"Finished:   {_fmt_dt(item.finished_at)}")
-    print(f"Attempts:   {item.attempt_count}/{item.max_retries}")
-    if item.last_error:
-        print("Last error:")
-        print(item.last_error)
-    print("Command:")
-    print(item.command_text)
+        print(f"DB: {args.db_path}")
+        print(f"ID:         {item.id}")
+        print(f"Run ID:     {item.run_id or '-'}")
+        print(f"Status:     {item.status.value}")
+        print(f"Created:    {_fmt_dt(item.created_at)}")
+        print(f"Updated:    {_fmt_dt(item.updated_at)}")
+        print(f"Started:    {_fmt_dt(item.started_at)}")
+        print(f"Finished:   {_fmt_dt(item.finished_at)}")
+        print(f"Attempts:   {item.attempt_count}/{item.max_retries}")
+        if item.last_error:
+            print("Last error:")
+            print(item.last_error)
+        print("Command:")
+        print(item.command_text)
 
 
 def _handle_queue_purge_failed(args: argparse.Namespace) -> None:
-    state_store = StateStore(args.db_path)
-    failed_items = state_store.list_queue_items_by_status(QueueStatus.FAILED)
-    if args.yes:
-        deleted = state_store.delete_queue_items_by_status(QueueStatus.FAILED)
-        print(f"Deleted {deleted} failed queue item(s).")
-        return
+    with _open_state_store(args.db_path) as state_store:
+        failed_items = state_store.list_queue_items_by_status(QueueStatus.FAILED)
+        if args.yes:
+            deleted = state_store.delete_queue_items_by_status(QueueStatus.FAILED)
+            print(f"Deleted {deleted} failed queue item(s).")
+            return
 
-    print(f"Dry run: would delete {len(failed_items)} failed queue item(s).")
-    if not failed_items:
-        return
-    header = f"{'ID':8}  {'CREATED':20}  {'ATT':7}  {'LAST ERROR':30}  COMMAND"
-    print(header)
-    print("-" * len(header))
-    cmd_width = 80
-    for item in failed_items:
-        att = f"{item.attempt_count}/{item.max_retries}"
-        last_error = _summarize_value(item.last_error, 30)
-        cmd = _truncate(item.command_text, cmd_width)
-        print(
-            f"{item.id[:8]:8}  {_fmt_dt(item.created_at):20}  {att:7}  "
-            f"{last_error:30}  {cmd}"
-        )
+        print(f"Dry run: would delete {len(failed_items)} failed queue item(s).")
+        if not failed_items:
+            return
+        header = f"{'ID':8}  {'CREATED':20}  {'ATT':7}  {'LAST ERROR':30}  COMMAND"
+        print(header)
+        print("-" * len(header))
+        cmd_width = 80
+        for item in failed_items:
+            att = f"{item.attempt_count}/{item.max_retries}"
+            last_error = _summarize_value(item.last_error, 30)
+            cmd = _truncate(item.command_text, cmd_width)
+            print(
+                f"{item.id[:8]:8}  {_fmt_dt(item.created_at):20}  {att:7}  "
+                f"{last_error:30}  {cmd}"
+            )
 
 
 def _handle_ipc_serve(args: argparse.Namespace) -> None:
@@ -2654,18 +2702,18 @@ def _handle_ipc_enqueue(args: argparse.Namespace) -> None:
 
 
 def _handle_queue_cancel(args: argparse.Namespace) -> None:
-    state_store = StateStore(args.db_path)
-    item = state_store.request_queue_item_cancel(args.id)
-    if item is None:
-        print(f"Queue item not found: {args.id}")
-        raise SystemExit(2)
-    if item.status == QueueStatus.CANCELLED:
-        print(f"Cancelled queue item {item.id}.")
-        return
-    if item.status == QueueStatus.IN_PROGRESS:
-        print(f"Cancel requested for in-progress queue item {item.id}.")
-        return
-    print(f"Queue item already completed: {item.id} status={item.status.value}.")
+    with _open_state_store(args.db_path) as state_store:
+        item = state_store.request_queue_item_cancel(args.id)
+        if item is None:
+            print(f"Queue item not found: {args.id}")
+            raise SystemExit(2)
+        if item.status == QueueStatus.CANCELLED:
+            print(f"Cancelled queue item {item.id}.")
+            return
+        if item.status == QueueStatus.IN_PROGRESS:
+            print(f"Cancel requested for in-progress queue item {item.id}.")
+            return
+        print(f"Queue item already completed: {item.id} status={item.status.value}.")
 
 
 def _handle_ipc_queue_cancel(args: argparse.Namespace) -> None:

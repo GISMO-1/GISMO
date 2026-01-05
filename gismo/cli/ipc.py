@@ -370,6 +370,7 @@ def serve_ipc(db_path: str, token: str) -> None:
                 conn.send_bytes(json.dumps(response).encode("utf-8"))
     finally:
         listener.close()
+        state_store.close()
         if socket_path is not None and socket_path.exists() and socket_path.is_socket():
             socket_path.unlink()
         if stopped:

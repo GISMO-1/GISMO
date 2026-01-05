@@ -2,14 +2,16 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from uuid import uuid4
 
 from gismo.core.agent import SimpleAgent
 from gismo.core.export import export_latest_run_jsonl, export_run_jsonl
-from gismo.core.models import ToolCall, ToolCallStatus
+from gismo.core.models import EVENT_TYPE_LLM_PLAN, ToolCall, ToolCallStatus
 from gismo.core.orchestrator import Orchestrator
 from gismo.core.permissions import PermissionPolicy
 from gismo.core.state import StateStore
 from gismo.core.tools import EchoTool, ToolRegistry
+from gismo.memory.store import record_event as memory_record_event
 
 
 class ExportTest(unittest.TestCase):
@@ -130,6 +132,89 @@ class ExportTest(unittest.TestCase):
             self.assertEqual(stdout_record["outputs"]["stderr"], "[REDACTED]")
             large_record = next(record for record in tool_records if record["tool_name"] == "echo")
             self.assertEqual(large_record["outputs"], "[REDACTED]")
+
+    def test_export_includes_memory_provenance_and_events(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = str(Path(tmpdir) / "state.db")
+            state_store = StateStore(db_path)
+            plan_event_id = str(uuid4())
+            run = state_store.create_run(
+                label="memory-export",
+                metadata={"plan_event_id": plan_event_id},
+            )
+            payload = {
+                "plan": {
+                    "memory_suggestions": [
+                        {
+                            "namespace": "global",
+                            "key": "default_model",
+                            "kind": "preference",
+                            "confidence": "high",
+                            "source": "llm",
+                        }
+                    ]
+                },
+                "memory_injection_enabled": True,
+                "memory_injected_count": 1,
+                "memory_injected_keys": [{"namespace": "global", "key": "default_model"}],
+                "memory_injected_bytes": 128,
+                "memory_injected_cap_items": 20,
+                "memory_injected_cap_bytes": 8192,
+                "apply_memory_suggestions_requested": False,
+                "apply_memory_suggestions_result": {"applied": 0, "skipped": 0, "denied": 0},
+                "apply_memory_suggestions_applied": [],
+                "apply_memory_policy_path": None,
+                "apply_memory_yes": False,
+                "apply_memory_non_interactive": True,
+                "apply_memory_decision_path": "non-interactive",
+            }
+            state_store.record_event(
+                actor="agent",
+                event_type=EVENT_TYPE_LLM_PLAN,
+                message="LLM plan generated.",
+                json_payload=payload,
+                event_id=plan_event_id,
+            )
+            memory_record_event(
+                db_path,
+                operation="put",
+                actor="agent",
+                policy_hash="test-hash",
+                request={
+                    "namespace": "global",
+                    "key": "default_model",
+                    "kind": "preference",
+                    "value_json": "\"phi3:mini\"",
+                    "tags_json": None,
+                    "confidence": "high",
+                    "source": "llm",
+                    "ttl_seconds": None,
+                },
+                result_meta={
+                    "policy_decision": "denied",
+                    "policy_reason": "confirmation_required",
+                    "confirmation": {"required": True, "provided": False, "mode": None},
+                },
+                related_ask_event_id=plan_event_id,
+            )
+            output_path = export_run_jsonl(
+                state_store,
+                run.id,
+                base_dir=Path(tmpdir),
+            )
+            records = [
+                json.loads(line)
+                for line in output_path.read_text(encoding="utf-8").strip().splitlines()
+            ]
+            run_record = next(record for record in records if record["record_type"] == "run")
+            self.assertIn("memory_provenance", run_record)
+            event_record = next(record for record in records if record["record_type"] == "event")
+            self.assertIn("memory_provenance", event_record)
+            memory_event = next(
+                record for record in records if record["record_type"] == "memory_event"
+            )
+            self.assertEqual(memory_event["originating_event_id"], plan_event_id)
+            self.assertEqual(memory_event["policy_decision"], "denied")
 
 
 if __name__ == "__main__":

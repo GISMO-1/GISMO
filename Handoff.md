@@ -172,15 +172,16 @@ Plan assessment gate:
 LATEST UPDATE (OPERATOR NOTES)
 
 Status:
-- Added agent memory flags for read-only context injection and gated suggestion application.
-- Agent memory suggestion application links audit events to the originating plan.
+- Added run-level memory provenance summaries for `runs show` output and JSON exports.
+- Export now includes plan events plus memory event linkage fields for audit consumers.
 
 Next steps:
-- Run Windows CI or native Windows smoke tests to confirm parity with `ask` memory behavior.
-- Run pytest -q on Windows to confirm agent memory tests and guardrails remain stable.
+- Review memory provenance output formatting with real operator runs.
+- Validate Windows smoke tests for run-level memory provenance and export JSONL consumers.
 
 Tests run:
 - python scripts/verify.py
+- pytest -q
 
 Operator examples:
 - python -m gismo.cli.main --db .\tmp\dev.db runs list

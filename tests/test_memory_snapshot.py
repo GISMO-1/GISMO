@@ -1,5 +1,6 @@
 import hashlib
 import json
+import os
 import sqlite3
 import subprocess
 import sys
@@ -391,6 +392,186 @@ class MemorySnapshotCliTest(unittest.TestCase):
                 "SELECT COUNT(*) FROM memory_items"
             ).fetchone()[0]
         self.assertEqual(count, 0)
+
+    def test_snapshot_diff_classifies_changes(self) -> None:
+        self._put_item("global", "alpha", "same")
+        self._put_item("global", "bravo", "old")
+        self._put_item("global", "tomb", "live")
+        out_path = _snapshot_path(self.snapshot_dir, "diff.json")
+        export = _run_cli(
+            [
+                "memory",
+                "snapshot",
+                "export",
+                "--db",
+                str(self.db_path),
+                "--policy",
+                str(self.policy_path),
+                "--namespace",
+                "*",
+                "--out",
+                str(out_path),
+            ],
+            cwd=self.repo_root,
+        )
+        self.assertEqual(export.returncode, 0, export.stderr)
+
+        snapshot = json.loads(out_path.read_text(encoding="utf-8"))
+        items = snapshot["items"]
+        alpha = next(item for item in items if item["key"] == "alpha")
+        bravo = next(item for item in items if item["key"] == "bravo")
+        tomb = next(item for item in items if item["key"] == "tomb")
+
+        bravo["value_json"] = canonical_value_json("new")
+        bravo["item_hash"] = _item_hash(bravo)
+
+        tomb["is_tombstoned"] = True
+        tomb["item_hash"] = _item_hash(tomb)
+
+        added = dict(alpha)
+        added["key"] = "charlie"
+        added["value_json"] = canonical_value_json("fresh")
+        added["item_hash"] = _item_hash(added)
+        items.append(added)
+
+        items.sort(key=lambda item: (item["namespace"], item["key"]))
+        snapshot["snapshot_hash"] = hashlib.sha256(
+            "".join(item["item_hash"] for item in items).encode("utf-8")
+        ).hexdigest()
+        out_path.write_text(json.dumps(snapshot), encoding="utf-8")
+
+        diff_result = _run_cli(
+            [
+                "memory",
+                "snapshot",
+                "diff",
+                "--db",
+                str(self.db_path),
+                "--policy",
+                str(self.policy_path),
+                "--in",
+                str(out_path),
+                "--json",
+            ],
+            cwd=self.repo_root,
+        )
+        self.assertEqual(diff_result.returncode, 0, diff_result.stderr)
+        payload = json.loads(diff_result.stdout)
+        self.assertEqual(payload["summary"], {
+            "adds": 1,
+            "updates": 1,
+            "tombstones": 1,
+            "unchanged": 1,
+        })
+        self.assertEqual({item["key"] for item in payload["adds"]}, {"charlie"})
+        self.assertEqual({item["key"] for item in payload["updates"]}, {"bravo"})
+        self.assertEqual({item["key"] for item in payload["tombstones"]}, {"tomb"})
+        self.assertEqual({item["key"] for item in payload["unchanged"]}, {"alpha"})
+
+    def test_snapshot_import_dry_run_records_audit_only(self) -> None:
+        self._put_item("global", "alpha", "snapshot")
+        out_path = _snapshot_path(self.snapshot_dir, "dry-run.json")
+        export = _run_cli(
+            [
+                "memory",
+                "snapshot",
+                "export",
+                "--db",
+                str(self.db_path),
+                "--policy",
+                str(self.policy_path),
+                "--namespace",
+                "*",
+                "--out",
+                str(out_path),
+            ],
+            cwd=self.repo_root,
+        )
+        self.assertEqual(export.returncode, 0, export.stderr)
+
+        dry_run_db = Path(self.temp_dir.name) / "dry-run.db"
+        dry_run = _run_cli(
+            [
+                "memory",
+                "snapshot",
+                "import",
+                "--db",
+                str(dry_run_db),
+                "--policy",
+                str(self.policy_path),
+                "--in",
+                str(out_path),
+                "--mode",
+                "merge",
+                "--yes",
+                "--non-interactive",
+                "--dry-run",
+            ],
+            cwd=self.repo_root,
+        )
+        self.assertEqual(dry_run.returncode, 0, dry_run.stderr)
+        with sqlite3.connect(dry_run_db) as connection:
+            memory_event_count = connection.execute(
+                "SELECT COUNT(*) FROM memory_events"
+            ).fetchone()[0]
+            item_count = connection.execute(
+                "SELECT COUNT(*) FROM memory_items"
+            ).fetchone()[0]
+            events = connection.execute(
+                "SELECT json_payload FROM events"
+            ).fetchall()
+        self.assertEqual(memory_event_count, 0)
+        self.assertEqual(item_count, 0)
+        self.assertEqual(len(events), 1)
+        payload = json.loads(events[0][0])
+        self.assertTrue(payload["dry_run"])
+
+        os.remove(dry_run_db)
+        self.assertFalse(dry_run_db.exists())
+
+    def test_snapshot_import_dry_run_denies_policy(self) -> None:
+        self._put_item("global", "alpha", "snapshot")
+        out_path = _snapshot_path(self.snapshot_dir, "deny.json")
+        export = _run_cli(
+            [
+                "memory",
+                "snapshot",
+                "export",
+                "--db",
+                str(self.db_path),
+                "--policy",
+                str(self.policy_path),
+                "--namespace",
+                "*",
+                "--out",
+                str(out_path),
+            ],
+            cwd=self.repo_root,
+        )
+        self.assertEqual(export.returncode, 0, export.stderr)
+
+        readonly_policy = self.repo_root / "policy" / "readonly.json"
+        dry_run = _run_cli(
+            [
+                "memory",
+                "snapshot",
+                "import",
+                "--db",
+                str(Path(self.temp_dir.name) / "deny.db"),
+                "--policy",
+                str(readonly_policy),
+                "--in",
+                str(out_path),
+                "--mode",
+                "merge",
+                "--yes",
+                "--non-interactive",
+                "--dry-run",
+            ],
+            cwd=self.repo_root,
+        )
+        self.assertNotEqual(dry_run.returncode, 0)
+        self.assertIn("denied=1", dry_run.stdout)
 
 
 if __name__ == "__main__":

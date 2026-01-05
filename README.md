@@ -120,6 +120,14 @@ Export audit logs:
   gismo export --run RUN_ID
   gismo export RUN_ID
 
+Memory primitives (SQLite-backed):
+
+  gismo memory put --namespace global --key default_model --kind preference \\
+    --value '\"phi3:mini\"' --confidence high --source operator --tag llm
+  gismo memory get --namespace global default_model
+  gismo memory search \"phi3\" --namespace global --kind preference
+  gismo memory delete --namespace global default_model
+
 Windows examples (explicit module invocation):
 
   python -m gismo.cli.main --db .\tmp\dev.db runs list

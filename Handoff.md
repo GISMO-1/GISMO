@@ -174,6 +174,7 @@ Status:
 - Ollama payload unit test now isolates outgoing payload assertions with a stubbed response.
 - Ollama JSON parsing hardens against fenced output and reports richer errors.
 - Ollama-related tests are hermetic by default with an optional integration gate.
+- Ask CLI too-many-actions warning now clarifies confirmation-required behavior.
 
 Next steps:
 - Make planner prompts policy-aware (still pending).

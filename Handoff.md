@@ -172,10 +172,10 @@ Plan assessment gate:
 LATEST UPDATE (OPERATOR NOTES)
 
 Status:
-- Added retention rules (TTL/max-items) with write-time enforcement, audits, and CLI management.
+- Added memory doctor diagnostics and repair tooling (check/repair) with policy-gated, explicit fixes.
 
 Next steps:
-- Decide whether to ship a default policy allowing memory.retention.set/clear/enforce in controlled environments.
+- Decide whether to ship default policy entries for memory doctor repair actions in controlled environments.
 
 Tests run:
 - python scripts/verify.py

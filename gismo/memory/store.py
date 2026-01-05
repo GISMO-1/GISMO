@@ -6,7 +6,7 @@ import json
 import sqlite3
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable, Optional
 from uuid import uuid4
@@ -43,6 +43,41 @@ class MemoryNamespaceSummary:
 @dataclass(frozen=True)
 class MemoryNamespaceDetail(MemoryNamespaceSummary):
     retired_reason: str | None
+
+
+@dataclass(frozen=True)
+class MemoryRetentionRule:
+    namespace: str
+    max_items: Optional[int]
+    ttl_seconds: Optional[int]
+    policy_source: str
+    created_at: str
+    updated_at: str
+
+
+@dataclass(frozen=True)
+class MemoryRetentionDetail(MemoryRetentionRule):
+    item_count: int
+    tombstone_count: int
+    last_write_at: str | None
+
+
+@dataclass(frozen=True)
+class MemoryRetentionEviction:
+    item: MemoryItem
+    reason: str
+
+
+@dataclass(frozen=True)
+class MemoryRetentionPlan:
+    rule: MemoryRetentionRule
+    evictions: list[MemoryRetentionEviction]
+    before_count: int
+    after_count: int
+    incoming_new: bool
+    evaluated_at: str
+    ttl_cutoff: str | None
+    shortfall: int
 
 
 class MemoryStore:
@@ -129,6 +164,18 @@ class MemoryStore:
                     namespace TEXT PRIMARY KEY,
                     retired_at TEXT NULL,
                     retired_reason TEXT NULL
+                )
+                """
+            )
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS memory_retention_rules (
+                    namespace TEXT PRIMARY KEY,
+                    max_items INTEGER NULL,
+                    ttl_seconds INTEGER NULL,
+                    policy_source TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
                 )
                 """
             )
@@ -247,6 +294,289 @@ class MemoryStore:
             if not row:
                 return None
             return _row_to_namespace_detail(row)
+
+    def list_retention_rules(self) -> list[MemoryRetentionDetail]:
+        sql = """
+            WITH stats AS (
+                SELECT
+                    namespace,
+                    SUM(CASE WHEN is_tombstoned = 0 THEN 1 ELSE 0 END) AS item_count,
+                    SUM(CASE WHEN is_tombstoned = 1 THEN 1 ELSE 0 END) AS tombstone_count,
+                    MAX(updated_at) AS last_write_at
+                FROM memory_items
+                GROUP BY namespace
+            )
+            SELECT
+                memory_retention_rules.namespace AS namespace,
+                memory_retention_rules.max_items AS max_items,
+                memory_retention_rules.ttl_seconds AS ttl_seconds,
+                memory_retention_rules.policy_source AS policy_source,
+                memory_retention_rules.created_at AS created_at,
+                memory_retention_rules.updated_at AS updated_at,
+                COALESCE(stats.item_count, 0) AS item_count,
+                COALESCE(stats.tombstone_count, 0) AS tombstone_count,
+                stats.last_write_at AS last_write_at
+            FROM memory_retention_rules
+            LEFT JOIN stats ON stats.namespace = memory_retention_rules.namespace
+            ORDER BY memory_retention_rules.namespace ASC
+        """
+        with self._connection() as connection:
+            rows = connection.cursor().execute(sql).fetchall()
+            return [_row_to_retention_detail(row) for row in rows]
+
+    def get_retention_rule(self, *, namespace: str) -> MemoryRetentionRule | None:
+        sql = "SELECT * FROM memory_retention_rules WHERE namespace = ?"
+        with self._connection() as connection:
+            row = connection.cursor().execute(sql, (namespace,)).fetchone()
+            if not row:
+                return None
+            return _row_to_retention_rule(row)
+
+    def get_retention_detail(self, *, namespace: str) -> MemoryRetentionDetail | None:
+        sql = """
+            WITH stats AS (
+                SELECT
+                    namespace,
+                    SUM(CASE WHEN is_tombstoned = 0 THEN 1 ELSE 0 END) AS item_count,
+                    SUM(CASE WHEN is_tombstoned = 1 THEN 1 ELSE 0 END) AS tombstone_count,
+                    MAX(updated_at) AS last_write_at
+                FROM memory_items
+                GROUP BY namespace
+            )
+            SELECT
+                memory_retention_rules.namespace AS namespace,
+                memory_retention_rules.max_items AS max_items,
+                memory_retention_rules.ttl_seconds AS ttl_seconds,
+                memory_retention_rules.policy_source AS policy_source,
+                memory_retention_rules.created_at AS created_at,
+                memory_retention_rules.updated_at AS updated_at,
+                COALESCE(stats.item_count, 0) AS item_count,
+                COALESCE(stats.tombstone_count, 0) AS tombstone_count,
+                stats.last_write_at AS last_write_at
+            FROM memory_retention_rules
+            LEFT JOIN stats ON stats.namespace = memory_retention_rules.namespace
+            WHERE memory_retention_rules.namespace = ?
+        """
+        with self._connection() as connection:
+            row = connection.cursor().execute(sql, (namespace,)).fetchone()
+            if not row:
+                return None
+            return _row_to_retention_detail(row)
+
+    def set_retention_rule(
+        self,
+        *,
+        namespace: str,
+        max_items: Optional[int],
+        ttl_seconds: Optional[int],
+        policy_source: str,
+        updated_at: Optional[str] = None,
+    ) -> tuple[MemoryRetentionRule, bool]:
+        updated_at = updated_at or _utc_now().isoformat()
+        with self._connection() as connection:
+            cursor = connection.cursor()
+            existing = cursor.execute(
+                """
+                SELECT namespace, max_items, ttl_seconds, policy_source, created_at
+                FROM memory_retention_rules
+                WHERE namespace = ?
+                """,
+                (namespace,),
+            ).fetchone()
+            if existing:
+                created_at = existing["created_at"]
+                changed = (
+                    existing["max_items"] != max_items
+                    or existing["ttl_seconds"] != ttl_seconds
+                    or existing["policy_source"] != policy_source
+                )
+            else:
+                created_at = updated_at
+                changed = True
+            cursor.execute(
+                """
+                INSERT INTO memory_retention_rules (
+                    namespace,
+                    max_items,
+                    ttl_seconds,
+                    policy_source,
+                    created_at,
+                    updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(namespace)
+                DO UPDATE SET
+                    max_items = excluded.max_items,
+                    ttl_seconds = excluded.ttl_seconds,
+                    policy_source = excluded.policy_source,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    namespace,
+                    max_items,
+                    ttl_seconds,
+                    policy_source,
+                    created_at,
+                    updated_at,
+                ),
+            )
+            connection.commit()
+        rule = self.get_retention_rule(namespace=namespace)
+        if rule is None:
+            raise RuntimeError("Failed to load retention rule after set")
+        return rule, changed
+
+    def clear_retention_rule(self, *, namespace: str) -> bool:
+        with self._connection() as connection:
+            cursor = connection.cursor()
+            cursor.execute(
+                "DELETE FROM memory_retention_rules WHERE namespace = ?",
+                (namespace,),
+            )
+            changed = cursor.rowcount > 0
+            connection.commit()
+        return changed
+
+    def plan_retention_for_write(
+        self,
+        *,
+        namespace: str,
+        key: str,
+        now: Optional[datetime] = None,
+    ) -> MemoryRetentionPlan | None:
+        rule = self.get_retention_rule(namespace=namespace)
+        if rule is None or (rule.max_items is None and rule.ttl_seconds is None):
+            return None
+        now = now or _utc_now()
+        evaluated_at = now.isoformat()
+        with self._connection() as connection:
+            cursor = connection.cursor()
+            rows = cursor.execute(
+                """
+                SELECT * FROM memory_items
+                WHERE namespace = ? AND is_tombstoned = 0
+                ORDER BY created_at ASC, key ASC, id ASC
+                """,
+                (namespace,),
+            ).fetchall()
+        items = [_row_to_item(row) for row in rows]
+        before_count = len(items)
+        incoming_new = all(item.key != key for item in items)
+        delta = 1 if incoming_new else 0
+
+        ttl_cutoff = None
+        evictions: list[MemoryRetentionEviction] = []
+        evicted_ids: set[str] = set()
+        if rule.ttl_seconds is not None:
+            cutoff_dt = now - timedelta(seconds=rule.ttl_seconds)
+            ttl_cutoff = cutoff_dt.isoformat()
+            for item in items:
+                created_dt = _parse_iso_timestamp(item.created_at)
+                if created_dt <= cutoff_dt:
+                    evictions.append(MemoryRetentionEviction(item=item, reason="ttl"))
+                    evicted_ids.add(item.id)
+
+        remaining = [item for item in items if item.id not in evicted_ids]
+        shortfall = 0
+        if rule.max_items is not None:
+            max_items = rule.max_items
+            desired_count = max(0, before_count + delta - len(evictions))
+            if desired_count > max_items:
+                evictions_needed = desired_count - max_items
+                for item in remaining[:evictions_needed]:
+                    evictions.append(
+                        MemoryRetentionEviction(item=item, reason="max_items")
+                    )
+                    evicted_ids.add(item.id)
+                if evictions_needed > len(remaining):
+                    shortfall = evictions_needed - len(remaining)
+
+        evictions_sorted = sorted(
+            evictions,
+            key=lambda entry: (entry.item.created_at, entry.item.key, entry.item.id, entry.reason),
+        )
+        after_count = max(0, before_count + delta - len(evictions_sorted))
+        return MemoryRetentionPlan(
+            rule=rule,
+            evictions=evictions_sorted,
+            before_count=before_count,
+            after_count=after_count,
+            incoming_new=incoming_new,
+            evaluated_at=evaluated_at,
+            ttl_cutoff=ttl_cutoff,
+            shortfall=shortfall,
+        )
+
+    def record_retention_decision(
+        self,
+        *,
+        plan: MemoryRetentionPlan,
+        namespace: str,
+        key: str,
+        actor: str,
+        policy_hash: str,
+        policy_meta: Optional[dict[str, Any]] = None,
+        related_run_id: Optional[str] = None,
+        related_ask_event_id: Optional[str] = None,
+    ) -> str:
+        request = {
+            "namespace": namespace,
+            "key": key,
+            "rule": _serialize_retention_rule(plan.rule),
+            "evaluated_at": plan.evaluated_at,
+            "incoming_new": plan.incoming_new,
+        }
+        result_meta = {
+            "counts": {"before": plan.before_count, "after": plan.after_count},
+            "eviction_count": len(plan.evictions),
+            "evictions": [_serialize_retention_eviction(entry) for entry in plan.evictions],
+            "ttl_cutoff": plan.ttl_cutoff,
+            "max_items": plan.rule.max_items,
+            "shortfall": plan.shortfall,
+        }
+        if policy_meta:
+            result_meta.update(policy_meta)
+        with self._connection() as connection:
+            event_id = append_event(
+                connection,
+                operation="retention.decision",
+                actor=actor,
+                policy_hash=policy_hash,
+                request=request,
+                result_meta=result_meta,
+                related_run_id=related_run_id,
+                related_ask_event_id=related_ask_event_id,
+            )
+            connection.commit()
+        return event_id
+
+    def apply_retention_evictions(
+        self,
+        *,
+        plan: MemoryRetentionPlan,
+        actor: str,
+        policy_hash: str,
+        retention_event_id: str,
+        related_run_id: Optional[str] = None,
+        related_ask_event_id: Optional[str] = None,
+    ) -> list[MemoryItem]:
+        evicted: list[MemoryItem] = []
+        for entry in plan.evictions:
+            item = self.tombstone_item(
+                entry.item.namespace,
+                entry.item.key,
+                actor=actor,
+                policy_hash=policy_hash,
+                result_meta_extra={
+                    "retention_event_id": retention_event_id,
+                    "retention_reason": entry.reason,
+                },
+                related_run_id=related_run_id,
+                related_ask_event_id=related_ask_event_id,
+            )
+            if item is not None:
+                evicted.append(item)
+        return evicted
 
     def retire_namespace(
         self,
@@ -932,6 +1262,98 @@ def get_namespace(db_path: str, *, namespace: str) -> MemoryNamespaceDetail | No
     return MemoryStore(db_path).get_namespace(namespace=namespace)
 
 
+def list_retention_rules(db_path: str) -> list[MemoryRetentionDetail]:
+    return MemoryStore(db_path).list_retention_rules()
+
+
+def get_retention_rule(db_path: str, *, namespace: str) -> MemoryRetentionRule | None:
+    return MemoryStore(db_path).get_retention_rule(namespace=namespace)
+
+
+def get_retention_detail(db_path: str, *, namespace: str) -> MemoryRetentionDetail | None:
+    return MemoryStore(db_path).get_retention_detail(namespace=namespace)
+
+
+def set_retention_rule(
+    db_path: str,
+    *,
+    namespace: str,
+    max_items: Optional[int],
+    ttl_seconds: Optional[int],
+    policy_source: str,
+    updated_at: Optional[str] = None,
+) -> tuple[MemoryRetentionRule, bool]:
+    return MemoryStore(db_path).set_retention_rule(
+        namespace=namespace,
+        max_items=max_items,
+        ttl_seconds=ttl_seconds,
+        policy_source=policy_source,
+        updated_at=updated_at,
+    )
+
+
+def clear_retention_rule(db_path: str, *, namespace: str) -> bool:
+    return MemoryStore(db_path).clear_retention_rule(namespace=namespace)
+
+
+def plan_retention_for_write(
+    db_path: str,
+    *,
+    namespace: str,
+    key: str,
+    now: Optional[datetime] = None,
+) -> MemoryRetentionPlan | None:
+    return MemoryStore(db_path).plan_retention_for_write(
+        namespace=namespace,
+        key=key,
+        now=now,
+    )
+
+
+def record_retention_decision(
+    db_path: str,
+    *,
+    plan: MemoryRetentionPlan,
+    namespace: str,
+    key: str,
+    actor: str,
+    policy_hash: str,
+    policy_meta: Optional[dict[str, Any]] = None,
+    related_run_id: Optional[str] = None,
+    related_ask_event_id: Optional[str] = None,
+) -> str:
+    return MemoryStore(db_path).record_retention_decision(
+        plan=plan,
+        namespace=namespace,
+        key=key,
+        actor=actor,
+        policy_hash=policy_hash,
+        policy_meta=policy_meta,
+        related_run_id=related_run_id,
+        related_ask_event_id=related_ask_event_id,
+    )
+
+
+def apply_retention_evictions(
+    db_path: str,
+    *,
+    plan: MemoryRetentionPlan,
+    actor: str,
+    policy_hash: str,
+    retention_event_id: str,
+    related_run_id: Optional[str] = None,
+    related_ask_event_id: Optional[str] = None,
+) -> list[MemoryItem]:
+    return MemoryStore(db_path).apply_retention_evictions(
+        plan=plan,
+        actor=actor,
+        policy_hash=policy_hash,
+        retention_event_id=retention_event_id,
+        related_run_id=related_run_id,
+        related_ask_event_id=related_ask_event_id,
+    )
+
+
 def retire_namespace(
     db_path: str,
     *,
@@ -1056,6 +1478,13 @@ def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _parse_iso_timestamp(value: str) -> datetime:
+    parsed = datetime.fromisoformat(value)
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
 def _confidence_rank(value: str) -> int:
     lowered = value.lower()
     if lowered == "high":
@@ -1125,3 +1554,51 @@ def _row_to_namespace_detail(row: sqlite3.Row) -> MemoryNamespaceDetail:
         retired_at=summary.retired_at,
         retired_reason=row["retired_reason"],
     )
+
+
+def _row_to_retention_rule(row: sqlite3.Row) -> MemoryRetentionRule:
+    return MemoryRetentionRule(
+        namespace=row["namespace"],
+        max_items=row["max_items"],
+        ttl_seconds=row["ttl_seconds"],
+        policy_source=row["policy_source"],
+        created_at=row["created_at"],
+        updated_at=row["updated_at"],
+    )
+
+
+def _row_to_retention_detail(row: sqlite3.Row) -> MemoryRetentionDetail:
+    return MemoryRetentionDetail(
+        namespace=row["namespace"],
+        max_items=row["max_items"],
+        ttl_seconds=row["ttl_seconds"],
+        policy_source=row["policy_source"],
+        created_at=row["created_at"],
+        updated_at=row["updated_at"],
+        item_count=int(row["item_count"]),
+        tombstone_count=int(row["tombstone_count"]),
+        last_write_at=row["last_write_at"],
+    )
+
+
+def _serialize_retention_rule(rule: MemoryRetentionRule) -> dict[str, object]:
+    return {
+        "namespace": rule.namespace,
+        "max_items": rule.max_items,
+        "ttl_seconds": rule.ttl_seconds,
+        "policy_source": rule.policy_source,
+        "created_at": rule.created_at,
+        "updated_at": rule.updated_at,
+    }
+
+
+def _serialize_retention_eviction(entry: MemoryRetentionEviction) -> dict[str, object]:
+    item = entry.item
+    return {
+        "namespace": item.namespace,
+        "key": item.key,
+        "item_id": item.id,
+        "created_at": item.created_at,
+        "updated_at": item.updated_at,
+        "reason": entry.reason,
+    }

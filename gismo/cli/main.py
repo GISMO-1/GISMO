@@ -333,6 +333,30 @@ def _print_plan_assessment(assessment: PlanAssessment, *, explain: bool) -> None
                 print(f"- {detail}")
 
 
+def _print_agent_summary(
+    *,
+    goal: str,
+    assessment: PlanAssessment,
+    actions_count: int,
+    run_ids: list[str],
+    final_status: str,
+    error_reason: str | None,
+) -> None:
+    print("=== Agent Summary ===")
+    print(f"Goal: {goal}")
+    print(f"Plan confidence: {assessment.confidence.upper()}")
+    risk_flags = assessment.risk_flags
+    if risk_flags:
+        print(f"Risk flags: {', '.join(risk_flags)}")
+    else:
+        print("Risk flags: none")
+    print(f"Actions count: {actions_count}")
+    print(f"Run ID(s): {', '.join(run_ids) if run_ids else '-'}")
+    print(f"Final status: {final_status}")
+    if error_reason:
+        print(f"Error reason: {error_reason}")
+
+
 def _is_interactive_tty() -> bool:
     return sys.stdin.isatty() and sys.stdout.isatty()
 
@@ -353,13 +377,48 @@ def _confirm_assessment(assessment: PlanAssessment, *, yes: bool) -> None:
     raise SystemExit(2)
 
 
-def _load_assessment_policy() -> PermissionPolicy | None:
+def _agent_requires_confirmation(assessment: PlanAssessment, actions: list[dict[str, object]]) -> bool:
+    if assessment.requires_confirmation:
+        return True
+    if assessment.confidence == "low":
+        return True
+    if any(flag in {"shell", "writes"} for flag in assessment.risk_flags):
+        return True
+    for action in actions:
+        risk = action.get("risk")
+        if isinstance(risk, str) and risk.strip().lower() == "high":
+            return True
+    return False
+
+
+def _confirm_agent_assessment(
+    assessment: PlanAssessment,
+    actions: list[dict[str, object]],
+    *,
+    yes: bool,
+) -> None:
+    if not _agent_requires_confirmation(assessment, actions) or yes:
+        return
+    if _is_interactive_tty():
+        response = input("This plan requires confirmation. Proceed? [y/N]:")
+        if response.strip().lower() not in {"y", "yes"}:
+            print("Confirmation declined; plan not enqueued.", file=sys.stderr)
+            raise SystemExit(2)
+        return
+    print(
+        "Refusing to enqueue without confirmation in non-interactive mode. Use --yes to override.",
+        file=sys.stderr,
+    )
+    raise SystemExit(2)
+
+
+def _load_assessment_policy(policy_path: str | None) -> PermissionPolicy | None:
     repo_root = Path(__file__).resolve().parents[2]
-    policy_path, _ = _resolve_default_policy_path(None, repo_root)
-    if policy_path is None:
+    resolved_path, _ = _resolve_default_policy_path(policy_path, repo_root)
+    if resolved_path is None:
         return None
     try:
-        return load_policy(policy_path, repo_root=repo_root)
+        return load_policy(resolved_path, repo_root=repo_root)
     except (OSError, ValueError, PermissionError):
         return None
 
@@ -760,7 +819,7 @@ def run_enqueue(
     print(f"Enqueued {item.id} status={item.status.value}")
 
 
-def run_ask(
+def _request_llm_plan(
     db_path: str,
     user_text: str,
     *,
@@ -770,12 +829,13 @@ def run_ask(
     enqueue: bool,
     dry_run: bool,
     max_actions: int,
-    yes: bool,
     explain: bool,
-    debug: bool = False,
-) -> None:
+    debug: bool,
+    actor: str,
+    assessment_policy_path: str | None = None,
+) -> tuple[dict, PlanAssessment, StateStore]:
     if not user_text or not user_text.strip():
-        raise ValueError("ask requires a natural language request.")
+        raise ValueError(f"{actor} requires a natural language request.")
     config = resolve_ollama_config(url=host, model=model, timeout_s=timeout_s)
     state_store = StateStore(db_path)
     system_prompt = build_system_prompt()
@@ -801,7 +861,7 @@ def run_ask(
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
         state_store.record_event(
-            actor="ask",
+            actor=actor,
             event_type=EVENT_TYPE_ASK_FAILED,
             message="LLM request failed.",
             json_payload=payload,
@@ -836,7 +896,7 @@ def run_ask(
                 "timestamp": datetime.now(timezone.utc).isoformat(),
             }
             state_store.record_event(
-                actor="ask",
+                actor=actor,
                 event_type=EVENT_TYPE_LLM_PLAN,
                 message="LLM plan parsing failed.",
                 json_payload=payload,
@@ -864,7 +924,7 @@ def run_ask(
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
         state_store.record_event(
-            actor="ask",
+            actor=actor,
             event_type=EVENT_TYPE_LLM_PLAN,
             message="LLM plan parsing failed.",
             json_payload=payload,
@@ -893,14 +953,14 @@ def run_ask(
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
         state_store.record_event(
-            actor="ask",
+            actor=actor,
             event_type=EVENT_TYPE_LLM_PLAN,
             message="LLM plan parsing failed.",
             json_payload=payload,
         )
         raise
     _print_llm_plan(plan)
-    policy = _load_assessment_policy()
+    policy = _load_assessment_policy(assessment_policy_path)
     assessment = assess_plan(plan.get("actions", []), policy=policy)
     _print_plan_assessment(assessment, explain=explain)
     payload = {
@@ -915,21 +975,22 @@ def run_ask(
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
     state_store.record_event(
-        actor="ask",
+        actor=actor,
         event_type=EVENT_TYPE_LLM_PLAN,
         message="LLM plan generated.",
         json_payload=payload,
     )
+    return plan, assessment, state_store
 
-    if not enqueue:
-        return
-    if dry_run:
-        print("Dry run: enqueue requested but no items were enqueued.")
-        return
-    _confirm_assessment(assessment, yes=yes)
 
-    enqueued_ids = []
-    skipped = []
+def _enqueue_plan_actions(
+    state_store: StateStore,
+    plan: dict,
+    *,
+    run_id: str | None = None,
+) -> tuple[list[str], list[str]]:
+    enqueued_ids: list[str] = []
+    skipped: list[str] = []
     for action in plan.get("actions", []):
         if action.get("type") != "enqueue":
             continue
@@ -944,10 +1005,51 @@ def run_ask(
             continue
         item = state_store.enqueue_command(
             command_text=command_text,
+            run_id=run_id,
             max_retries=int(action.get("retries") or 0),
             timeout_seconds=int(action.get("timeout_seconds") or 30),
         )
         enqueued_ids.append(item.id)
+    return enqueued_ids, skipped
+
+
+def run_ask(
+    db_path: str,
+    user_text: str,
+    *,
+    model: str | None,
+    host: str | None,
+    timeout_s: int | None,
+    enqueue: bool,
+    dry_run: bool,
+    max_actions: int,
+    yes: bool,
+    explain: bool,
+    debug: bool = False,
+) -> None:
+    plan, assessment, state_store = _request_llm_plan(
+        db_path,
+        user_text,
+        model=model,
+        host=host,
+        timeout_s=timeout_s,
+        enqueue=enqueue,
+        dry_run=dry_run,
+        max_actions=max_actions,
+        explain=explain,
+        debug=debug,
+        actor="ask",
+        assessment_policy_path=None,
+    )
+
+    if not enqueue:
+        return
+    if dry_run:
+        print("Dry run: enqueue requested but no items were enqueued.")
+        return
+    _confirm_assessment(assessment, yes=yes)
+
+    enqueued_ids, skipped = _enqueue_plan_actions(state_store, plan)
     if skipped:
         print("Enqueue notes:")
         for note in skipped:
@@ -958,6 +1060,167 @@ def run_ask(
             print(f"- {item_id}")
     else:
         print("No items enqueued.")
+
+
+def _run_daemon_once(db_path: str, policy_path: str | None) -> None:
+    run_daemon(
+        db_path,
+        policy_path,
+        sleep_seconds=0.2,
+        once=True,
+        requeue_stale_seconds=600,
+    )
+
+
+def _drain_queue_items(
+    db_path: str,
+    policy_path: str | None,
+    item_ids: list[str],
+    *,
+    max_passes: int = 5,
+) -> list[QueueStatus]:
+    if not item_ids:
+        return []
+    for _ in range(max_passes):
+        state_store = StateStore(db_path)
+        items = [state_store.get_queue_item(item_id) for item_id in item_ids]
+        pending = [
+            item
+            for item in items
+            if item and item.status in {QueueStatus.QUEUED, QueueStatus.IN_PROGRESS}
+        ]
+        if not pending:
+            break
+        now = datetime.now(timezone.utc)
+        if all(
+            item.status == QueueStatus.QUEUED
+            and item.next_attempt_at
+            and item.next_attempt_at > now
+            for item in pending
+        ):
+            break
+        _run_daemon_once(db_path, policy_path)
+    state_store = StateStore(db_path)
+    final_items = [state_store.get_queue_item(item_id) for item_id in item_ids]
+    return [item.status for item in final_items if item]
+
+
+def _queue_status_summary(statuses: list[QueueStatus]) -> tuple[str, QueueStatus | None]:
+    if not statuses:
+        return "empty", None
+    if any(status == QueueStatus.FAILED for status in statuses):
+        return "failed", QueueStatus.FAILED
+    if any(status == QueueStatus.CANCELLED for status in statuses):
+        return "failed", QueueStatus.CANCELLED
+    if any(status == QueueStatus.IN_PROGRESS for status in statuses):
+        return "in_progress", QueueStatus.IN_PROGRESS
+    if any(status == QueueStatus.QUEUED for status in statuses):
+        return "queued", QueueStatus.QUEUED
+    return "succeeded", QueueStatus.SUCCEEDED
+
+
+def run_agent(
+    db_path: str,
+    goal_text: str,
+    *,
+    policy_path: str | None,
+    once: bool,
+    max_cycles: int,
+    yes: bool,
+    dry_run: bool,
+) -> None:
+    if not goal_text or not goal_text.strip():
+        raise ValueError("agent requires a goal description.")
+    cycles_limit = 1 if once else max(1, max_cycles)
+    run_ids: list[str] = []
+    final_status = "unknown"
+    final_error: str | None = None
+    last_assessment: PlanAssessment | None = None
+    last_actions_count = 0
+    for cycle in range(1, cycles_limit + 1):
+        print(f"=== Agent Cycle {cycle} ===")
+        plan, assessment, state_store = _request_llm_plan(
+            db_path,
+            goal_text,
+            model=None,
+            host=None,
+            timeout_s=None,
+            enqueue=not dry_run,
+            dry_run=dry_run,
+            max_actions=10,
+            explain=False,
+            debug=False,
+            actor="agent",
+            assessment_policy_path=policy_path,
+        )
+        actions = plan.get("actions", [])
+        last_actions_count = len(actions)
+        last_assessment = assessment
+
+        if dry_run:
+            final_status = "dry-run"
+            break
+
+        _confirm_agent_assessment(assessment, actions, yes=yes)
+
+        run = state_store.create_run(
+            label="agent-cycle",
+            metadata={"goal": goal_text, "cycle": cycle, "source": "agent"},
+        )
+        run_ids.append(run.id)
+
+        enqueued_ids, skipped = _enqueue_plan_actions(state_store, plan, run_id=run.id)
+        if skipped:
+            print("Enqueue notes:")
+            for note in skipped:
+                print(f"- {note}")
+        if enqueued_ids:
+            print("Enqueued items:")
+            for item_id in enqueued_ids:
+                print(f"- {item_id}")
+        else:
+            final_status = "no-actions"
+            final_error = "No enqueue actions were generated."
+            break
+
+        statuses = _drain_queue_items(db_path, policy_path, enqueued_ids)
+        status_label, _ = _queue_status_summary(statuses)
+        if status_label == "succeeded":
+            final_status = "succeeded"
+            if cycle >= cycles_limit:
+                break
+            continue
+        if status_label == "failed":
+            final_status = "failed"
+            last_error = None
+            for item_id in enqueued_ids:
+                item = state_store.get_queue_item(item_id)
+                if item and item.last_error:
+                    last_error = item.last_error
+                    break
+            final_error = last_error or "One or more queue items failed."
+            if cycle >= cycles_limit:
+                break
+            continue
+        final_status = status_label
+        final_error = "Queue items did not complete within the agent loop."
+        break
+
+    if last_assessment is None:
+        last_assessment = PlanAssessment(
+            confidence="low",
+            risk_flags=[],
+            explanation="No plan was generated.",
+            requires_confirmation=True,
+        )
+    _print_agent_summary(
+        goal=goal_text,
+        assessment=last_assessment,
+        actions_count=last_actions_count,
+        run_ids=run_ids,
+        final_status=final_status,
+        error_reason=final_error,
+    )
 
 
 def run_daemon(
@@ -1190,6 +1453,20 @@ def _handle_ask(args: argparse.Namespace) -> None:
         yes=args.yes,
         explain=args.explain,
         debug=args.debug,
+    )
+
+
+def _handle_agent(args: argparse.Namespace) -> None:
+    goal_text = " ".join(args.goal).strip()
+    max_cycles = args.max_cycles if args.max_cycles is not None else 1
+    run_agent(
+        args.db_path,
+        goal_text,
+        policy_path=args.policy,
+        once=args.once,
+        max_cycles=max_cycles,
+        yes=args.yes,
+        dry_run=args.dry_run,
     )
 
 
@@ -2011,6 +2288,44 @@ def build_parser() -> argparse.ArgumentParser:
         help="Natural language request for the planner",
     )
     ask_parser.set_defaults(handler=_handle_ask)
+
+    agent_parser = subparsers.add_parser(
+        "agent",
+        help="Run the leashed agent loop from a goal",
+        parents=[db_parent_optional],
+    )
+    agent_parser.add_argument(
+        "--policy",
+        default=None,
+        help="Path to a JSON policy file",
+    )
+    agent_parser.add_argument(
+        "--once",
+        action="store_true",
+        help="Run a single plan/enqueue/execute cycle and exit",
+    )
+    agent_parser.add_argument(
+        "--max-cycles",
+        type=int,
+        default=None,
+        help="Maximum planning cycles before stopping (default: 1)",
+    )
+    agent_parser.add_argument(
+        "--yes",
+        action="store_true",
+        help="Skip confirmation prompts for high-risk plans",
+    )
+    agent_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Show the plan and assessment without enqueueing",
+    )
+    agent_parser.add_argument(
+        "goal",
+        nargs="+",
+        help="Goal statement for the agent loop",
+    )
+    agent_parser.set_defaults(handler=_handle_agent)
 
     daemon_parser = subparsers.add_parser(
         "daemon",

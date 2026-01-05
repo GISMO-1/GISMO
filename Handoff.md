@@ -158,12 +158,12 @@ INTENTIONAL LIMITATIONS (NOT BUGS)
 
 RECENT NOTABLE CHANGE (LATEST WORK)
 
-DB-anchored exports:
-- Export defaults now resolve absolute paths anchored to the selected DB location.
-- This prevents CWD-dependent exports (operator-grade determinism).
-- Coverage added: CLI export defaults tested from non-repo working directory.
+Leashed agent loop:
+- Added `agent` CLI to turn a goal into a plan, enqueue it, and execute via the daemon.
+- Confirmation gates now apply to high-risk plans and any shell/write actions.
+- Agent summaries report confidence, risk flags, run IDs, and final status.
 
-This is a structural improvement and should be treated as stable behavior.
+This is a controlled autonomy feature and should be treated as guarded behavior.
 
 Plan assessment gate:
 - ask now prints confidence, risk flags, and an explanation for each plan.
@@ -172,11 +172,9 @@ Plan assessment gate:
 LATEST UPDATE (OPERATOR NOTES)
 
 Status:
-- Run inspection is now first-class (runs list/show) with run-level summaries and error hints.
-- Export accepts positional run IDs (export RUN_ID) in addition to --run/--latest.
-- queue show now detects run IDs and points operators to runs show/export.
-- Added prompt-paste guardrails for PowerShell-style prompt tokens.
-- Updated docs with Windows-first examples.
+- Added leashed `agent` CLI for goal-based plan → enqueue → execute cycles (queue/daemon only).
+- Agent cycles honor confirmation gates for high-risk and shell/write actions.
+- Updated docs with agent usage examples.
 
 Next steps:
 - Make planner prompts policy-aware (still pending).
@@ -191,6 +189,7 @@ Operator examples:
 - python -m gismo.cli.main --db .\tmp\dev.db runs list
 - python -m gismo.cli.main --db .\tmp\dev.db runs show RUN_ID
 - python -m gismo.cli.main --db .\tmp\dev.db export RUN_ID
+ - python -m gismo.cli.main --db .\tmp\dev.db agent "Summarize last 10 queue failures" --dry-run
 
 -------------------------------------------------------------------------------
 

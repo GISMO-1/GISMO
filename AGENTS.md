@@ -143,4 +143,7 @@ The default “proof of life” for GISMO is a CLI demo that:
 - Persists state
 - Prints an auditable summary
 
+Leashed autonomy:
+- The `agent` CLI loop must only plan → enqueue → execute via the queue/daemon and keep confirmation gates intact.
+
 If a change breaks this, it is not acceptable without explicit approval.

@@ -131,6 +131,16 @@ Planner (local LLM via Ollama):
   gismo ask "Summarize the last 10 queue failures" --dry-run
   gismo ask "Do X safely" --enqueue
 
+Agent loop (leashed autonomy):
+
+  gismo agent "Summarize the last 10 queue failures" --dry-run
+  gismo agent "Do X safely" --once
+  gismo agent "Do X safely" --max-cycles 3 --yes
+
+Agent notes:
+- The agent loop is leashed autonomy: it plans, enqueues, and executes only through the queue/daemon.
+- Confirmation is required for high-risk plans or any shell/write actions unless --yes is provided.
+
 Planner behavior:
 - Produces enqueue-only plans under strict schema.
 - Actions are bounded (hard limit on action count).

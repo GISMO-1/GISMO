@@ -171,12 +171,12 @@ Plan assessment gate:
 LATEST UPDATE (OPERATOR NOTES)
 
 Status:
-- Reverted memory-related documentation additions from the merged implementation.
-- Restored README and handoff notes to reflect governance discipline.
+- Added policy + confirmation gating for memory put/delete operations in the CLI.
+- Audited memory decision outcomes (allowed/denied/confirmed) in memory events.
 
 Next steps:
-- Reintroduce memory documentation only when explicitly approved for the release scope.
-- Keep doc updates limited to approved changes.
+- Extend policy samples if new memory namespaces are introduced.
+- Re-run Windows validation on a native host before release tagging.
 
 Tests run:
 - python scripts/verify.py

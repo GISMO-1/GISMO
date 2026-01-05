@@ -5,10 +5,21 @@
     "read_file",
     "write_file",
     "list_dir",
-    "run_shell"
+    "run_shell",
+    "memory.put",
+    "memory.delete"
   ],
   "fs": {
     "base_dir": "."
+  },
+  "memory": {
+    "allow": {
+      "memory.put": ["run:*", "project:*", "global"],
+      "memory.delete": ["run:*"]
+    },
+    "require_confirmation": {
+      "memory.put": ["project:*", "global"]
+    }
   },
   "shell": {
     "base_dir": ".",

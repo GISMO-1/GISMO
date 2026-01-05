@@ -20,10 +20,25 @@ class ShellPolicy:
 
 
 @dataclass
+class MemoryPolicy:
+    allow: dict[str, list[str]] = field(default_factory=dict)
+    require_confirmation: dict[str, list[str]] = field(default_factory=dict)
+
+    def is_allowed(self, action: str, namespace: str) -> bool:
+        allowed = self.allow.get(action, [])
+        return _matches_namespace(namespace, allowed)
+
+    def requires_confirmation(self, action: str, namespace: str) -> bool:
+        required = self.require_confirmation.get(action, [])
+        return _matches_namespace(namespace, required)
+
+
+@dataclass
 class PermissionPolicy:
     allowed_tools: Set[str] = field(default_factory=set)
     fs: FileSystemPolicy = field(default_factory=lambda: FileSystemPolicy(Path(".")))
     shell: ShellPolicy = field(default_factory=lambda: ShellPolicy(Path(".")))
+    memory: MemoryPolicy = field(default_factory=MemoryPolicy)
 
     def allow(self, tool_name: str) -> None:
         self.allowed_tools.add(tool_name)
@@ -54,10 +69,16 @@ def load_policy(
     allowed_tools = _ensure_string_list(data.get("allowed_tools", []), "allowed_tools")
     fs_config = data.get("fs", {}) or {}
     shell_config = data.get("shell", {}) or {}
+    memory_config = data.get("memory", {}) or {}
     fs_base_dir = _resolve_base_dir(repo_root, fs_config.get("base_dir", "."))
     shell_base_dir = _resolve_base_dir(repo_root, shell_config.get("base_dir", "."))
     allowlist = _ensure_command_allowlist(shell_config.get("allowlist", []))
     timeout_seconds = _ensure_timeout(shell_config.get("timeout_seconds", 10))
+    memory_allow = _ensure_namespace_map(memory_config.get("allow", {}), "memory.allow")
+    memory_confirmation = _ensure_namespace_map(
+        memory_config.get("require_confirmation", {}),
+        "memory.require_confirmation",
+    )
     return PermissionPolicy(
         allowed_tools=set(allowed_tools),
         fs=FileSystemPolicy(base_dir=fs_base_dir),
@@ -65,6 +86,10 @@ def load_policy(
             base_dir=shell_base_dir,
             allowlist=allowlist,
             timeout_seconds=timeout_seconds,
+        ),
+        memory=MemoryPolicy(
+            allow=memory_allow,
+            require_confirmation=memory_confirmation,
         ),
     )
 
@@ -96,6 +121,32 @@ def _ensure_timeout(value: object) -> float:
             raise ValueError("shell.timeout_seconds must be positive")
         return float(value)
     raise ValueError("shell.timeout_seconds must be a number")
+
+
+def _ensure_namespace_map(value: object, field_name: str) -> dict[str, list[str]]:
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise ValueError(f"{field_name} must be a mapping of action -> namespaces")
+    normalized: dict[str, list[str]] = {}
+    for key, namespaces in value.items():
+        if not isinstance(key, str) or not key.strip():
+            raise ValueError(f"{field_name} keys must be non-empty strings")
+        normalized[key] = _ensure_string_list(namespaces, f"{field_name}.{key}")
+    return normalized
+
+
+def _matches_namespace(namespace: str, patterns: Iterable[str]) -> bool:
+    for pattern in patterns:
+        if pattern == "*":
+            return True
+        if pattern.endswith("*"):
+            if namespace.startswith(pattern[:-1]):
+                return True
+            continue
+        if namespace == pattern:
+            return True
+    return False
 
 
 def _resolve_base_dir(repo_root: Path, base_dir_value: object) -> Path:

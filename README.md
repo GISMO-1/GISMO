@@ -149,10 +149,15 @@ Agent loop (leashed autonomy):
   gismo agent "Summarize the last 10 queue failures" --dry-run
   gismo agent "Do X safely" --once
   gismo agent "Do X safely" --max-cycles 3 --yes
+  gismo agent "Plan with memory context" --dry-run --memory
+  gismo agent "Apply memory suggestions" --dry-run --apply-memory-suggestions \
+    --policy policy/dev-safe.json --yes
 
 Agent notes:
 - The agent loop is leashed autonomy: it plans, enqueues, and executes only through the queue/daemon.
 - Confirmation is required for high-risk plans or any shell/write actions unless --yes is provided.
+- Memory context and suggestion handling mirror `ask`: suggestions are advisory unless
+  --apply-memory-suggestions is set (policy/confirmation-gated; use --non-interactive to fail closed).
 
 Planner behavior:
 - Produces enqueue-only plans under strict schema.

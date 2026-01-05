@@ -172,12 +172,10 @@ Plan assessment gate:
 LATEST UPDATE (OPERATOR NOTES)
 
 Status:
-- Added snapshot diff CLI with hash-based change classification.
-- Added dry-run snapshot import that audits without writing memory items.
+- Moved memory snapshot CLI handlers into gismo/cli/memory_snapshot.py for reduced main.py churn (no behavior changes).
 
 Next steps:
-- Validate dry-run snapshot workflows in operator playbooks.
-- Consider operator-facing docs for snapshot retention/diff review practices if needed.
+- Monitor snapshot CLI outputs for any regressions after the refactor.
 
 Tests run:
 - python scripts/verify.py

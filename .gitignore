@@ -28,3 +28,7 @@ gismo_state.db
 .DS_Store
 .vscode/
 .idea/
+
+# Local run exports
+exports/
+

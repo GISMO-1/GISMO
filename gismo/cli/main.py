@@ -98,6 +98,8 @@ def _coerce_action_type_to_command(action_type_text: str) -> str | None:
         lowered.startswith("echo:")
         or lowered.startswith("note:")
         or lowered.startswith("graph:")
+        or lowered.startswith("shell:")
+        or lowered.startswith("run_shell:")
     ):
         return None
     try:
@@ -465,7 +467,8 @@ def run_operator(db_path: str, command_parts: list[str], policy_path: str | None
     state_store = StateStore(db_path)
     plan = parse_command(command_text)
     normalized = normalize_command(command_text)
-    default_tools = required_tools(plan) if policy_path is None else ()
+    default_tools = required_tools(plan) if policy_path is None else set()
+    default_tools.discard("run_shell")
     policy_path, warn = _resolve_default_policy_path(policy_path, repo_root)
     if warn:
         _warn_missing_default_policy()
@@ -1640,7 +1643,7 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument(
         "operator_command",
         nargs=argparse.REMAINDER,
-        help="Operator command string (echo:, note:, or graph:)",
+        help="Operator command string (echo:, note:, shell:, or graph:)",
     )
     run_parser.set_defaults(handler=_handle_run)
 

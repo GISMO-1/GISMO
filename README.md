@@ -8,7 +8,7 @@ Key Features and Principles:
   GISMO operates with no external dependencies or cloud APIs. All decisions and state are local. Execution is deterministic and repeatable, with a persistent SQLite state database (.gismo/state.db by default) recording runs and tasks.
 
 - Operator Commands & Structured Tasks:
-  GISMO accepts explicit operator commands (like echo:, note:, graph:) that define actions. High-level goals can be decomposed by the planner into sequences of these commands, but only within strict safety bounds.
+  GISMO accepts explicit operator commands (like echo:, note:, shell:, graph:) that define actions. High-level goals can be decomposed by the planner into sequences of these commands, but only within strict safety bounds.
 
 - Queued Orchestration Engine:
   Tasks are enqueued and executed via a durable queue and daemon process, ensuring reliable, resume-safe operation. Each task transitions through clear states (QUEUED → IN_PROGRESS → SUCCEEDED/FAILED), with retry handling and failure retention for auditability.
@@ -86,6 +86,13 @@ Run a single operator command immediately:
 Enqueue a command to be executed by the daemon later:
 
   gismo enqueue "note:remember this"
+
+Shell commands require explicit policy allowance and exact allowlist matches:
+
+  gismo run "shell:echo hello"
+
+- Shell commands are deny-by-default.
+- Policies must include run_shell in allowed_tools and a matching shell.allowlist entry.
 
 Start the daemon loop (foreground):
 

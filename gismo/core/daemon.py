@@ -207,7 +207,8 @@ def _load_policy_and_plan(
 ) -> tuple[PermissionPolicy, dict, str]:
     plan = parse_command(command_text)
     normalized = normalize_command(command_text)
-    default_tools = required_tools(plan) if policy_path is None else ()
+    default_tools = required_tools(plan) if policy_path is None else set()
+    default_tools.discard("run_shell")
     resolved_policy_path, warn = _resolve_default_policy_path(policy_path, repo_root)
     if warn:
         _warn_missing_default_policy()

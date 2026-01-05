@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import shlex
 from dataclasses import dataclass
 from typing import Any, Dict, List, Set
 
@@ -32,7 +33,7 @@ def parse_command(command: str) -> Dict[str, Any]:
 
     trimmed = command.strip()
 
-    single_match = re.match(r"(?i)^(echo|note)\s*:\s*(.+)$", trimmed)
+    single_match = re.match(r"(?i)^(echo|note|shell|run_shell)\s*:\s*(.+)$", trimmed)
     if single_match:
         verb = single_match.group(1).lower()
         payload = single_match.group(2).strip()
@@ -63,7 +64,7 @@ def parse_command(command: str) -> Dict[str, Any]:
             steps.append(_build_step(verb, payload))
         return {"mode": "graph", "steps": [step.to_dict() for step in steps]}
 
-    raise ValueError("Unsupported command. Use echo:, note:, or graph:.")
+    raise ValueError("Unsupported command. Use echo:, note:, shell:, or graph:.")
 
 
 def required_tools(plan: Dict[str, Any]) -> Set[str]:
@@ -108,4 +109,22 @@ def _build_step(verb: str, payload: str) -> OperatorStep:
             input_json={"note": payload},
             title=f"Note: {payload}",
         )
+    if verb in {"shell", "run_shell"}:
+        command = _parse_shell_command(payload)
+        rendered = " ".join(command)
+        return OperatorStep(
+            tool_name="run_shell",
+            input_json={"command": command},
+            title=f"Shell: {rendered}",
+        )
     raise ValueError(f"Unsupported verb '{verb}'")
+
+
+def _parse_shell_command(payload: str) -> list[str]:
+    try:
+        command = shlex.split(payload, posix=True)
+    except ValueError as exc:
+        raise ValueError("shell command could not be parsed") from exc
+    if not command:
+        raise ValueError("shell command requires at least one token")
+    return command

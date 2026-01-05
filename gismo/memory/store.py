@@ -12,6 +12,70 @@ from typing import Any, Iterable, Optional
 from uuid import uuid4
 
 MAX_EVENT_STRING_LEN = 1000
+MEMORY_TABLE_NAMES = (
+    "memory_items",
+    "memory_events",
+    "memory_namespaces",
+    "memory_retention_rules",
+)
+MEMORY_INDEX_DEFINITIONS = (
+    (
+        "idx_memory_items_namespace_key",
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_items_namespace_key
+        ON memory_items (namespace, key)
+        """,
+    ),
+    (
+        "idx_memory_items_namespace",
+        """
+        CREATE INDEX IF NOT EXISTS idx_memory_items_namespace
+        ON memory_items (namespace)
+        """,
+    ),
+    (
+        "idx_memory_items_kind",
+        """
+        CREATE INDEX IF NOT EXISTS idx_memory_items_kind
+        ON memory_items (kind)
+        """,
+    ),
+    (
+        "idx_memory_items_tombstoned",
+        """
+        CREATE INDEX IF NOT EXISTS idx_memory_items_tombstoned
+        ON memory_items (is_tombstoned)
+        """,
+    ),
+    (
+        "idx_memory_events_timestamp",
+        """
+        CREATE INDEX IF NOT EXISTS idx_memory_events_timestamp
+        ON memory_events (timestamp)
+        """,
+    ),
+    (
+        "idx_memory_events_operation",
+        """
+        CREATE INDEX IF NOT EXISTS idx_memory_events_operation
+        ON memory_events (operation)
+        """,
+    ),
+    (
+        "idx_memory_events_actor",
+        """
+        CREATE INDEX IF NOT EXISTS idx_memory_events_actor
+        ON memory_events (actor)
+        """,
+    ),
+    (
+        "idx_memory_events_related_run",
+        """
+        CREATE INDEX IF NOT EXISTS idx_memory_events_related_run
+        ON memory_events (related_run_id)
+        """,
+    ),
+)
 
 
 @dataclass(frozen=True)
@@ -179,54 +243,8 @@ class MemoryStore:
                 )
                 """
             )
-            cursor.execute(
-                """
-                CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_items_namespace_key
-                ON memory_items (namespace, key)
-                """
-            )
-            cursor.execute(
-                """
-                CREATE INDEX IF NOT EXISTS idx_memory_items_namespace
-                ON memory_items (namespace)
-                """
-            )
-            cursor.execute(
-                """
-                CREATE INDEX IF NOT EXISTS idx_memory_items_kind
-                ON memory_items (kind)
-                """
-            )
-            cursor.execute(
-                """
-                CREATE INDEX IF NOT EXISTS idx_memory_items_tombstoned
-                ON memory_items (is_tombstoned)
-                """
-            )
-            cursor.execute(
-                """
-                CREATE INDEX IF NOT EXISTS idx_memory_events_timestamp
-                ON memory_events (timestamp)
-                """
-            )
-            cursor.execute(
-                """
-                CREATE INDEX IF NOT EXISTS idx_memory_events_operation
-                ON memory_events (operation)
-                """
-            )
-            cursor.execute(
-                """
-                CREATE INDEX IF NOT EXISTS idx_memory_events_actor
-                ON memory_events (actor)
-                """
-            )
-            cursor.execute(
-                """
-                CREATE INDEX IF NOT EXISTS idx_memory_events_related_run
-                ON memory_events (related_run_id)
-                """
-            )
+            for _, statement in MEMORY_INDEX_DEFINITIONS:
+                cursor.execute(statement)
             connection.commit()
 
     def list_namespaces(self) -> list[MemoryNamespaceSummary]:

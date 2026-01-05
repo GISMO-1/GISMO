@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Iterator
 from uuid import UUID, uuid4
 
+from gismo.cli import memory_doctor as memory_doctor_cli
 from gismo.cli import memory_snapshot as memory_snapshot_cli
 from gismo.cli.operator import (
     make_idempotency_key,
@@ -3727,6 +3728,14 @@ def _handle_memory_delete(args: argparse.Namespace) -> None:
     run_memory_delete(args)
 
 
+def _handle_memory_doctor_check(args: argparse.Namespace) -> None:
+    memory_doctor_cli.run_memory_doctor_check(args)
+
+
+def _handle_memory_doctor_repair(args: argparse.Namespace) -> None:
+    memory_doctor_cli.run_memory_doctor_repair(args)
+
+
 def _handle_memory_snapshot_export(args: argparse.Namespace) -> None:
     memory_snapshot_cli.run_memory_snapshot_export(args, _snapshot_dependencies())
 
@@ -4944,6 +4953,111 @@ def build_parser() -> argparse.ArgumentParser:
         help="Optional policy file path for audit hashing",
     )
     memory_retention_clear_parser.set_defaults(handler=_handle_memory_retention_clear)
+
+    memory_doctor_parser = memory_subparsers.add_parser(
+        "doctor",
+        help="Diagnose and repair memory database issues",
+        parents=[db_parent_optional],
+    )
+    memory_doctor_subparsers = memory_doctor_parser.add_subparsers(
+        dest="memory_doctor_command",
+        required=True,
+    )
+    memory_doctor_check_parser = memory_doctor_subparsers.add_parser(
+        "check",
+        help="Run read-only diagnostics",
+        parents=[db_parent_optional],
+    )
+    memory_doctor_check_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Output JSON",
+    )
+    memory_doctor_check_parser.add_argument(
+        "--policy",
+        default=None,
+        help="Optional policy file path for audit hashing",
+    )
+    memory_doctor_check_parser.set_defaults(handler=_handle_memory_doctor_check)
+
+    memory_doctor_repair_parser = memory_doctor_subparsers.add_parser(
+        "repair",
+        help="Apply selected memory repairs",
+        parents=[db_parent_optional],
+    )
+    memory_doctor_repair_parser.add_argument(
+        "--vacuum",
+        action="store_true",
+        help="Run VACUUM + ANALYZE",
+    )
+    memory_doctor_repair_parser.add_argument(
+        "--optimize",
+        action="store_true",
+        help="Alias for --vacuum",
+    )
+    memory_doctor_repair_parser.add_argument(
+        "--reindex",
+        action="store_true",
+        help="Run REINDEX",
+    )
+    memory_doctor_repair_parser.add_argument(
+        "--rebuild-indexes",
+        action="store_true",
+        help="Recreate missing memory indexes",
+    )
+    memory_doctor_repair_parser.add_argument(
+        "--enforce-foreign-keys",
+        action="store_true",
+        help="Check foreign_keys pragma before repair",
+    )
+    memory_doctor_repair_parser.add_argument(
+        "--set-foreign-keys-on",
+        action="store_true",
+        help="Enable foreign_keys when enforcing",
+    )
+    memory_doctor_repair_parser.add_argument(
+        "--purge-tombstones",
+        action="store_true",
+        help="Delete tombstoned items older than a cutoff",
+    )
+    memory_doctor_repair_parser.add_argument(
+        "--namespace",
+        default=None,
+        help="Namespace for tombstone purge",
+    )
+    memory_doctor_repair_parser.add_argument(
+        "--older-than-seconds",
+        type=int,
+        default=None,
+        help="Minimum age in seconds for purge candidates",
+    )
+    memory_doctor_repair_parser.add_argument(
+        "--limit",
+        type=int,
+        default=1000,
+        help="Maximum tombstones to delete per invocation",
+    )
+    memory_doctor_repair_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Plan repairs without applying changes",
+    )
+    memory_doctor_repair_parser.add_argument(
+        "--yes",
+        action="store_true",
+        help="Skip confirmation prompts for repairs",
+    )
+    memory_doctor_repair_parser.add_argument(
+        "--non-interactive",
+        action="store_true",
+        help="Fail closed instead of prompting for confirmation",
+    )
+    memory_doctor_repair_parser.add_argument(
+        "--policy",
+        default=None,
+        help="Optional policy file path for audit hashing",
+    )
+    memory_doctor_repair_parser.set_defaults(handler=_handle_memory_doctor_repair)
 
     memory_snapshot_parser = memory_subparsers.add_parser(
         "snapshot",

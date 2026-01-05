@@ -12,7 +12,10 @@ from unittest import mock
 
 from gismo.cli import main as cli_main
 from gismo.memory import policy_hash_for_path
-from gismo.memory.store import put_item as memory_put_item
+from gismo.memory.store import (
+    create_profile as memory_create_profile,
+    put_item as memory_put_item,
+)
 
 
 class DbHandleGuardrailsTest(unittest.TestCase):
@@ -84,6 +87,37 @@ class DbHandleGuardrailsTest(unittest.TestCase):
                 self._run_ask(
                     db_path,
                     ["--memory", "--dry-run", "remember", "context"],
+                    response,
+                )
+                gc.collect()
+                self._assert_db_deletable(db_path)
+
+    def test_ask_memory_profile_dry_run_releases_db_handle(self) -> None:
+        response = json.dumps(
+            {
+                "intent": "recall",
+                "assumptions": [],
+                "actions": [],
+                "notes": [],
+            }
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "state.db"
+            profile = memory_create_profile(
+                str(db_path),
+                name="profile",
+                description=None,
+                include_namespaces=["global"],
+                exclude_namespaces=None,
+                include_kinds=["fact"],
+                exclude_kinds=None,
+                max_items=None,
+            )
+            with warnings.catch_warnings():
+                warnings.simplefilter("error", ResourceWarning)
+                self._run_ask(
+                    db_path,
+                    ["--memory-profile", profile.name, "--dry-run", "remember", "context"],
                     response,
                 )
                 gc.collect()

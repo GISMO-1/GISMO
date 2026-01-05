@@ -12,9 +12,15 @@ from unittest import mock
 from gismo.cli import main as cli_main
 from gismo.core.models import EVENT_TYPE_ASK_FAILED, EVENT_TYPE_LLM_PLAN
 from gismo.core.state import StateStore
-from gismo.memory.store import put_item as memory_put_item
-from gismo.memory.store import retire_namespace as memory_retire_namespace
-from gismo.memory.store import tombstone_item as memory_tombstone_item
+from gismo.memory.store import (
+    create_profile as memory_create_profile,
+    policy_hash_for_path as memory_policy_hash_for_path,
+    retire_namespace as memory_retire_namespace,
+    retire_profile as memory_retire_profile,
+    tombstone_item as memory_tombstone_item,
+    upsert_item_with_timestamps as memory_upsert_item_with_timestamps,
+    put_item as memory_put_item,
+)
 
 
 class AskCliTest(unittest.TestCase):
@@ -203,6 +209,159 @@ class AskCliTest(unittest.TestCase):
             suggestions = plan.get("memory_suggestions")
             self.assertEqual(len(suggestions), 1)
             self.assertEqual(suggestions[0]["key"], "default_model")
+
+    def test_ask_uses_memory_profile_filters_and_records_audit(self) -> None:
+        response = json.dumps(
+            {
+                "intent": "recall",
+                "assumptions": [],
+                "actions": [],
+                "notes": [],
+            }
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = str(Path(tmpdir) / "state.db")
+            policy_hash = memory_policy_hash_for_path(None)
+            memory_upsert_item_with_timestamps(
+                db_path,
+                namespace="global",
+                key="alpha",
+                kind="fact",
+                value="alpha",
+                tags=None,
+                confidence="high",
+                source="operator",
+                ttl_seconds=None,
+                is_tombstoned=False,
+                created_at="2024-01-01T00:00:00+00:00",
+                updated_at="2024-01-03T00:00:00+00:00",
+                update_created_at=True,
+                actor="test",
+                policy_hash=policy_hash,
+                operation="put",
+            )
+            memory_upsert_item_with_timestamps(
+                db_path,
+                namespace="global",
+                key="beta",
+                kind="note",
+                value="beta",
+                tags=None,
+                confidence="high",
+                source="operator",
+                ttl_seconds=None,
+                is_tombstoned=False,
+                created_at="2024-01-01T00:00:00+00:00",
+                updated_at="2024-01-02T00:00:00+00:00",
+                update_created_at=True,
+                actor="test",
+                policy_hash=policy_hash,
+                operation="put",
+            )
+            profile = memory_create_profile(
+                db_path,
+                name="operator-profile",
+                description="Operator default",
+                include_namespaces=["global"],
+                exclude_namespaces=None,
+                include_kinds=["fact", "preference"],
+                exclude_kinds=None,
+                max_items=1,
+            )
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "GISMO_OLLAMA_MODEL": "",
+                    "GISMO_OLLAMA_TIMEOUT_S": "",
+                    "GISMO_OLLAMA_URL": "",
+                    "GISMO_LLM_MODEL": "",
+                    "OLLAMA_HOST": "",
+                },
+                clear=False,
+            ):
+                with mock.patch.object(cli_main, "ollama_chat", return_value=response):
+                    cli_main.run_ask(
+                        db_path,
+                        "recall context",
+                        model=None,
+                        host=None,
+                        timeout_s=None,
+                        enqueue=False,
+                        dry_run=True,
+                        max_actions=10,
+                        yes=False,
+                        explain=False,
+                        memory_profile=profile.name,
+                    )
+            state_store = StateStore(db_path)
+            event = state_store.list_events()[0]
+            payload = event.json_payload
+            assert payload is not None
+            injected_keys = payload.get("memory_injected_keys")
+            self.assertEqual(injected_keys, [{"namespace": "global", "key": "alpha"}])
+            profile_payload = payload.get("memory_profile") or {}
+            self.assertEqual(profile_payload.get("profile_id"), profile.profile_id)
+            with sqlite3.connect(db_path) as connection:
+                row = connection.execute(
+                    "SELECT request_json FROM memory_events "
+                    "WHERE operation = ? "
+                    "ORDER BY timestamp DESC "
+                    "LIMIT 1",
+                    ("memory.profile.use",),
+                ).fetchone()
+            self.assertIsNotNone(row)
+            request = json.loads(row[0])
+            self.assertEqual(request.get("profile_id"), profile.profile_id)
+
+    def test_ask_rejects_retired_memory_profile(self) -> None:
+        response = json.dumps(
+            {
+                "intent": "recall",
+                "assumptions": [],
+                "actions": [],
+                "notes": [],
+            }
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = str(Path(tmpdir) / "state.db")
+            profile = memory_create_profile(
+                db_path,
+                name="retired-profile",
+                description=None,
+                include_namespaces=["global"],
+                exclude_namespaces=None,
+                include_kinds=["fact"],
+                exclude_kinds=None,
+                max_items=None,
+            )
+            memory_retire_profile(db_path, profile_id=profile.profile_id)
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "GISMO_OLLAMA_MODEL": "",
+                    "GISMO_OLLAMA_TIMEOUT_S": "",
+                    "GISMO_OLLAMA_URL": "",
+                    "GISMO_LLM_MODEL": "",
+                    "OLLAMA_HOST": "",
+                },
+                clear=False,
+            ):
+                with mock.patch.object(cli_main, "ollama_chat", return_value=response):
+                    with self.assertRaises(SystemExit) as exc:
+                        cli_main.run_ask(
+                            db_path,
+                            "recall context",
+                            model=None,
+                            host=None,
+                            timeout_s=None,
+                            enqueue=False,
+                            dry_run=True,
+                            max_actions=10,
+                            yes=False,
+                            explain=False,
+                            memory_profile=profile.name,
+                        )
+            self.assertEqual(exc.exception.code, 2)
 
     def test_ask_invalid_memory_suggestions_are_dropped_and_capped(self) -> None:
         response = json.dumps(

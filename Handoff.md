@@ -172,10 +172,10 @@ Plan assessment gate:
 LATEST UPDATE (OPERATOR NOTES)
 
 Status:
-- Added memory doctor diagnostics and repair tooling (check/repair) with policy-gated, explicit fixes.
+- Added memory profiles for read-only memory visibility, plus profile-aware ask/agent injection and audit events.
 
 Next steps:
-- Decide whether to ship default policy entries for memory doctor repair actions in controlled environments.
+- Decide whether to ship default policy entries for memory profile create/retire actions.
 
 Tests run:
 - python scripts/verify.py

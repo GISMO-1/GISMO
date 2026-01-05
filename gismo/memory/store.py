@@ -17,6 +17,7 @@ MEMORY_TABLE_NAMES = (
     "memory_events",
     "memory_namespaces",
     "memory_retention_rules",
+    "memory_profiles",
 )
 MEMORY_INDEX_DEFINITIONS = (
     (
@@ -73,6 +74,13 @@ MEMORY_INDEX_DEFINITIONS = (
         """
         CREATE INDEX IF NOT EXISTS idx_memory_events_related_run
         ON memory_events (related_run_id)
+        """,
+    ),
+    (
+        "idx_memory_profiles_name",
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_profiles_name
+        ON memory_profiles (name)
         """,
     ),
 )
@@ -142,6 +150,20 @@ class MemoryRetentionPlan:
     evaluated_at: str
     ttl_cutoff: str | None
     shortfall: int
+
+
+@dataclass(frozen=True)
+class MemoryProfile:
+    profile_id: str
+    name: str
+    description: str | None
+    include_namespaces: list[str]
+    exclude_namespaces: list[str]
+    include_kinds: list[str]
+    exclude_kinds: list[str]
+    max_items: Optional[int]
+    created_at: str
+    retired_at: str | None
 
 
 class MemoryStore:
@@ -240,6 +262,22 @@ class MemoryStore:
                     policy_source TEXT NOT NULL,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
+                )
+                """
+            )
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS memory_profiles (
+                    profile_id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL UNIQUE,
+                    description TEXT NULL,
+                    include_namespaces_json TEXT NULL,
+                    exclude_namespaces_json TEXT NULL,
+                    include_kinds_json TEXT NULL,
+                    exclude_kinds_json TEXT NULL,
+                    max_items INTEGER NULL,
+                    created_at TEXT NOT NULL,
+                    retired_at TEXT NULL
                 )
                 """
             )
@@ -380,6 +418,185 @@ class MemoryStore:
             if not row:
                 return None
             return _row_to_retention_detail(row)
+
+    def list_profiles(self) -> list[MemoryProfile]:
+        sql = "SELECT * FROM memory_profiles ORDER BY name ASC"
+        with self._connection() as connection:
+            rows = connection.cursor().execute(sql).fetchall()
+            return [_row_to_profile(row) for row in rows]
+
+    def get_profile(
+        self,
+        *,
+        profile_id: str | None = None,
+        name: str | None = None,
+    ) -> MemoryProfile | None:
+        if bool(profile_id) == bool(name):
+            raise ValueError("Provide exactly one of profile_id or name")
+        sql = "SELECT * FROM memory_profiles WHERE profile_id = ?" if profile_id else (
+            "SELECT * FROM memory_profiles WHERE name = ?"
+        )
+        value = profile_id or name
+        with self._connection() as connection:
+            row = connection.cursor().execute(sql, (value,)).fetchone()
+            if not row:
+                return None
+            return _row_to_profile(row)
+
+    def get_profile_by_selector(self, selector: str) -> MemoryProfile | None:
+        sql = "SELECT * FROM memory_profiles WHERE profile_id = ?"
+        with self._connection() as connection:
+            cursor = connection.cursor()
+            row = cursor.execute(sql, (selector,)).fetchone()
+            if not row:
+                row = cursor.execute(
+                    "SELECT * FROM memory_profiles WHERE name = ?",
+                    (selector,),
+                ).fetchone()
+            if not row:
+                return None
+            return _row_to_profile(row)
+
+    def create_profile(
+        self,
+        *,
+        name: str,
+        description: str | None,
+        include_namespaces: list[str] | None,
+        exclude_namespaces: list[str] | None,
+        include_kinds: list[str] | None,
+        exclude_kinds: list[str] | None,
+        max_items: Optional[int],
+        created_at: Optional[str] = None,
+    ) -> MemoryProfile:
+        created_at = created_at or _utc_now().isoformat()
+        profile_id = str(uuid4())
+        include_namespaces_json = _serialize_profile_list(include_namespaces)
+        exclude_namespaces_json = _serialize_profile_list(exclude_namespaces)
+        include_kinds_json = _serialize_profile_list(include_kinds)
+        exclude_kinds_json = _serialize_profile_list(exclude_kinds)
+        with self._connection() as connection:
+            cursor = connection.cursor()
+            existing = cursor.execute(
+                "SELECT profile_id FROM memory_profiles WHERE name = ?",
+                (name,),
+            ).fetchone()
+            if existing:
+                raise ValueError(f"Memory profile already exists: {name}")
+            cursor.execute(
+                """
+                INSERT INTO memory_profiles (
+                    profile_id,
+                    name,
+                    description,
+                    include_namespaces_json,
+                    exclude_namespaces_json,
+                    include_kinds_json,
+                    exclude_kinds_json,
+                    max_items,
+                    created_at,
+                    retired_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+                """,
+                (
+                    profile_id,
+                    name,
+                    description,
+                    include_namespaces_json,
+                    exclude_namespaces_json,
+                    include_kinds_json,
+                    exclude_kinds_json,
+                    max_items,
+                    created_at,
+                ),
+            )
+            connection.commit()
+        profile = self.get_profile(profile_id=profile_id)
+        if profile is None:
+            raise RuntimeError("Failed to load memory profile after create")
+        return profile
+
+    def retire_profile(
+        self,
+        *,
+        profile_id: str,
+        retired_at: Optional[str] = None,
+    ) -> tuple[MemoryProfile, bool]:
+        retired_at = retired_at or _utc_now().isoformat()
+        with self._connection() as connection:
+            cursor = connection.cursor()
+            existing = cursor.execute(
+                "SELECT retired_at FROM memory_profiles WHERE profile_id = ?",
+                (profile_id,),
+            ).fetchone()
+            if not existing:
+                raise ValueError(f"Memory profile not found: {profile_id}")
+            if existing["retired_at"]:
+                profile = self.get_profile(profile_id=profile_id)
+                if profile is None:
+                    raise RuntimeError("Failed to load memory profile after retire")
+                return profile, False
+            cursor.execute(
+                "UPDATE memory_profiles SET retired_at = ? WHERE profile_id = ?",
+                (retired_at, profile_id),
+            )
+            connection.commit()
+        profile = self.get_profile(profile_id=profile_id)
+        if profile is None:
+            raise RuntimeError("Failed to load memory profile after retire")
+        return profile, True
+
+    def list_retired_namespaces(self) -> list[str]:
+        sql = """
+            SELECT namespace
+            FROM memory_namespaces
+            WHERE retired_at IS NOT NULL
+            ORDER BY namespace ASC
+        """
+        with self._connection() as connection:
+            rows = connection.cursor().execute(sql).fetchall()
+            return [row["namespace"] for row in rows]
+
+    def list_profile_items(
+        self,
+        *,
+        profile: MemoryProfile,
+        limit: int | None = None,
+    ) -> list[MemoryItem]:
+        if _profile_is_empty(profile):
+            return []
+        filters: list[str] = ["is_tombstoned = 0"]
+        params: list[Any] = []
+        if profile.include_namespaces:
+            placeholders = ",".join("?" for _ in profile.include_namespaces)
+            filters.append(f"namespace IN ({placeholders})")
+            params.extend(profile.include_namespaces)
+        if profile.exclude_namespaces:
+            placeholders = ",".join("?" for _ in profile.exclude_namespaces)
+            filters.append(f"namespace NOT IN ({placeholders})")
+            params.extend(profile.exclude_namespaces)
+        if profile.include_kinds:
+            placeholders = ",".join("?" for _ in profile.include_kinds)
+            filters.append(f"kind IN ({placeholders})")
+            params.extend(profile.include_kinds)
+        if profile.exclude_kinds:
+            placeholders = ",".join("?" for _ in profile.exclude_kinds)
+            filters.append(f"kind NOT IN ({placeholders})")
+            params.extend(profile.exclude_kinds)
+        where_clause = "WHERE " + " AND ".join(filters)
+        sql = (
+            "SELECT * FROM memory_items "
+            f"{where_clause} "
+            "ORDER BY updated_at DESC, namespace ASC, key ASC, id ASC"
+        )
+        effective_limit = _profile_effective_limit(profile.max_items, limit)
+        if effective_limit is not None:
+            sql = f"{sql} LIMIT ?"
+            params.append(effective_limit)
+        with self._connection() as connection:
+            rows = connection.cursor().execute(sql, params).fetchall()
+            return [_row_to_item(row) for row in rows]
 
     def set_retention_rule(
         self,
@@ -1272,6 +1489,69 @@ def list_prompt_items(
     return MemoryStore(db_path).list_prompt_items(limit=limit)
 
 
+def list_profiles(db_path: str) -> list[MemoryProfile]:
+    return MemoryStore(db_path).list_profiles()
+
+
+def get_profile(
+    db_path: str,
+    *,
+    profile_id: str | None = None,
+    name: str | None = None,
+) -> MemoryProfile | None:
+    return MemoryStore(db_path).get_profile(profile_id=profile_id, name=name)
+
+
+def get_profile_by_selector(db_path: str, selector: str) -> MemoryProfile | None:
+    return MemoryStore(db_path).get_profile_by_selector(selector)
+
+
+def create_profile(
+    db_path: str,
+    *,
+    name: str,
+    description: str | None,
+    include_namespaces: list[str] | None,
+    exclude_namespaces: list[str] | None,
+    include_kinds: list[str] | None,
+    exclude_kinds: list[str] | None,
+    max_items: Optional[int],
+    created_at: Optional[str] = None,
+) -> MemoryProfile:
+    return MemoryStore(db_path).create_profile(
+        name=name,
+        description=description,
+        include_namespaces=include_namespaces,
+        exclude_namespaces=exclude_namespaces,
+        include_kinds=include_kinds,
+        exclude_kinds=exclude_kinds,
+        max_items=max_items,
+        created_at=created_at,
+    )
+
+
+def retire_profile(
+    db_path: str,
+    *,
+    profile_id: str,
+    retired_at: Optional[str] = None,
+) -> tuple[MemoryProfile, bool]:
+    return MemoryStore(db_path).retire_profile(profile_id=profile_id, retired_at=retired_at)
+
+
+def list_retired_namespaces(db_path: str) -> list[str]:
+    return MemoryStore(db_path).list_retired_namespaces()
+
+
+def list_profile_items(
+    db_path: str,
+    *,
+    profile: MemoryProfile,
+    limit: int | None = None,
+) -> list[MemoryItem]:
+    return MemoryStore(db_path).list_profile_items(profile=profile, limit=limit)
+
+
 def list_namespaces(db_path: str) -> list[MemoryNamespaceSummary]:
     return MemoryStore(db_path).list_namespaces()
 
@@ -1597,6 +1877,56 @@ def _row_to_retention_detail(row: sqlite3.Row) -> MemoryRetentionDetail:
         tombstone_count=int(row["tombstone_count"]),
         last_write_at=row["last_write_at"],
     )
+
+
+def _row_to_profile(row: sqlite3.Row) -> MemoryProfile:
+    return MemoryProfile(
+        profile_id=row["profile_id"],
+        name=row["name"],
+        description=row["description"],
+        include_namespaces=_deserialize_profile_list(row["include_namespaces_json"]),
+        exclude_namespaces=_deserialize_profile_list(row["exclude_namespaces_json"]),
+        include_kinds=_deserialize_profile_list(row["include_kinds_json"]),
+        exclude_kinds=_deserialize_profile_list(row["exclude_kinds_json"]),
+        max_items=row["max_items"],
+        created_at=row["created_at"],
+        retired_at=row["retired_at"],
+    )
+
+
+def _serialize_profile_list(values: list[str] | None) -> str | None:
+    if not values:
+        return None
+    return json.dumps(sorted(set(values)), ensure_ascii=False, sort_keys=True)
+
+
+def _deserialize_profile_list(value: str | None) -> list[str]:
+    if not value:
+        return []
+    parsed = json.loads(value)
+    if not isinstance(parsed, list):
+        raise ValueError("Profile list must be a JSON list")
+    return [str(item) for item in parsed if str(item)]
+
+
+def _profile_is_empty(profile: MemoryProfile) -> bool:
+    if profile.include_namespaces:
+        return False
+    if profile.exclude_namespaces:
+        return False
+    if profile.include_kinds:
+        return False
+    if profile.exclude_kinds:
+        return False
+    return profile.max_items is None
+
+
+def _profile_effective_limit(max_items: int | None, limit: int | None) -> int | None:
+    if max_items is not None and limit is not None:
+        return min(max_items, limit)
+    if max_items is not None:
+        return max_items
+    return limit
 
 
 def _serialize_retention_rule(rule: MemoryRetentionRule) -> dict[str, object]:

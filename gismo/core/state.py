@@ -61,6 +61,8 @@ class MemoryProvenance:
             return True
         if self.injected.get("cap_items") is not None or self.injected.get("cap_bytes") is not None:
             return True
+        if self.injected.get("profile"):
+            return True
         if self.suggested.get("count"):
             return True
         if self.suggested.get("items"):
@@ -1465,6 +1467,7 @@ def _build_memory_provenance(
     injected_bytes = None
     cap_items = None
     cap_bytes = None
+    profile = None
     if payload:
         injected_keys = payload.get("memory_injected_keys") or []
         if isinstance(payload.get("memory_injected_count"), int):
@@ -1477,6 +1480,8 @@ def _build_memory_provenance(
             cap_items = payload["memory_injected_cap_items"]
         if isinstance(payload.get("memory_injected_cap_bytes"), int):
             cap_bytes = payload["memory_injected_cap_bytes"]
+        if payload.get("memory_profile"):
+            profile = payload.get("memory_profile")
     namespaces = sorted(
         {
             entry.get("namespace")
@@ -1490,6 +1495,7 @@ def _build_memory_provenance(
         "bytes": injected_bytes,
         "cap_items": cap_items,
         "cap_bytes": cap_bytes,
+        "profile": profile,
     }
 
     suggestions = []

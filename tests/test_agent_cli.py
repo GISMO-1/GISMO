@@ -11,7 +11,12 @@ from unittest import mock
 from gismo.cli import main as cli_main
 from gismo.core.models import QueueStatus
 from gismo.core.state import StateStore
-from gismo.memory.store import retire_namespace as memory_retire_namespace
+from gismo.memory.store import (
+    create_profile as memory_create_profile,
+    policy_hash_for_path as memory_policy_hash_for_path,
+    retire_namespace as memory_retire_namespace,
+    upsert_item_with_timestamps as memory_upsert_item_with_timestamps,
+)
 
 
 class AgentCliTest(unittest.TestCase):
@@ -197,6 +202,96 @@ class AgentCliTest(unittest.TestCase):
                     "SELECT COUNT(*) FROM memory_items"
                 ).fetchone()[0]
             self.assertEqual(item_count, 0)
+
+    def test_agent_uses_memory_profile_filters_and_records_audit(self) -> None:
+        response = json.dumps(
+            {
+                "intent": "recall",
+                "assumptions": [],
+                "actions": [],
+                "notes": [],
+            }
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = str(Path(tmpdir) / "state.db")
+            policy_hash = memory_policy_hash_for_path(None)
+            memory_upsert_item_with_timestamps(
+                db_path,
+                namespace="global",
+                key="alpha",
+                kind="fact",
+                value="alpha",
+                tags=None,
+                confidence="high",
+                source="operator",
+                ttl_seconds=None,
+                is_tombstoned=False,
+                created_at="2024-01-01T00:00:00+00:00",
+                updated_at="2024-01-03T00:00:00+00:00",
+                update_created_at=True,
+                actor="test",
+                policy_hash=policy_hash,
+                operation="put",
+            )
+            memory_upsert_item_with_timestamps(
+                db_path,
+                namespace="global",
+                key="beta",
+                kind="note",
+                value="beta",
+                tags=None,
+                confidence="high",
+                source="operator",
+                ttl_seconds=None,
+                is_tombstoned=False,
+                created_at="2024-01-01T00:00:00+00:00",
+                updated_at="2024-01-02T00:00:00+00:00",
+                update_created_at=True,
+                actor="test",
+                policy_hash=policy_hash,
+                operation="put",
+            )
+            profile = memory_create_profile(
+                db_path,
+                name="agent-profile",
+                description=None,
+                include_namespaces=["global"],
+                exclude_namespaces=None,
+                include_kinds=["fact"],
+                exclude_kinds=None,
+                max_items=1,
+            )
+            with mock.patch.dict(os.environ, self._mock_env(), clear=False):
+                with mock.patch.object(cli_main, "ollama_chat", return_value=response):
+                    cli_main.run_agent(
+                        db_path,
+                        "recall context",
+                        policy_path=None,
+                        once=True,
+                        max_cycles=1,
+                        yes=False,
+                        dry_run=True,
+                        memory_profile=profile.name,
+                    )
+            state_store = StateStore(db_path)
+            event = state_store.list_events()[0]
+            payload = event.json_payload
+            assert payload is not None
+            injected_keys = payload.get("memory_injected_keys")
+            self.assertEqual(injected_keys, [{"namespace": "global", "key": "alpha"}])
+            profile_payload = payload.get("memory_profile") or {}
+            self.assertEqual(profile_payload.get("profile_id"), profile.profile_id)
+            with sqlite3.connect(db_path) as connection:
+                row = connection.execute(
+                    "SELECT request_json FROM memory_events "
+                    "WHERE operation = ? "
+                    "ORDER BY timestamp DESC "
+                    "LIMIT 1",
+                    ("memory.profile.use",),
+                ).fetchone()
+            self.assertIsNotNone(row)
+            request = json.loads(row[0])
+            self.assertEqual(request.get("profile_id"), profile.profile_id)
 
     def test_agent_apply_memory_suggestions_requires_confirmation(self) -> None:
         response = json.dumps(

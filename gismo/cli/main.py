@@ -208,7 +208,8 @@ def _normalize_llm_plan(plan: dict, max_actions: int) -> dict:
     if original_action_count > 12:
         notes.append(
             "Too many actions "
-            f"({original_action_count}). Please ask for 12 or fewer, or request batching."
+            f"({original_action_count}). This plan is high risk and requires confirmation to "
+            "enqueue; consider batching into 12 or fewer steps."
         )
     if original_action_count > max_actions:
         notes.append(

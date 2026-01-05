@@ -36,7 +36,6 @@ In progress:
 - Phase 2 (Control & Guardrails): ~75%
 
 Planned:
-- Phase 3 (Memory & Context)
 - Phase 4 (Interactive GISMO)
 
 -------------------------------------------------------------------------------
@@ -172,14 +171,12 @@ Plan assessment gate:
 LATEST UPDATE (OPERATOR NOTES)
 
 Status:
-- Added SQLite-backed memory primitives with CLI support (put/get/search/delete) and audit events.
-- Memory operations are deterministic, tombstone-aware, and include end-to-end CLI tests.
-- Updated CLI documentation with memory command examples.
+- Reverted memory-related documentation additions from the merged implementation.
+- Restored README and handoff notes to reflect governance discipline.
 
 Next steps:
-- Wire policy-aware confirmation gates for persistent memory namespaces.
-- Consider adding memory read/write hooks to the planner once policy enforcement is defined.
-- Monitor Windows locking regressions for memory CLI interactions.
+- Reintroduce memory documentation only when explicitly approved for the release scope.
+- Keep doc updates limited to approved changes.
 
 Tests run:
 - python scripts/verify.py

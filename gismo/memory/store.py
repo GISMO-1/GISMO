@@ -33,12 +33,14 @@ class MemoryItem:
 class MemoryStore:
     def __init__(self, db_path: str) -> None:
         self.db_path = db_path
+        self._open_connections: set[sqlite3.Connection] = set()
         self._init_db()
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.db_path)
         connection.row_factory = sqlite3.Row
         self._apply_pragmas(connection)
+        self._open_connections.add(connection)
         return connection
 
     def _apply_pragmas(self, connection: sqlite3.Connection) -> None:
@@ -57,7 +59,17 @@ class MemoryStore:
         try:
             yield connection
         finally:
+            self._close_connection(connection)
+
+    def _close_connection(self, connection: sqlite3.Connection) -> None:
+        try:
             connection.close()
+        finally:
+            self._open_connections.discard(connection)
+
+    def close(self) -> None:
+        for connection in list(self._open_connections):
+            self._close_connection(connection)
 
     def _init_db(self) -> None:
         Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)

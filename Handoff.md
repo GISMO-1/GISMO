@@ -171,19 +171,15 @@ Plan assessment gate:
 LATEST UPDATE (OPERATOR NOTES)
 
 Status:
-- Added ask --apply-memory-suggestions to apply vetted memory suggestions with policy + confirmation gates.
-- Linked applied memory events back to the originating ask audit event for traceability.
-- Added ask audit metadata for applied/skipped/denied memory suggestions.
+- Added explicit StateStore/MemoryStore close paths in CLI flows to avoid SQLite handle leaks on Windows.
+- Updated Ollama client payload test to force python transport for request capture.
 
 Next steps:
-- Extend policy samples if new memory namespaces are introduced.
-- Validate memory suggestion workflows with operator review cycles.
-- Re-run Windows validation on a native host before release tagging.
-- Consider sample workflows for operator-reviewed memory suggestions.
+- Run Windows CI or native Windows smoke tests to confirm SQLite handles close cleanly.
+- Re-run full verify.py and pytest on Windows to confirm no resource warnings.
 
 Tests run:
 - python scripts/verify.py
-- pytest -q
 
 Operator examples:
 - python -m gismo.cli.main --db .\tmp\dev.db runs list

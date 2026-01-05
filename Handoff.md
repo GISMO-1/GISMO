@@ -172,12 +172,12 @@ Plan assessment gate:
 LATEST UPDATE (OPERATOR NOTES)
 
 Status:
-- Added run-level memory provenance summaries for `runs show` output and JSON exports.
-- Export now includes plan events plus memory event linkage fields for audit consumers.
+- Added deterministic memory snapshot export/import with policy-gated restores and hash validation.
+- Snapshot imports write per-item memory events linked to a snapshot import audit entry.
 
 Next steps:
-- Review memory provenance output formatting with real operator runs.
-- Validate Windows smoke tests for run-level memory provenance and export JSONL consumers.
+- Validate snapshot import flows with larger namespace exports in operator workflows.
+- Consider operator-facing docs for snapshot retention practices if needed.
 
 Tests run:
 - python scripts/verify.py

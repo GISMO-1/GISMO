@@ -171,12 +171,9 @@ Plan assessment gate:
 LATEST UPDATE (OPERATOR NOTES)
 
 Status:
-- Ollama payload unit test now isolates outgoing payload assertions with a stubbed response.
-- Ollama JSON parsing hardens against fenced output and reports richer errors.
-- Ollama-related tests are hermetic by default with an optional integration gate.
-- Ask CLI too-many-actions warning now clarifies confirmation-required behavior.
-- CLI `--db` flag now respects both pre- and post-subcommand placement for queue and other commands.
-- Added a Windows-only CLI regression test that verifies SQLite DB handles are released after queue stats.
+- Operator commands now include shell: mapped to run_shell with deny-by-default policy gating.
+- Shell allowlist matching is exact and Windows builtins execute via cmd.exe /c.
+- Added operator shell parsing/policy tests plus a Windows-only builtin echo regression test.
 
 Next steps:
 - Make planner prompts policy-aware (still pending).
@@ -185,7 +182,7 @@ Next steps:
 - Watch for any remaining CLI flag ordering regressions as new subcommands land.
 
 Tests run:
-- Not run (not requested).
+- python scripts/verify.py
 
 -------------------------------------------------------------------------------
 

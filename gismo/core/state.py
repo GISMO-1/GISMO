@@ -531,6 +531,17 @@ class StateStore:
             return None
         return self._row_to_run(row)
 
+    def list_runs(self, limit: int = 25, newest_first: bool = True) -> Iterable[Run]:
+        if limit <= 0:
+            raise ValueError("limit must be > 0")
+        order = "DESC" if newest_first else "ASC"
+        with self._connection() as connection:
+            rows = connection.execute(
+                f"SELECT * FROM runs ORDER BY created_at {order} LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return [self._row_to_run(row) for row in rows]
+
     def enqueue_command(
         self,
         command_text: str,

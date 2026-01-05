@@ -487,6 +487,156 @@ class MemoryStore:
             return None
         return _row_to_item(row)
 
+    def fetch_item_raw(self, *, namespace: str, key: str) -> MemoryItem | None:
+        with self._connection() as connection:
+            return self._fetch_item(
+                connection,
+                namespace=namespace,
+                key=key,
+                include_tombstoned=True,
+            )
+
+    def list_items_for_snapshot(
+        self,
+        *,
+        namespace: Optional[str],
+        namespace_prefix: Optional[str],
+    ) -> list[MemoryItem]:
+        filters: list[str] = []
+        params: list[Any] = []
+        if namespace:
+            filters.append("namespace = ?")
+            params.append(namespace)
+        elif namespace_prefix is not None:
+            filters.append("namespace LIKE ?")
+            params.append(f"{namespace_prefix}%")
+        where_clause = ""
+        if filters:
+            where_clause = "WHERE " + " AND ".join(filters)
+        sql = (
+            "SELECT * FROM memory_items "
+            f"{where_clause} "
+            "ORDER BY namespace ASC, key ASC"
+        )
+        with self._connection() as connection:
+            cursor = connection.cursor()
+            rows = cursor.execute(sql, params).fetchall()
+            return [_row_to_item(row) for row in rows]
+
+    def upsert_item_with_timestamps(
+        self,
+        *,
+        namespace: str,
+        key: str,
+        kind: str,
+        value: Any,
+        tags: Optional[list[str]],
+        confidence: str,
+        source: str,
+        ttl_seconds: Optional[int],
+        is_tombstoned: bool,
+        created_at: str,
+        updated_at: str,
+        update_created_at: bool,
+        actor: str,
+        policy_hash: str,
+        operation: str,
+        result_meta_extra: Optional[dict[str, Any]] = None,
+        related_run_id: Optional[str] = None,
+        related_ask_event_id: Optional[str] = None,
+    ) -> MemoryItem:
+        value_json = json.dumps(value, ensure_ascii=False, sort_keys=True)
+        tags_json = json.dumps(tags, ensure_ascii=False, sort_keys=True) if tags else None
+        new_id = str(uuid4())
+        update_created_clause = ", created_at = excluded.created_at" if update_created_at else ""
+        with self._connection() as connection:
+            cursor = connection.cursor()
+            cursor.execute(
+                f"""
+                INSERT INTO memory_items (
+                    id,
+                    namespace,
+                    key,
+                    kind,
+                    value_json,
+                    tags_json,
+                    confidence,
+                    source,
+                    ttl_seconds,
+                    is_tombstoned,
+                    created_at,
+                    updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(namespace, key)
+                DO UPDATE SET
+                    kind = excluded.kind,
+                    value_json = excluded.value_json,
+                    tags_json = excluded.tags_json,
+                    confidence = excluded.confidence,
+                    source = excluded.source,
+                    ttl_seconds = excluded.ttl_seconds,
+                    is_tombstoned = excluded.is_tombstoned,
+                    updated_at = excluded.updated_at
+                    {update_created_clause}
+                """,
+                (
+                    new_id,
+                    namespace,
+                    key,
+                    kind,
+                    value_json,
+                    tags_json,
+                    confidence,
+                    source,
+                    ttl_seconds,
+                    int(is_tombstoned),
+                    created_at,
+                    updated_at,
+                ),
+            )
+            connection.commit()
+            item = self._fetch_item(
+                connection,
+                namespace=namespace,
+                key=key,
+                include_tombstoned=True,
+            )
+            if item is None:
+                raise RuntimeError("Failed to load memory item after upsert")
+            request = {
+                "namespace": namespace,
+                "key": key,
+                "kind": kind,
+                "value_json": value_json,
+                "tags_json": tags_json,
+                "confidence": confidence,
+                "source": source,
+                "ttl_seconds": ttl_seconds,
+                "created_at": created_at,
+                "updated_at": updated_at,
+                "is_tombstoned": is_tombstoned,
+            }
+            result_meta = {
+                "item_id": item.id,
+                "updated_at": item.updated_at,
+                "is_tombstoned": item.is_tombstoned,
+            }
+            if result_meta_extra:
+                result_meta.update(result_meta_extra)
+            append_event(
+                connection,
+                operation=operation,
+                actor=actor,
+                policy_hash=policy_hash,
+                request=request,
+                result_meta=result_meta,
+                related_run_id=related_run_id,
+                related_ask_event_id=related_ask_event_id,
+            )
+            connection.commit()
+            return item
+
 
 def put_item(
     db_path: str,
@@ -576,6 +726,66 @@ def search_items(
     )
 
 
+def list_items_for_snapshot(
+    db_path: str,
+    *,
+    namespace: Optional[str],
+    namespace_prefix: Optional[str],
+) -> list[MemoryItem]:
+    return MemoryStore(db_path).list_items_for_snapshot(
+        namespace=namespace,
+        namespace_prefix=namespace_prefix,
+    )
+
+
+def fetch_item_raw(db_path: str, *, namespace: str, key: str) -> MemoryItem | None:
+    return MemoryStore(db_path).fetch_item_raw(namespace=namespace, key=key)
+
+
+def upsert_item_with_timestamps(
+    db_path: str,
+    *,
+    namespace: str,
+    key: str,
+    kind: str,
+    value: Any,
+    tags: Optional[list[str]],
+    confidence: str,
+    source: str,
+    ttl_seconds: Optional[int],
+    is_tombstoned: bool,
+    created_at: str,
+    updated_at: str,
+    update_created_at: bool,
+    actor: str,
+    policy_hash: str,
+    operation: str,
+    result_meta_extra: Optional[dict[str, Any]] = None,
+    related_run_id: Optional[str] = None,
+    related_ask_event_id: Optional[str] = None,
+) -> MemoryItem:
+    return MemoryStore(db_path).upsert_item_with_timestamps(
+        namespace=namespace,
+        key=key,
+        kind=kind,
+        value=value,
+        tags=tags,
+        confidence=confidence,
+        source=source,
+        ttl_seconds=ttl_seconds,
+        is_tombstoned=is_tombstoned,
+        created_at=created_at,
+        updated_at=updated_at,
+        update_created_at=update_created_at,
+        actor=actor,
+        policy_hash=policy_hash,
+        operation=operation,
+        result_meta_extra=result_meta_extra,
+        related_run_id=related_run_id,
+        related_ask_event_id=related_ask_event_id,
+    )
+
+
 def list_prompt_items(
     db_path: str,
     *,
@@ -609,6 +819,7 @@ def tombstone_item(
 def record_event(
     db_path: str,
     *,
+    event_id: Optional[str] = None,
     operation: str,
     actor: str,
     policy_hash: str,
@@ -616,11 +827,12 @@ def record_event(
     result_meta: dict[str, Any],
     related_run_id: Optional[str] = None,
     related_ask_event_id: Optional[str] = None,
-) -> None:
+) -> str:
     store = MemoryStore(db_path)
     with store._connection() as connection:
-        append_event(
+        event_id = append_event(
             connection,
+            event_id=event_id,
             operation=operation,
             actor=actor,
             policy_hash=policy_hash,
@@ -630,11 +842,13 @@ def record_event(
             related_ask_event_id=related_ask_event_id,
         )
         connection.commit()
+        return event_id
 
 
 def append_event(
     connection: sqlite3.Connection,
     *,
+    event_id: Optional[str] = None,
     operation: str,
     actor: str,
     policy_hash: str,
@@ -642,9 +856,9 @@ def append_event(
     result_meta: dict[str, Any],
     related_run_id: Optional[str],
     related_ask_event_id: Optional[str],
-) -> None:
+) -> str:
     timestamp = _utc_now().isoformat()
-    event_id = str(uuid4())
+    event_id = event_id or str(uuid4())
     request_json = _serialize_bounded_json(request)
     result_meta_json = _serialize_bounded_json(result_meta)
     cursor = connection.cursor()
@@ -675,6 +889,7 @@ def append_event(
             related_ask_event_id,
         ),
     )
+    return event_id
 
 
 def policy_hash_for_path(policy_path: str | None) -> str:

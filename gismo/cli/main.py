@@ -44,6 +44,7 @@ from gismo.llm.ollama import OllamaError, ollama_chat, resolve_ollama_config
 from gismo.llm.prompts import build_system_prompt, build_user_prompt
 from gismo.memory.store import (
     MemoryItem,
+    fetch_item_raw,
     get_item as memory_get_item,
     list_prompt_items as memory_list_prompt_items,
     policy_hash_for_path,
@@ -51,6 +52,13 @@ from gismo.memory.store import (
     record_event as memory_record_event,
     search_items as memory_search_items,
     tombstone_item as memory_tombstone_item,
+    upsert_item_with_timestamps,
+)
+from gismo.memory.snapshot import (
+    SnapshotItem,
+    export_snapshot,
+    load_snapshot,
+    validate_snapshot,
 )
 
 
@@ -1177,11 +1185,44 @@ def _memory_request_from_suggestion(
     }
 
 
+def _memory_request_from_snapshot_item(item: SnapshotItem) -> dict[str, object]:
+    return {
+        "namespace": item.namespace,
+        "key": item.key,
+        "kind": item.kind,
+        "value_json": item.value_json,
+        "tags_json": json.dumps(item.tags, ensure_ascii=False, sort_keys=True)
+        if item.tags
+        else None,
+        "confidence": item.confidence,
+        "source": item.source,
+        "ttl_seconds": None,
+        "created_at": item.created_at,
+        "updated_at": item.updated_at,
+        "is_tombstoned": item.is_tombstoned,
+    }
+
+
 def _memory_decision_path(*, yes: bool, non_interactive: bool) -> str:
     interactive = _is_interactive_tty()
     if non_interactive or yes or not interactive:
         return "non-interactive"
     return "interactive"
+
+
+def _validate_snapshot_namespace_filter(namespace_filter: str) -> None:
+    if "*" in namespace_filter and not (
+        namespace_filter == "*" or namespace_filter.endswith("*")
+    ):
+        print(
+            "Namespace filters may only use '*' as a trailing wildcard (e.g., project:*).",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+
+
+def _snapshot_item_action(item: SnapshotItem) -> str:
+    return "memory.delete" if item.is_tombstoned else "memory.put"
 
 
 def _apply_memory_suggestions(
@@ -1645,6 +1686,231 @@ def run_memory_delete(args: argparse.Namespace) -> None:
     print(f"DB: {args.db_path}")
     print("Tombstoned memory item:")
     _print_memory_item_summary(item)
+
+
+def run_memory_snapshot_export(args: argparse.Namespace) -> None:
+    actor = "operator"
+    _validate_snapshot_namespace_filter(args.namespace)
+    _, resolved_policy_path = _load_memory_policy(args.policy)
+    policy_hash = _memory_policy_hash(resolved_policy_path)
+    snapshot = export_snapshot(
+        args.db_path,
+        namespace_filter=args.namespace,
+    )
+    out_path = Path(args.out)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    payload = json.dumps(snapshot, ensure_ascii=False, sort_keys=True, indent=2)
+    out_path.write_text(payload + "\n", encoding="utf-8")
+    memory_record_event(
+        args.db_path,
+        event_id=str(uuid4()),
+        operation="snapshot_export",
+        actor=actor,
+        policy_hash=policy_hash,
+        request={
+            "namespace_filter": args.namespace,
+            "out_path": str(out_path),
+        },
+        result_meta={
+            "item_count": len(snapshot["items"]),
+            "snapshot_hash": snapshot["snapshot_hash"],
+        },
+    )
+    print(f"Snapshot exported to {out_path}")
+    print(f"Items: {len(snapshot['items'])}")
+
+
+def run_memory_snapshot_import(args: argparse.Namespace) -> None:
+    actor = "operator"
+    policy, resolved_policy_path = _load_memory_policy(args.policy)
+    policy_hash = _memory_policy_hash(resolved_policy_path)
+    snapshot_event_id = str(uuid4())
+    snapshot_path = Path(args.in_path)
+    try:
+        snapshot_payload = load_snapshot(snapshot_path)
+        items, snapshot_hash = validate_snapshot(snapshot_payload)
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        memory_record_event(
+            args.db_path,
+            event_id=snapshot_event_id,
+            operation="snapshot_import",
+            actor=actor,
+            policy_hash=policy_hash,
+            request={
+                "in_path": str(snapshot_path),
+                "mode": args.mode,
+                "yes": args.yes,
+                "non_interactive": args.non_interactive,
+            },
+            result_meta={
+                "status": "failed",
+                "error": str(exc),
+                "validated": 0,
+                "applied": 0,
+                "skipped": 0,
+                "denied": 0,
+                "mode": args.mode,
+            },
+        )
+        print(f"Invalid snapshot: {exc}", file=sys.stderr)
+        raise SystemExit(2) from exc
+
+    validated = len(items)
+    applied = 0
+    skipped = 0
+    denied = 0
+    exit_code: int | None = None
+    update_created_at = args.mode == "overwrite"
+    decision_path = _memory_decision_path(yes=args.yes, non_interactive=args.non_interactive)
+
+    for item in items:
+        existing = fetch_item_raw(args.db_path, namespace=item.namespace, key=item.key)
+        if args.mode == "skip-existing" and existing is not None:
+            skipped += 1
+            continue
+        action = _snapshot_item_action(item)
+        decision = _evaluate_memory_policy(policy, action, item.namespace)
+        request = _memory_request_from_snapshot_item(item)
+        if not decision.allowed:
+            meta = _memory_policy_result_meta(decision)
+            meta.update(
+                {
+                    "snapshot_import_event_id": snapshot_event_id,
+                    "snapshot_mode": args.mode,
+                }
+            )
+            memory_record_event(
+                args.db_path,
+                operation="delete" if item.is_tombstoned else "put",
+                actor=actor,
+                policy_hash=policy_hash,
+                request=request,
+                result_meta=meta,
+            )
+            denied += 1
+            exit_code = 2
+            continue
+        if decision.confirmation_required:
+            if args.yes:
+                decision.confirmation_provided = True
+                decision.confirmation_mode = "yes-flag"
+            elif args.non_interactive or not _is_interactive_tty():
+                denied_decision = MemoryDecision(
+                    action=decision.action,
+                    allowed=False,
+                    confirmation_required=True,
+                    confirmation_provided=False,
+                    confirmation_mode=None,
+                    reason="confirmation_required",
+                )
+                meta = _memory_policy_result_meta(denied_decision)
+                meta.update(
+                    {
+                        "snapshot_import_event_id": snapshot_event_id,
+                        "snapshot_mode": args.mode,
+                    }
+                )
+                memory_record_event(
+                    args.db_path,
+                    operation="delete" if item.is_tombstoned else "put",
+                    actor=actor,
+                    policy_hash=policy_hash,
+                    request=request,
+                    result_meta=meta,
+                )
+                denied += 1
+                exit_code = 2
+                continue
+            else:
+                response = input(
+                    f"Import snapshot item {item.namespace}/{item.key}? [y/N]:"
+                )
+                if response.strip().lower() not in {"y", "yes"}:
+                    denied_decision = MemoryDecision(
+                        action=decision.action,
+                        allowed=False,
+                        confirmation_required=True,
+                        confirmation_provided=False,
+                        confirmation_mode=None,
+                        reason="confirmation_declined",
+                    )
+                    meta = _memory_policy_result_meta(denied_decision)
+                    meta.update(
+                        {
+                            "snapshot_import_event_id": snapshot_event_id,
+                            "snapshot_mode": args.mode,
+                        }
+                    )
+                    memory_record_event(
+                        args.db_path,
+                        operation="delete" if item.is_tombstoned else "put",
+                        actor=actor,
+                        policy_hash=policy_hash,
+                        request=request,
+                        result_meta=meta,
+                    )
+                    denied += 1
+                    exit_code = 2
+                    continue
+                decision.confirmation_provided = True
+                decision.confirmation_mode = "prompt"
+        result_meta_extra = _memory_policy_result_meta(decision)
+        result_meta_extra.update(
+            {
+                "snapshot_import_event_id": snapshot_event_id,
+                "snapshot_mode": args.mode,
+            }
+        )
+        upsert_item_with_timestamps(
+            args.db_path,
+            namespace=item.namespace,
+            key=item.key,
+            kind=item.kind,
+            value=item.value,
+            tags=item.tags,
+            confidence=item.confidence,
+            source=item.source,
+            ttl_seconds=None,
+            is_tombstoned=item.is_tombstoned,
+            created_at=item.created_at,
+            updated_at=item.updated_at,
+            update_created_at=update_created_at,
+            actor=actor,
+            policy_hash=policy_hash,
+            operation="delete" if item.is_tombstoned else "put",
+            result_meta_extra=result_meta_extra,
+        )
+        applied += 1
+
+    memory_record_event(
+        args.db_path,
+        event_id=snapshot_event_id,
+        operation="snapshot_import",
+        actor=actor,
+        policy_hash=policy_hash,
+        request={
+            "in_path": str(snapshot_path),
+            "snapshot_hash": snapshot_hash,
+            "mode": args.mode,
+            "yes": args.yes,
+            "non_interactive": args.non_interactive,
+            "decision_path": decision_path,
+        },
+        result_meta={
+            "status": "completed",
+            "validated": validated,
+            "applied": applied,
+            "skipped": skipped,
+            "denied": denied,
+            "mode": args.mode,
+        },
+    )
+    print(
+        "Snapshot import summary: "
+        f"validated={validated} applied={applied} skipped={skipped} denied={denied}"
+    )
+    if denied:
+        raise SystemExit(exit_code or 2)
 
 
 def run_export(
@@ -2641,6 +2907,14 @@ def _handle_memory_delete(args: argparse.Namespace) -> None:
     run_memory_delete(args)
 
 
+def _handle_memory_snapshot_export(args: argparse.Namespace) -> None:
+    run_memory_snapshot_export(args)
+
+
+def _handle_memory_snapshot_import(args: argparse.Namespace) -> None:
+    run_memory_snapshot_import(args)
+
+
 def _handle_export(args: argparse.Namespace) -> None:
     run_id = args.run_id
     if getattr(args, "run_id_arg", None):
@@ -3622,6 +3896,72 @@ def build_parser() -> argparse.ArgumentParser:
         help="Fail closed instead of prompting for confirmation",
     )
     memory_delete_parser.set_defaults(handler=_handle_memory_delete)
+
+    memory_snapshot_parser = memory_subparsers.add_parser(
+        "snapshot",
+        help="Export or import memory snapshots",
+        parents=[db_parent_optional],
+    )
+    memory_snapshot_subparsers = memory_snapshot_parser.add_subparsers(
+        dest="memory_snapshot_command",
+        required=True,
+    )
+
+    memory_snapshot_export_parser = memory_snapshot_subparsers.add_parser(
+        "export",
+        help="Export memory items to a deterministic snapshot",
+        parents=[db_parent_optional],
+    )
+    memory_snapshot_export_parser.add_argument(
+        "--namespace",
+        required=True,
+        help="Namespace or prefix wildcard to export (e.g., global or project:*)",
+    )
+    memory_snapshot_export_parser.add_argument(
+        "--out",
+        required=True,
+        help="Output snapshot file path",
+    )
+    memory_snapshot_export_parser.add_argument(
+        "--policy",
+        default=None,
+        help="Optional policy file path for audit hashing",
+    )
+    memory_snapshot_export_parser.set_defaults(handler=_handle_memory_snapshot_export)
+
+    memory_snapshot_import_parser = memory_snapshot_subparsers.add_parser(
+        "import",
+        help="Import memory items from a snapshot",
+        parents=[db_parent_optional],
+    )
+    memory_snapshot_import_parser.add_argument(
+        "--in",
+        dest="in_path",
+        required=True,
+        help="Input snapshot file path",
+    )
+    memory_snapshot_import_parser.add_argument(
+        "--mode",
+        choices=["merge", "overwrite", "skip-existing"],
+        default="merge",
+        help="Import mode (default: merge)",
+    )
+    memory_snapshot_import_parser.add_argument(
+        "--yes",
+        action="store_true",
+        help="Skip confirmation prompts for high-risk memory writes",
+    )
+    memory_snapshot_import_parser.add_argument(
+        "--non-interactive",
+        action="store_true",
+        help="Fail closed instead of prompting for confirmation",
+    )
+    memory_snapshot_import_parser.add_argument(
+        "--policy",
+        default=None,
+        help="Optional policy file path for audit hashing",
+    )
+    memory_snapshot_import_parser.set_defaults(handler=_handle_memory_snapshot_import)
 
     enqueue_parser = subparsers.add_parser(
         "enqueue",

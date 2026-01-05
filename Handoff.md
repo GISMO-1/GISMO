@@ -171,12 +171,11 @@ Plan assessment gate:
 LATEST UPDATE (OPERATOR NOTES)
 
 Status:
-- Added explicit StateStore/MemoryStore close paths in CLI flows to avoid SQLite handle leaks on Windows.
-- Updated Ollama client payload test to force python transport for request capture.
+- Added Windows SQLite handle guardrail tests covering ask/memory CLI flows.
 
 Next steps:
 - Run Windows CI or native Windows smoke tests to confirm SQLite handles close cleanly.
-- Re-run full verify.py and pytest on Windows to confirm no resource warnings.
+- Run pytest -q on Windows to ensure ResourceWarning is surfaced as errors in guardrails.
 
 Tests run:
 - python scripts/verify.py

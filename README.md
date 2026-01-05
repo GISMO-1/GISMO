@@ -113,6 +113,7 @@ Run introspection:
 
   gismo runs list
   gismo runs show RUN_ID
+  gismo runs show RUN_ID --json
 
 Export audit logs:
 
@@ -134,6 +135,7 @@ Windows examples (explicit module invocation):
 
   python -m gismo.cli.main --db .\tmp\dev.db runs list
   python -m gismo.cli.main --db .\tmp\dev.db runs show RUN_ID
+  python -m gismo.cli.main --db .\tmp\dev.db runs show RUN_ID --json
   python -m gismo.cli.main --db .\tmp\dev.db export RUN_ID
 
 Planner (local LLM via Ollama):

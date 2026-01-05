@@ -8,7 +8,7 @@ from typing import Any
 
 from gismo.core.models import Run, Task, ToolCall
 from gismo.core.paths import resolve_exports_dir
-from gismo.core.state import StateStore
+from gismo.core.state import MemoryEventRecord, MemoryProvenance, StateStore
 
 
 def export_run_jsonl(
@@ -30,7 +30,24 @@ def export_run_jsonl(
     resolved_out = _resolve_output_path(run_id, out_path, exports_dir)
     tasks = list(state_store.list_tasks(run_id))
     tool_calls = list(state_store.list_tool_calls(run_id))
-    records = _build_records(run, tasks, tool_calls, redact=redact)
+    memory_provenance = state_store.get_memory_provenance(run.id)
+    plan_event_id = None
+    if isinstance(run.metadata_json, dict):
+        plan_event_id = run.metadata_json.get("plan_event_id")
+    plan_event = state_store.get_event(plan_event_id) if plan_event_id else None
+    memory_events = state_store.list_memory_events(
+        related_run_id=run.id,
+        related_ask_event_id=plan_event_id,
+    )
+    records = _build_records(
+        run,
+        tasks,
+        tool_calls,
+        memory_provenance=memory_provenance,
+        plan_event=plan_event,
+        memory_events=memory_events,
+        redact=redact,
+    )
     _write_jsonl(resolved_out, records)
     return resolved_out
 
@@ -76,17 +93,28 @@ def _build_records(
     tasks: list[Task],
     tool_calls: list[ToolCall],
     *,
+    memory_provenance: MemoryProvenance,
+    plan_event: Any | None,
+    memory_events: list[MemoryEventRecord],
     redact: bool,
 ) -> list[dict[str, Any]]:
     sorted_tasks = sorted(tasks, key=lambda task: task.created_at)
     sorted_calls = sorted(tool_calls, key=lambda call: (call.started_at, call.attempt_number))
-    records = [_serialize_run(run)]
+    records = [_serialize_run(run, memory_provenance)]
+    if plan_event is not None:
+        records.append(
+            _serialize_event(plan_event, memory_provenance=memory_provenance, redact=redact)
+        )
+    if memory_events:
+        records.extend(
+            _serialize_memory_event(event, redact=redact) for event in memory_events
+        )
     records.extend(_serialize_task(task, redact=redact) for task in sorted_tasks)
     records.extend(_serialize_tool_call(call, redact=redact) for call in sorted_calls)
     return records
 
 
-def _serialize_run(run: Run) -> dict[str, Any]:
+def _serialize_run(run: Run, memory_provenance: MemoryProvenance) -> dict[str, Any]:
     payload = asdict(run)
     payload["created_at"] = run.created_at.isoformat()
     return {
@@ -97,6 +125,60 @@ def _serialize_run(run: Run) -> dict[str, Any]:
         "metadata": run.metadata_json,
         "status": "CREATED",
         "failure_type": "NONE",
+        "memory_provenance": memory_provenance.to_dict(),
+    }
+
+
+def _serialize_event(
+    event: Any,
+    *,
+    memory_provenance: MemoryProvenance,
+    redact: bool,
+) -> dict[str, Any]:
+    payload = event.json_payload
+    if redact:
+        payload = _redact_payload(payload)
+    return {
+        "record_type": "event",
+        "id": event.id,
+        "timestamp": event.ts.isoformat(),
+        "actor": event.actor,
+        "event_type": event.event_type,
+        "message": event.message,
+        "payload": payload,
+        "memory_provenance": memory_provenance.to_dict(),
+    }
+
+
+def _serialize_memory_event(
+    event: MemoryEventRecord,
+    *,
+    redact: bool,
+) -> dict[str, Any]:
+    request = event.request
+    result_meta = event.result_meta
+    if redact:
+        request = _redact_payload(request)
+        result_meta = _redact_payload(result_meta)
+    confirmation = result_meta.get("confirmation", {}) if isinstance(result_meta, dict) else {}
+    return {
+        "record_type": "memory_event",
+        "id": event.id,
+        "timestamp": event.timestamp.isoformat(),
+        "operation": event.operation,
+        "actor": event.actor,
+        "policy_hash": event.policy_hash,
+        "request": request,
+        "result_meta": result_meta,
+        "related_run_id": event.related_run_id,
+        "related_ask_event_id": event.related_ask_event_id,
+        "originating_run_id": event.related_run_id,
+        "originating_event_id": event.related_ask_event_id,
+        "policy_decision": result_meta.get("policy_decision"),
+        "policy_reason": result_meta.get("policy_reason"),
+        "confirmation_required": confirmation.get("required"),
+        "confirmation_provided": confirmation.get("provided"),
+        "confirmation_mode": confirmation.get("mode"),
     }
 
 

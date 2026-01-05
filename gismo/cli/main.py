@@ -864,7 +864,131 @@ def run_operator(db_path: str, command_parts: list[str], policy_path: str | None
         state_store.close()
 
 
-def run_show(db_path: str, run_id: str) -> None:
+def _serialize_run_show_payload(
+    run,
+    *,
+    status: str,
+    start_time: datetime | None,
+    end_time: datetime | None,
+    counts: dict[str, int],
+    tasks: list,
+    tool_calls: list,
+    memory_provenance: object,
+) -> dict[str, object]:
+    task_payloads = []
+    for task in tasks:
+        task_payloads.append(
+            {
+                "id": task.id,
+                "title": task.title,
+                "status": task.status.value,
+                "error": task.error,
+                "output_json": task.output_json,
+                "created_at": task.created_at.isoformat(),
+                "updated_at": task.updated_at.isoformat(),
+                "failure_type": task.failure_type.value if task.failure_type else None,
+                "status_reason": task.status_reason,
+            }
+        )
+    call_payloads = []
+    for call in tool_calls:
+        call_payloads.append(
+            {
+                "id": call.id,
+                "task_id": call.task_id,
+                "tool_name": call.tool_name,
+                "status": call.status.value,
+                "started_at": call.started_at.isoformat(),
+                "finished_at": call.finished_at.isoformat() if call.finished_at else None,
+                "output_json": call.output_json,
+                "error": call.error,
+                "failure_type": call.failure_type.value if call.failure_type else None,
+            }
+        )
+    memory_payload = memory_provenance.to_dict()
+    return {
+        "run": {
+            "id": run.id,
+            "label": run.label,
+            "created_at": run.created_at.isoformat(),
+        },
+        "status": status,
+        "started_at": start_time.isoformat() if start_time else None,
+        "finished_at": end_time.isoformat() if end_time else None,
+        "task_counts": counts,
+        "tasks": task_payloads,
+        "tool_calls": call_payloads,
+        "memory_provenance": memory_payload,
+    }
+
+
+def _print_memory_provenance(provenance: object) -> None:
+    payload = provenance.to_dict()
+    injected = payload["injected"]
+    suggested = payload["suggested"]
+    applied = payload["applied"]
+    policy = payload["policy"]
+
+    print("Memory provenance:")
+    print("  Injected memory:")
+    print(f"    count: {injected.get('count', 0)}")
+    namespaces = injected.get("namespaces") or []
+    if namespaces:
+        print(f"    namespaces: {', '.join(namespaces)}")
+    else:
+        print("    namespaces: -")
+    cap_items = injected.get("cap_items")
+    cap_bytes = injected.get("cap_bytes")
+    if cap_items is not None or cap_bytes is not None:
+        print(f"    caps: items={cap_items or '-'} bytes={cap_bytes or '-'}")
+    if injected.get("bytes") is not None:
+        print(f"    bytes_used: {injected['bytes']}")
+
+    print("  Suggested memory updates:")
+    print(f"    count: {suggested.get('count', 0)}")
+    items = suggested.get("items") or []
+    if not items:
+        print("    (none)")
+    else:
+        for item in items:
+            print(
+                "    - "
+                f"{item.get('namespace')}/{item.get('key')} "
+                f"kind={item.get('kind')} "
+                f"confidence={item.get('confidence')} "
+                f"source={item.get('source')}"
+            )
+    if suggested.get("truncated"):
+        print(f"    +{suggested.get('remaining', 0)} more")
+
+    print("  Apply results:")
+    print(
+        "    "
+        f"applied={applied.get('applied', 0)} "
+        f"skipped={applied.get('skipped', 0)} "
+        f"denied={applied.get('denied', 0)}"
+    )
+    applied_items = applied.get("applied_items") or []
+    if applied_items:
+        print("    applied:")
+        for item in applied_items:
+            print(f"      - {item.get('namespace')}/{item.get('key')}")
+    denied_items = applied.get("denied_items") or []
+    if denied_items:
+        print("    denied:")
+        for item in denied_items:
+            reason = item.get("reason")
+            suffix = f" reason={reason}" if reason else ""
+            print(f"      - {item.get('namespace')}/{item.get('key')}{suffix}")
+
+    print("  Policy/confirmation:")
+    print(f"    policy_path: {policy.get('path') or '-'}")
+    print(f"    yes: {policy.get('yes')}")
+    print(f"    non_interactive: {policy.get('non_interactive')}")
+    print(f"    decision_path: {policy.get('decision_path') or '-'}")
+
+
+def run_show(db_path: str, run_id: str, *, json_output: bool = False) -> None:
     state_store = StateStore(db_path)
     try:
         run = state_store.get_run(run_id)
@@ -877,6 +1001,21 @@ def run_show(db_path: str, run_id: str) -> None:
         status = _run_status(tasks)
         start_time, end_time = _run_time_bounds(run, tasks, tool_calls)
         counts = _task_status_counts(tasks)
+        memory_provenance = state_store.get_memory_provenance(run.id)
+
+        if json_output:
+            payload = _serialize_run_show_payload(
+                run,
+                status=status,
+                start_time=start_time,
+                end_time=end_time,
+                counts=counts,
+                tasks=tasks,
+                tool_calls=tool_calls,
+                memory_provenance=memory_provenance,
+            )
+            print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+            return
 
         print("=== GISMO Run Summary ===")
         print(f"Run ID:     {run.id}")
@@ -892,6 +1031,8 @@ def run_show(db_path: str, run_id: str) -> None:
         print("Tasks:")
         if not tasks:
             print("  (no tasks)")
+            if memory_provenance.has_data():
+                _print_memory_provenance(memory_provenance)
             return
 
         for task in tasks:
@@ -922,6 +1063,8 @@ def run_show(db_path: str, run_id: str) -> None:
                     print(f"      output: {_summarize_value(call.output_json, 200)}")
                 if call.error:
                     print(f"      error: {_summarize_value(call.error, 200)}")
+        if memory_provenance.has_data():
+            _print_memory_provenance(memory_provenance)
     finally:
         state_store.close()
 
@@ -978,6 +1121,8 @@ class MemoryApplyResult:
     denied: int
     applied_items: list[dict[str, str]]
     exit_code: int | None = None
+    policy_path: str | None = None
+    decision_path: str | None = None
 
 
 def _memory_policy_hash(policy_path: str | None) -> str:
@@ -1032,6 +1177,13 @@ def _memory_request_from_suggestion(
     }
 
 
+def _memory_decision_path(*, yes: bool, non_interactive: bool) -> str:
+    interactive = _is_interactive_tty()
+    if non_interactive or yes or not interactive:
+        return "non-interactive"
+    return "interactive"
+
+
 def _apply_memory_suggestions(
     db_path: str,
     suggestions: list[dict[str, str]],
@@ -1046,8 +1198,16 @@ def _apply_memory_suggestions(
         return MemoryApplyResult(applied=0, skipped=0, denied=0, applied_items=[])
     policy, resolved_policy_path = _load_memory_policy(policy_path)
     policy_hash = _memory_policy_hash(resolved_policy_path)
+    decision_path = _memory_decision_path(yes=yes, non_interactive=non_interactive)
     action = "memory.put"
-    result = MemoryApplyResult(applied=0, skipped=0, denied=0, applied_items=[])
+    result = MemoryApplyResult(
+        applied=0,
+        skipped=0,
+        denied=0,
+        applied_items=[],
+        policy_path=resolved_policy_path,
+        decision_path=decision_path,
+    )
     candidates: list[tuple[dict[str, str], object, MemoryDecision]] = []
     for suggestion in suggestions:
         value = json.loads(suggestion["value_json"])
@@ -1556,6 +1716,12 @@ class MemoryInjection:
     count: int
     bytes: int
     keys: list[dict[str, str]]
+    cap_items: int
+    cap_bytes: int
+
+
+MEMORY_INJECTION_ITEM_CAP = 20
+MEMORY_INJECTION_BYTE_CAP = 8192
 
 
 def _serialize_memory_value(value: object) -> str:
@@ -1580,16 +1746,16 @@ def _memory_entries_for_prompt(items: list[MemoryItem]) -> list[dict[str, str]]:
 
 
 def _build_memory_injection(db_path: str) -> MemoryInjection:
-    items = memory_list_prompt_items(db_path, limit=20)
+    items = memory_list_prompt_items(db_path, limit=MEMORY_INJECTION_ITEM_CAP)
     entries = _memory_entries_for_prompt(items)
     capped_entries: list[dict[str, str]] = []
     total_bytes = 0
     for entry in entries:
         serialized = json.dumps(entry, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         entry_bytes = len(serialized.encode("utf-8"))
-        if len(capped_entries) >= 20:
+        if len(capped_entries) >= MEMORY_INJECTION_ITEM_CAP:
             break
-        if total_bytes + entry_bytes > 8192:
+        if total_bytes + entry_bytes > MEMORY_INJECTION_BYTE_CAP:
             break
         capped_entries.append(entry)
         total_bytes += entry_bytes
@@ -1606,6 +1772,8 @@ def _build_memory_injection(db_path: str) -> MemoryInjection:
         count=len(capped_entries),
         bytes=total_bytes,
         keys=keys,
+        cap_items=MEMORY_INJECTION_ITEM_CAP,
+        cap_bytes=MEMORY_INJECTION_BYTE_CAP,
     )
 
 
@@ -1621,6 +1789,8 @@ def _apply_memory_injection_payload(
             "memory_injected_count": memory_injection.count,
             "memory_injected_keys": memory_injection.keys,
             "memory_injected_bytes": memory_injection.bytes,
+            "memory_injected_cap_items": memory_injection.cap_items,
+            "memory_injected_cap_bytes": memory_injection.cap_bytes,
         }
     )
 
@@ -1900,6 +2070,10 @@ def run_ask(
                             "denied": apply_result.denied,
                         },
                         "apply_memory_suggestions_applied": apply_result.applied_items,
+                        "apply_memory_policy_path": apply_result.policy_path,
+                        "apply_memory_yes": yes,
+                        "apply_memory_non_interactive": non_interactive,
+                        "apply_memory_decision_path": apply_result.decision_path,
                     }
                 )
                 state_store.record_event(
@@ -1927,6 +2101,13 @@ def run_ask(
                             "denied": 0,
                         },
                         "apply_memory_suggestions_applied": [],
+                        "apply_memory_policy_path": None,
+                        "apply_memory_yes": yes,
+                        "apply_memory_non_interactive": non_interactive,
+                        "apply_memory_decision_path": _memory_decision_path(
+                            yes=yes,
+                            non_interactive=non_interactive,
+                        ),
                     }
                 )
                 state_store.record_event(
@@ -1948,6 +2129,13 @@ def run_ask(
                         "denied": 0,
                     },
                     "apply_memory_suggestions_applied": [],
+                    "apply_memory_policy_path": None,
+                    "apply_memory_yes": yes,
+                    "apply_memory_non_interactive": non_interactive,
+                    "apply_memory_decision_path": _memory_decision_path(
+                        yes=yes,
+                        non_interactive=non_interactive,
+                    ),
                 }
             )
             state_store.record_event(
@@ -2084,6 +2272,7 @@ def run_agent(
                 denied=0,
                 applied_items=[],
             )
+            plan_event_id = str(uuid4())
             event_recorded = False
             if apply_memory_suggestions:
                 suggestions = plan.get("memory_suggestions") or []
@@ -2098,6 +2287,13 @@ def run_agent(
                                 "denied": 0,
                             },
                             "apply_memory_suggestions_applied": [],
+                            "apply_memory_policy_path": None,
+                            "apply_memory_yes": yes,
+                            "apply_memory_non_interactive": non_interactive,
+                            "apply_memory_decision_path": _memory_decision_path(
+                                yes=yes,
+                                non_interactive=non_interactive,
+                            ),
                         }
                     )
                     state_store.record_event(
@@ -2105,18 +2301,17 @@ def run_agent(
                         event_type=EVENT_TYPE_LLM_PLAN,
                         message="LLM plan generated.",
                         json_payload=payload,
-                        event_id=str(uuid4()),
+                        event_id=plan_event_id,
                     )
                     event_recorded = True
                 else:
-                    agent_event_id = str(uuid4())
                     apply_result = _apply_memory_suggestions(
                         db_path,
                         suggestions,
                         policy_path=policy_path,
                         yes=yes,
                         non_interactive=non_interactive,
-                        related_event_id=agent_event_id,
+                        related_event_id=plan_event_id,
                         actor="agent",
                     )
                     payload.update(
@@ -2128,6 +2323,10 @@ def run_agent(
                                 "denied": apply_result.denied,
                             },
                             "apply_memory_suggestions_applied": apply_result.applied_items,
+                            "apply_memory_policy_path": apply_result.policy_path,
+                            "apply_memory_yes": yes,
+                            "apply_memory_non_interactive": non_interactive,
+                            "apply_memory_decision_path": apply_result.decision_path,
                         }
                     )
                     state_store.record_event(
@@ -2135,7 +2334,7 @@ def run_agent(
                         event_type=EVENT_TYPE_LLM_PLAN,
                         message="LLM plan generated.",
                         json_payload=payload,
-                        event_id=agent_event_id,
+                        event_id=plan_event_id,
                     )
                     event_recorded = True
                     print(
@@ -2157,6 +2356,13 @@ def run_agent(
                             "denied": 0,
                         },
                         "apply_memory_suggestions_applied": [],
+                        "apply_memory_policy_path": None,
+                        "apply_memory_yes": yes,
+                        "apply_memory_non_interactive": non_interactive,
+                        "apply_memory_decision_path": _memory_decision_path(
+                            yes=yes,
+                            non_interactive=non_interactive,
+                        ),
                     }
                 )
                 state_store.record_event(
@@ -2164,6 +2370,7 @@ def run_agent(
                     event_type=EVENT_TYPE_LLM_PLAN,
                     message="LLM plan generated.",
                     json_payload=payload,
+                    event_id=plan_event_id,
                 )
 
             actions = plan.get("actions", [])
@@ -2178,7 +2385,12 @@ def run_agent(
 
             run = state_store.create_run(
                 label="agent-cycle",
-                metadata={"goal": goal_text, "cycle": cycle, "source": "agent"},
+                metadata={
+                    "goal": goal_text,
+                    "cycle": cycle,
+                    "source": "agent",
+                    "plan_event_id": plan_event_id,
+                },
             )
             run_ids.append(run.id)
 
@@ -2410,7 +2622,7 @@ def _handle_runs_list(args: argparse.Namespace) -> None:
 
 
 def _handle_runs_show(args: argparse.Namespace) -> None:
-    run_show(args.db_path, args.run_id)
+    run_show(args.db_path, args.run_id, json_output=args.json)
 
 
 def _handle_memory_put(args: argparse.Namespace) -> None:
@@ -3166,6 +3378,11 @@ def build_parser() -> argparse.ArgumentParser:
     runs_show_parser.add_argument(
         "run_id",
         help="Run ID to show",
+    )
+    runs_show_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit the run summary as JSON",
     )
     runs_show_parser.set_defaults(handler=_handle_runs_show)
 

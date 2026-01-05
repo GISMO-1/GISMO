@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, Optional
@@ -21,6 +22,56 @@ from gismo.core.models import (
     ToolCall,
     ToolCallStatus,
 )
+
+
+@dataclass(frozen=True)
+class MemoryEventRecord:
+    id: str
+    timestamp: datetime
+    operation: str
+    actor: str
+    policy_hash: str
+    request: Dict[str, Any]
+    result_meta: Dict[str, Any]
+    related_run_id: Optional[str]
+    related_ask_event_id: Optional[str]
+
+
+@dataclass(frozen=True)
+class MemoryProvenance:
+    injected: Dict[str, Any]
+    suggested: Dict[str, Any]
+    applied: Dict[str, Any]
+    policy: Dict[str, Any]
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "injected": self.injected,
+            "suggested": self.suggested,
+            "applied": self.applied,
+            "policy": self.policy,
+        }
+
+    def has_data(self) -> bool:
+        if self.injected.get("count"):
+            return True
+        if self.injected.get("namespaces"):
+            return True
+        if self.injected.get("bytes") is not None:
+            return True
+        if self.injected.get("cap_items") is not None or self.injected.get("cap_bytes") is not None:
+            return True
+        if self.suggested.get("count"):
+            return True
+        if self.suggested.get("items"):
+            return True
+        if any(self.applied.get(key) for key in ("applied", "skipped", "denied")):
+            return True
+        if self.applied.get("applied_items") or self.applied.get("denied_items"):
+            return True
+        if self.policy.get("path") or self.policy.get("decision_path"):
+            return True
+        return False
 
 
 class StateStore:
@@ -389,6 +440,57 @@ class StateStore:
                 (limit,),
             ).fetchall()
         return [self._row_to_event(row) for row in rows]
+
+    def get_event(self, event_id: str) -> Optional[Event]:
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM events WHERE id = ?",
+                (event_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return self._row_to_event(row)
+
+    def list_memory_events(
+        self,
+        *,
+        related_run_id: Optional[str] = None,
+        related_ask_event_id: Optional[str] = None,
+    ) -> list[MemoryEventRecord]:
+        if related_run_id is None and related_ask_event_id is None:
+            return []
+        clauses = []
+        params: list[object] = []
+        if related_run_id is not None:
+            clauses.append("related_run_id = ?")
+            params.append(related_run_id)
+        if related_ask_event_id is not None:
+            clauses.append("related_ask_event_id = ?")
+            params.append(related_ask_event_id)
+        where_clause = " OR ".join(clauses)
+        with self._connection() as connection:
+            rows = connection.execute(
+                f"SELECT * FROM memory_events WHERE {where_clause} ORDER BY timestamp ASC, id ASC",
+                tuple(params),
+            ).fetchall()
+        return [self._row_to_memory_event(row) for row in rows]
+
+    def get_memory_provenance(self, run_id: str) -> MemoryProvenance:
+        run = self.get_run(run_id)
+        plan_event_id = None
+        payload: Dict[str, Any] | None = None
+        if run is not None and isinstance(run.metadata_json, dict):
+            plan_event_id = run.metadata_json.get("plan_event_id")
+        if plan_event_id:
+            event = self.get_event(plan_event_id)
+            if event and isinstance(event.json_payload, dict):
+                payload = event.json_payload
+
+        memory_events = self.list_memory_events(
+            related_run_id=run_id,
+            related_ask_event_id=plan_event_id,
+        )
+        return _build_memory_provenance(payload, memory_events)
 
     def _sync_queue_retry_columns(self, connection: sqlite3.Connection) -> None:
         columns = {
@@ -1336,6 +1438,200 @@ class StateStore:
             message=row["message"],
             json_payload=json.loads(row["json_payload"]) if row["json_payload"] else None,
         )
+
+    def _row_to_memory_event(self, row: sqlite3.Row) -> MemoryEventRecord:
+        return MemoryEventRecord(
+            id=row["id"],
+            timestamp=_parse_dt(row["timestamp"]),
+            operation=row["operation"],
+            actor=row["actor"],
+            policy_hash=row["policy_hash"],
+            request=json.loads(row["request_json"]),
+            result_meta=json.loads(row["result_meta_json"]),
+            related_run_id=row["related_run_id"],
+            related_ask_event_id=row["related_ask_event_id"],
+        )
+
+
+MEMORY_PROVENANCE_SUGGESTION_LIMIT = 5
+
+
+def _build_memory_provenance(
+    payload: Dict[str, Any] | None,
+    memory_events: list[MemoryEventRecord],
+) -> MemoryProvenance:
+    injected_keys = []
+    injected_count = 0
+    injected_bytes = None
+    cap_items = None
+    cap_bytes = None
+    if payload:
+        injected_keys = payload.get("memory_injected_keys") or []
+        if isinstance(payload.get("memory_injected_count"), int):
+            injected_count = payload["memory_injected_count"]
+        elif isinstance(injected_keys, list):
+            injected_count = len(injected_keys)
+        if isinstance(payload.get("memory_injected_bytes"), int):
+            injected_bytes = payload["memory_injected_bytes"]
+        if isinstance(payload.get("memory_injected_cap_items"), int):
+            cap_items = payload["memory_injected_cap_items"]
+        if isinstance(payload.get("memory_injected_cap_bytes"), int):
+            cap_bytes = payload["memory_injected_cap_bytes"]
+    namespaces = sorted(
+        {
+            entry.get("namespace")
+            for entry in injected_keys
+            if isinstance(entry, dict) and entry.get("namespace")
+        }
+    )
+    injected = {
+        "count": injected_count,
+        "namespaces": namespaces,
+        "bytes": injected_bytes,
+        "cap_items": cap_items,
+        "cap_bytes": cap_bytes,
+    }
+
+    suggestions = []
+    if payload:
+        plan = payload.get("plan") if isinstance(payload.get("plan"), dict) else {}
+        raw_suggestions = plan.get("memory_suggestions") if isinstance(plan, dict) else None
+        if isinstance(raw_suggestions, list):
+            for suggestion in raw_suggestions:
+                if not isinstance(suggestion, dict):
+                    continue
+                namespace = suggestion.get("namespace")
+                key = suggestion.get("key")
+                if not namespace or not key:
+                    continue
+                suggestions.append(
+                    {
+                        "namespace": str(namespace),
+                        "key": str(key),
+                        "kind": str(suggestion.get("kind") or ""),
+                        "confidence": str(suggestion.get("confidence") or ""),
+                        "source": str(suggestion.get("source") or ""),
+                    }
+                )
+    suggestions = sorted(
+        suggestions,
+        key=lambda item: (
+            item["namespace"],
+            item["key"],
+            item["kind"],
+            item["confidence"],
+            item["source"],
+        ),
+    )
+    suggested_count = len(suggestions)
+    truncated = suggested_count > MEMORY_PROVENANCE_SUGGESTION_LIMIT
+    remaining = max(0, suggested_count - MEMORY_PROVENANCE_SUGGESTION_LIMIT)
+    suggested_items = suggestions[:MEMORY_PROVENANCE_SUGGESTION_LIMIT]
+    suggested = {
+        "count": suggested_count,
+        "items": suggested_items,
+        "truncated": truncated,
+        "remaining": remaining,
+    }
+
+    applied_items = _memory_items_from_events(memory_events, decision="allowed")
+    denied_items = _memory_items_from_events(memory_events, decision="denied", include_reason=True)
+    if not applied_items and payload:
+        payload_applied = payload.get("apply_memory_suggestions_applied")
+        if isinstance(payload_applied, list):
+            for item in payload_applied:
+                if not isinstance(item, dict):
+                    continue
+                namespace = item.get("namespace")
+                key = item.get("key")
+                if namespace and key:
+                    applied_items.append({"namespace": str(namespace), "key": str(key)})
+    applied_items = _sorted_unique_items(applied_items)
+    denied_items = _sorted_unique_items(denied_items, include_reason=True)
+
+    applied_count = len(applied_items)
+    skipped_count = 0
+    denied_count = len(denied_items)
+    if payload:
+        result = payload.get("apply_memory_suggestions_result")
+        if isinstance(result, dict):
+            if isinstance(result.get("applied"), int):
+                applied_count = result["applied"]
+            if isinstance(result.get("skipped"), int):
+                skipped_count = result["skipped"]
+            if isinstance(result.get("denied"), int):
+                denied_count = result["denied"]
+    applied = {
+        "applied": applied_count,
+        "skipped": skipped_count,
+        "denied": denied_count,
+        "applied_items": applied_items,
+        "denied_items": denied_items,
+    }
+
+    policy = {
+        "path": payload.get("apply_memory_policy_path") if payload else None,
+        "yes": payload.get("apply_memory_yes") if payload else None,
+        "non_interactive": payload.get("apply_memory_non_interactive") if payload else None,
+        "decision_path": payload.get("apply_memory_decision_path") if payload else None,
+    }
+
+    return MemoryProvenance(
+        injected=injected,
+        suggested=suggested,
+        applied=applied,
+        policy=policy,
+    )
+
+
+def _memory_items_from_events(
+    memory_events: list[MemoryEventRecord],
+    *,
+    decision: str,
+    include_reason: bool = False,
+) -> list[Dict[str, str]]:
+    items: list[Dict[str, str]] = []
+    for event in memory_events:
+        if event.operation != "put":
+            continue
+        result_meta = event.result_meta
+        if result_meta.get("policy_decision") != decision:
+            continue
+        request = event.request
+        namespace = request.get("namespace")
+        key = request.get("key")
+        if not namespace or not key:
+            continue
+        item = {"namespace": str(namespace), "key": str(key)}
+        if include_reason:
+            reason = result_meta.get("policy_reason")
+            if reason:
+                item["reason"] = str(reason)
+        items.append(item)
+    return items
+
+
+def _sorted_unique_items(
+    items: list[Dict[str, str]],
+    *,
+    include_reason: bool = False,
+) -> list[Dict[str, str]]:
+    seen = set()
+    unique_items: list[Dict[str, str]] = []
+    for item in items:
+        key = (item.get("namespace"), item.get("key"), item.get("reason") if include_reason else None)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique_items.append(item)
+    unique_items.sort(
+        key=lambda item: (
+            item.get("namespace", ""),
+            item.get("key", ""),
+            item.get("reason", "") if include_reason else "",
+        )
+    )
+    return unique_items
 
 
 def _parse_dt(value: str) -> datetime:

@@ -172,10 +172,10 @@ Plan assessment gate:
 LATEST UPDATE (OPERATOR NOTES)
 
 Status:
-- Added memory namespace lifecycle commands (list/show/retire) with audit logging and retired namespace write enforcement.
+- Added retention rules (TTL/max-items) with write-time enforcement, audits, and CLI management.
 
 Next steps:
-- Decide whether to ship a default policy allowing memory.namespace.retire in controlled environments.
+- Decide whether to ship a default policy allowing memory.retention.set/clear/enforce in controlled environments.
 
 Tests run:
 - python scripts/verify.py

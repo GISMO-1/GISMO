@@ -47,16 +47,24 @@ from gismo.memory.store import (
     MemoryItem,
     MemoryNamespaceDetail,
     MemoryNamespaceSummary,
+    MemoryRetentionDetail,
     get_item as memory_get_item,
     get_namespace as memory_get_namespace,
+    get_retention_detail as memory_get_retention_detail,
     list_prompt_items as memory_list_prompt_items,
     list_namespaces as memory_list_namespaces,
+    list_retention_rules as memory_list_retention_rules,
+    plan_retention_for_write as memory_plan_retention_for_write,
     policy_hash_for_path,
     put_item as memory_put_item,
+    record_retention_decision as memory_record_retention_decision,
     record_event as memory_record_event,
     retire_namespace as memory_retire_namespace,
     search_items as memory_search_items,
+    set_retention_rule as memory_set_retention_rule,
     tombstone_item as memory_tombstone_item,
+    apply_retention_evictions as memory_apply_retention_evictions,
+    clear_retention_rule as memory_clear_retention_rule,
 )
 
 
@@ -138,6 +146,22 @@ def _serialize_memory_namespace_detail(
     return payload
 
 
+def _serialize_memory_retention_detail(
+    detail: MemoryRetentionDetail,
+) -> dict[str, object]:
+    return {
+        "namespace": detail.namespace,
+        "max_items": detail.max_items,
+        "ttl_seconds": detail.ttl_seconds,
+        "policy_source": detail.policy_source,
+        "created_at": detail.created_at,
+        "updated_at": detail.updated_at,
+        "item_count": detail.item_count,
+        "tombstone_count": detail.tombstone_count,
+        "last_write_at": detail.last_write_at,
+    }
+
+
 def _print_memory_namespace_list(namespaces: list[MemoryNamespaceSummary]) -> None:
     if not namespaces:
         print("(no namespaces)")
@@ -160,6 +184,30 @@ def _print_memory_namespace_detail(namespace: MemoryNamespaceDetail) -> None:
     print(f"Retired:       {'yes' if namespace.retired else 'no'}")
     print(f"Retired at:    {namespace.retired_at or '-'}")
     print(f"Retired reason: {namespace.retired_reason or '-'}")
+
+
+def _print_memory_retention_list(rules: list[MemoryRetentionDetail]) -> None:
+    if not rules:
+        print("(no retention rules)")
+        return
+    for rule in rules:
+        print(
+            f"- {rule.namespace} max_items={rule.max_items} "
+            f"ttl_seconds={rule.ttl_seconds} "
+            f"items={rule.item_count} tombstones={rule.tombstone_count}"
+        )
+
+
+def _print_memory_retention_detail(detail: MemoryRetentionDetail) -> None:
+    print(f"Namespace:    {detail.namespace}")
+    print(f"Max items:    {detail.max_items}")
+    print(f"TTL seconds:  {detail.ttl_seconds}")
+    print(f"Policy source:{detail.policy_source}")
+    print(f"Created:      {detail.created_at}")
+    print(f"Updated:      {detail.updated_at}")
+    print(f"Items:        {detail.item_count}")
+    print(f"Tombstones:   {detail.tombstone_count}")
+    print(f"Last write:   {detail.last_write_at or '-'}")
 
 
 def _coerce_str_list(value: object) -> list[str]:
@@ -1307,8 +1355,9 @@ def _apply_memory_suggestions(
         policy_path=resolved_policy_path,
         decision_path=decision_path,
     )
-    candidates: list[tuple[dict[str, str], object, MemoryDecision]] = []
+    candidates: list[dict[str, object]] = []
     retired_meta_by_namespace: dict[str, dict[str, object]] = {}
+    retention_now = datetime.now(timezone.utc)
     for suggestion in suggestions:
         value = json.loads(suggestion["value_json"])
         decision, retired_meta = _memory_write_decision(
@@ -1319,7 +1368,6 @@ def _apply_memory_suggestions(
         )
         if retired_meta:
             retired_meta_by_namespace[suggestion["namespace"]] = retired_meta
-        candidates.append((suggestion, value, decision))
         if not decision.allowed:
             memory_record_event(
                 db_path,
@@ -1338,30 +1386,33 @@ def _apply_memory_suggestions(
                 related_ask_event_id=related_event_id,
             )
             result.denied += 1
-
-    allowed = [
-        (suggestion, value, decision)
-        for suggestion, value, decision in candidates
-        if decision.allowed
-    ]
-    if not allowed:
-        return result
-
-    confirm_needed = [
-        (suggestion, value, decision)
-        for suggestion, value, decision in allowed
-        if decision.confirmation_required
-    ]
-    if confirm_needed and not yes:
-        if non_interactive or not _is_interactive_tty():
-            for suggestion, value, _decision in confirm_needed:
-                denied = MemoryDecision(
-                    action=action,
-                    allowed=False,
-                    confirmation_required=True,
-                    confirmation_provided=False,
-                    confirmation_mode=None,
-                    reason="confirmation_required",
+            continue
+        retention_plan = memory_plan_retention_for_write(
+            db_path,
+            namespace=suggestion["namespace"],
+            key=suggestion["key"],
+            now=retention_now,
+        )
+        retention_decision = None
+        retention_policy_meta = None
+        if retention_plan is not None and (retention_plan.evictions or retention_plan.shortfall):
+            retention_action = "memory.retention.enforce"
+            retention_decision = _evaluate_memory_policy(
+                policy,
+                retention_action,
+                suggestion["namespace"],
+            )
+            retention_policy_meta = _memory_policy_result_meta(retention_decision)
+            if not retention_decision.allowed:
+                retention_event_id = memory_record_retention_decision(
+                    db_path,
+                    plan=retention_plan,
+                    namespace=suggestion["namespace"],
+                    key=suggestion["key"],
+                    actor=actor,
+                    policy_hash=policy_hash,
+                    policy_meta=retention_policy_meta,
+                    related_ask_event_id=related_event_id,
                 )
                 memory_record_event(
                     db_path,
@@ -1374,9 +1425,146 @@ def _apply_memory_suggestions(
                         source="llm",
                     ),
                     result_meta=_merge_result_meta(
+                        _merge_result_meta(
+                            _memory_policy_result_meta(decision),
+                            retired_meta_by_namespace.get(suggestion["namespace"], {}),
+                        ),
+                        {
+                            "retention_event_id": retention_event_id,
+                            "retention_decision": "denied",
+                            "retention_reason": "policy_denied",
+                        },
+                    ),
+                    related_ask_event_id=related_event_id,
+                )
+                result.denied += 1
+                continue
+            if retention_plan.shortfall:
+                retention_event_id = memory_record_retention_decision(
+                    db_path,
+                    plan=retention_plan,
+                    namespace=suggestion["namespace"],
+                    key=suggestion["key"],
+                    actor=actor,
+                    policy_hash=policy_hash,
+                    policy_meta=retention_policy_meta,
+                    related_ask_event_id=related_event_id,
+                )
+                memory_record_event(
+                    db_path,
+                    operation="put",
+                    actor=actor,
+                    policy_hash=policy_hash,
+                    request=_memory_request_from_suggestion(
+                        suggestion,
+                        value=value,
+                        source="llm",
+                    ),
+                    result_meta=_merge_result_meta(
+                        _merge_result_meta(
+                            _memory_policy_result_meta(decision),
+                            retired_meta_by_namespace.get(suggestion["namespace"], {}),
+                        ),
+                        {
+                            "retention_event_id": retention_event_id,
+                            "retention_decision": "denied",
+                            "retention_reason": "shortfall",
+                        },
+                    ),
+                    related_ask_event_id=related_event_id,
+                )
+                result.denied += 1
+                continue
+        candidates.append(
+            {
+                "suggestion": suggestion,
+                "value": value,
+                "decision": decision,
+                "retention_plan": retention_plan,
+                "retention_decision": retention_decision,
+                "retention_policy_meta": retention_policy_meta,
+            }
+        )
+
+    allowed = [candidate for candidate in candidates if candidate["decision"].allowed]
+    if not allowed:
+        return result
+
+    confirm_needed = [
+        candidate
+        for candidate in allowed
+        if candidate["decision"].confirmation_required
+        or (
+            candidate["retention_decision"] is not None
+            and candidate["retention_decision"].confirmation_required
+        )
+    ]
+    if confirm_needed and not yes:
+        if non_interactive or not _is_interactive_tty():
+            for candidate in confirm_needed:
+                suggestion = candidate["suggestion"]
+                value = candidate["value"]
+                decision = candidate["decision"]
+                retention_plan = candidate["retention_plan"]
+                retention_decision = candidate["retention_decision"]
+                retention_event_id = None
+                if retention_plan is not None and retention_decision is not None:
+                    denied_retention = MemoryDecision(
+                        action=retention_decision.action,
+                        allowed=False,
+                        confirmation_required=True,
+                        confirmation_provided=False,
+                        confirmation_mode=None,
+                        reason="confirmation_required",
+                    )
+                    retention_event_id = memory_record_retention_decision(
+                        db_path,
+                        plan=retention_plan,
+                        namespace=suggestion["namespace"],
+                        key=suggestion["key"],
+                        actor=actor,
+                        policy_hash=policy_hash,
+                        policy_meta=_memory_policy_result_meta(denied_retention),
+                        related_ask_event_id=related_event_id,
+                    )
+                if decision.confirmation_required:
+                    denied = MemoryDecision(
+                        action=action,
+                        allowed=False,
+                        confirmation_required=True,
+                        confirmation_provided=False,
+                        confirmation_mode=None,
+                        reason="confirmation_required",
+                    )
+                    result_meta = _merge_result_meta(
                         _memory_policy_result_meta(denied),
                         retired_meta_by_namespace.get(suggestion["namespace"], {}),
+                    )
+                else:
+                    result_meta = _merge_result_meta(
+                        _memory_policy_result_meta(decision),
+                        retired_meta_by_namespace.get(suggestion["namespace"], {}),
+                    )
+                if retention_event_id:
+                    result_meta = _merge_result_meta(
+                        result_meta,
+                        {
+                            "retention_event_id": retention_event_id,
+                            "retention_decision": "denied",
+                            "retention_reason": "confirmation_required",
+                        },
+                    )
+                memory_record_event(
+                    db_path,
+                    operation="put",
+                    actor=actor,
+                    policy_hash=policy_hash,
+                    request=_memory_request_from_suggestion(
+                        suggestion,
+                        value=value,
+                        source="llm",
                     ),
+                    result_meta=result_meta,
                     related_ask_event_id=related_event_id,
                 )
                 result.denied += 1
@@ -1384,9 +1572,36 @@ def _apply_memory_suggestions(
             result.exit_code = 2
             return result
         if len(confirm_needed) == len(allowed) and len(confirm_needed) > 1:
-            response = input("Apply all memory suggestions? [y/N]:")
+            response = input(
+                "Apply all memory suggestions (including retention enforcement)? [y/N]:"
+            )
             if response.strip().lower() not in {"y", "yes"}:
-                for suggestion, value, _decision in confirm_needed:
+                for candidate in confirm_needed:
+                    suggestion = candidate["suggestion"]
+                    value = candidate["value"]
+                    decision = candidate["decision"]
+                    retention_plan = candidate["retention_plan"]
+                    retention_decision = candidate["retention_decision"]
+                    retention_event_id = None
+                    if retention_plan is not None and retention_decision is not None:
+                        denied_retention = MemoryDecision(
+                            action=retention_decision.action,
+                            allowed=False,
+                            confirmation_required=True,
+                            confirmation_provided=False,
+                            confirmation_mode=None,
+                            reason="confirmation_declined",
+                        )
+                        retention_event_id = memory_record_retention_decision(
+                            db_path,
+                            plan=retention_plan,
+                            namespace=suggestion["namespace"],
+                            key=suggestion["key"],
+                            actor=actor,
+                            policy_hash=policy_hash,
+                            policy_meta=_memory_policy_result_meta(denied_retention),
+                            related_ask_event_id=related_event_id,
+                        )
                     denied = MemoryDecision(
                         action=action,
                         allowed=False,
@@ -1395,6 +1610,21 @@ def _apply_memory_suggestions(
                         confirmation_mode=None,
                         reason="confirmation_declined",
                     )
+                    result_meta = _merge_result_meta(
+                        _memory_policy_result_meta(denied)
+                        if decision.confirmation_required
+                        else _memory_policy_result_meta(decision),
+                        retired_meta_by_namespace.get(suggestion["namespace"], {}),
+                    )
+                    if retention_event_id:
+                        result_meta = _merge_result_meta(
+                            result_meta,
+                            {
+                                "retention_event_id": retention_event_id,
+                                "retention_decision": "denied",
+                                "retention_reason": "confirmation_declined",
+                            },
+                        )
                     memory_record_event(
                         db_path,
                         operation="put",
@@ -1405,23 +1635,56 @@ def _apply_memory_suggestions(
                             value=value,
                             source="llm",
                         ),
-                        result_meta=_merge_result_meta(
-                            _memory_policy_result_meta(denied),
-                            retired_meta_by_namespace.get(suggestion["namespace"], {}),
-                        ),
+                        result_meta=result_meta,
                         related_ask_event_id=related_event_id,
                     )
                     result.denied += 1
                 return result
-            for _suggestion, _value, decision in confirm_needed:
+            for candidate in confirm_needed:
+                decision = candidate["decision"]
+                retention_decision = candidate["retention_decision"]
                 decision.confirmation_provided = True
                 decision.confirmation_mode = "prompt"
+                if retention_decision and retention_decision.confirmation_required:
+                    retention_decision.confirmation_provided = True
+                    retention_decision.confirmation_mode = "prompt"
         else:
-            for suggestion, value, decision in confirm_needed:
+            for candidate in confirm_needed:
+                suggestion = candidate["suggestion"]
+                value = candidate["value"]
+                decision = candidate["decision"]
+                retention_plan = candidate["retention_plan"]
+                retention_decision = candidate["retention_decision"]
+                retention_notice = ""
+                if retention_plan is not None and retention_plan.evictions:
+                    retention_notice = (
+                        f" (evicts {len(retention_plan.evictions)} item(s))"
+                    )
                 response = input(
-                    f"Apply memory suggestion {suggestion['namespace']}/{suggestion['key']}? [y/N]:"
+                    f"Apply memory suggestion {suggestion['namespace']}/{suggestion['key']}"
+                    f"{retention_notice}? [y/N]:"
                 )
                 if response.strip().lower() not in {"y", "yes"}:
+                    retention_event_id = None
+                    if retention_plan is not None and retention_decision is not None:
+                        denied_retention = MemoryDecision(
+                            action=retention_decision.action,
+                            allowed=False,
+                            confirmation_required=True,
+                            confirmation_provided=False,
+                            confirmation_mode=None,
+                            reason="confirmation_declined",
+                        )
+                        retention_event_id = memory_record_retention_decision(
+                            db_path,
+                            plan=retention_plan,
+                            namespace=suggestion["namespace"],
+                            key=suggestion["key"],
+                            actor=actor,
+                            policy_hash=policy_hash,
+                            policy_meta=_memory_policy_result_meta(denied_retention),
+                            related_ask_event_id=related_event_id,
+                        )
                     denied = MemoryDecision(
                         action=action,
                         allowed=False,
@@ -1430,6 +1693,21 @@ def _apply_memory_suggestions(
                         confirmation_mode=None,
                         reason="confirmation_declined",
                     )
+                    result_meta = _merge_result_meta(
+                        _memory_policy_result_meta(denied)
+                        if decision.confirmation_required
+                        else _memory_policy_result_meta(decision),
+                        retired_meta_by_namespace.get(suggestion["namespace"], {}),
+                    )
+                    if retention_event_id:
+                        result_meta = _merge_result_meta(
+                            result_meta,
+                            {
+                                "retention_event_id": retention_event_id,
+                                "retention_decision": "denied",
+                                "retention_reason": "confirmation_declined",
+                            },
+                        )
                     memory_record_event(
                         db_path,
                         operation="put",
@@ -1440,10 +1718,7 @@ def _apply_memory_suggestions(
                             value=value,
                             source="llm",
                         ),
-                        result_meta=_merge_result_meta(
-                            _memory_policy_result_meta(denied),
-                            retired_meta_by_namespace.get(suggestion["namespace"], {}),
-                        ),
+                        result_meta=result_meta,
                         related_ask_event_id=related_event_id,
                     )
                     result.denied += 1
@@ -1451,21 +1726,89 @@ def _apply_memory_suggestions(
                 else:
                     decision.confirmation_provided = True
                     decision.confirmation_mode = "prompt"
+                    if retention_decision and retention_decision.confirmation_required:
+                        retention_decision.confirmation_provided = True
+                        retention_decision.confirmation_mode = "prompt"
     elif confirm_needed and yes:
-        for _suggestion, _value, decision in confirm_needed:
+        for candidate in confirm_needed:
+            decision = candidate["decision"]
+            retention_decision = candidate["retention_decision"]
             decision.confirmation_provided = True
             decision.confirmation_mode = "yes-flag"
+            if retention_decision and retention_decision.confirmation_required:
+                retention_decision.confirmation_provided = True
+                retention_decision.confirmation_mode = "yes-flag"
 
-    for suggestion, value, decision in allowed:
+    for candidate in allowed:
+        suggestion = candidate["suggestion"]
+        value = candidate["value"]
+        decision = candidate["decision"]
+        retention_plan = candidate["retention_plan"]
+        retention_decision = candidate["retention_decision"]
+        retention_policy_meta = candidate["retention_policy_meta"]
         if not decision.allowed:
             continue
         if decision.confirmation_required and not decision.confirmation_provided:
             result.skipped += 1
             continue
+        if retention_decision and retention_decision.confirmation_required:
+            if not retention_decision.confirmation_provided:
+                result.skipped += 1
+                continue
         extra_meta = _merge_result_meta(
             _memory_policy_result_meta(decision),
             retired_meta_by_namespace.get(suggestion["namespace"], {}),
         )
+        if retention_plan is not None:
+            retention_event_id = memory_record_retention_decision(
+                db_path,
+                plan=retention_plan,
+                namespace=suggestion["namespace"],
+                key=suggestion["key"],
+                actor=actor,
+                policy_hash=policy_hash,
+                policy_meta=retention_policy_meta,
+                related_ask_event_id=related_event_id,
+            )
+            if retention_plan.shortfall:
+                memory_record_event(
+                    db_path,
+                    operation="put",
+                    actor=actor,
+                    policy_hash=policy_hash,
+                    request=_memory_request_from_suggestion(
+                        suggestion,
+                        value=value,
+                        source="llm",
+                    ),
+                    result_meta=_merge_result_meta(
+                        extra_meta,
+                        {
+                            "retention_event_id": retention_event_id,
+                            "retention_decision": "denied",
+                            "retention_reason": "shortfall",
+                        },
+                    ),
+                    related_ask_event_id=related_event_id,
+                )
+                result.denied += 1
+                continue
+            if retention_plan.evictions:
+                memory_apply_retention_evictions(
+                    db_path,
+                    plan=retention_plan,
+                    actor=actor,
+                    policy_hash=policy_hash,
+                    retention_event_id=retention_event_id,
+                    related_ask_event_id=related_event_id,
+                )
+            extra_meta = _merge_result_meta(
+                extra_meta,
+                {
+                    "retention_event_id": retention_event_id,
+                    "retention_evictions": len(retention_plan.evictions),
+                },
+            )
         item = memory_put_item(
             db_path,
             namespace=suggestion["namespace"],
@@ -1632,6 +1975,196 @@ def run_memory_put(args: argparse.Namespace) -> None:
                 raise SystemExit(2)
             decision.confirmation_provided = True
             decision.confirmation_mode = "prompt"
+    retention_meta: dict[str, object] = {}
+    retention_plan = memory_plan_retention_for_write(
+        args.db_path,
+        namespace=args.namespace,
+        key=args.key,
+        now=datetime.now(timezone.utc),
+    )
+    if retention_plan is not None:
+        retention_decision = None
+        retention_policy_meta = None
+        if retention_plan.evictions or retention_plan.shortfall:
+            retention_action = "memory.retention.enforce"
+            retention_decision = _evaluate_memory_policy(
+                policy,
+                retention_action,
+                args.namespace,
+            )
+            if not retention_decision.allowed:
+                retention_policy_meta = _memory_policy_result_meta(retention_decision)
+                retention_event_id = memory_record_retention_decision(
+                    args.db_path,
+                    plan=retention_plan,
+                    namespace=args.namespace,
+                    key=args.key,
+                    actor=actor,
+                    policy_hash=policy_hash,
+                    policy_meta=retention_policy_meta,
+                )
+                memory_record_event(
+                    args.db_path,
+                    operation="put",
+                    actor=actor,
+                    policy_hash=policy_hash,
+                    request=request,
+                    result_meta=_merge_result_meta(
+                        _merge_result_meta(
+                            _memory_policy_result_meta(decision),
+                            retired_meta,
+                        ),
+                        {
+                            "retention_event_id": retention_event_id,
+                            "retention_decision": "denied",
+                            "retention_reason": "policy_denied",
+                        },
+                    ),
+                )
+                print("Memory put blocked: retention policy denied.", file=sys.stderr)
+                raise SystemExit(2)
+            if retention_decision.confirmation_required:
+                if args.yes:
+                    retention_decision.confirmation_provided = True
+                    retention_decision.confirmation_mode = "yes-flag"
+                elif args.non_interactive or not _is_interactive_tty():
+                    denied = MemoryDecision(
+                        action=retention_decision.action,
+                        allowed=False,
+                        confirmation_required=True,
+                        confirmation_provided=False,
+                        confirmation_mode=None,
+                        reason="confirmation_required",
+                    )
+                    retention_policy_meta = _memory_policy_result_meta(denied)
+                    retention_event_id = memory_record_retention_decision(
+                        args.db_path,
+                        plan=retention_plan,
+                        namespace=args.namespace,
+                        key=args.key,
+                        actor=actor,
+                        policy_hash=policy_hash,
+                        policy_meta=retention_policy_meta,
+                    )
+                    memory_record_event(
+                        args.db_path,
+                        operation="put",
+                        actor=actor,
+                        policy_hash=policy_hash,
+                        request=request,
+                        result_meta=_merge_result_meta(
+                            _merge_result_meta(
+                                _memory_policy_result_meta(decision),
+                                retired_meta,
+                            ),
+                            {
+                                "retention_event_id": retention_event_id,
+                                "retention_decision": "denied",
+                                "retention_reason": "confirmation_required",
+                            },
+                        ),
+                    )
+                    print(
+                        "Confirmation required for retention enforcement. "
+                        "Re-run with --yes to proceed.",
+                        file=sys.stderr,
+                    )
+                    raise SystemExit(2)
+                else:
+                    response = input(
+                        f"Retention would tombstone {len(retention_plan.evictions)} "
+                        f"item(s) in {args.namespace}. Proceed? [y/N]:"
+                    )
+                    if response.strip().lower() not in {"y", "yes"}:
+                        denied = MemoryDecision(
+                            action=retention_decision.action,
+                            allowed=False,
+                            confirmation_required=True,
+                            confirmation_provided=False,
+                            confirmation_mode=None,
+                            reason="confirmation_declined",
+                        )
+                        retention_policy_meta = _memory_policy_result_meta(denied)
+                        retention_event_id = memory_record_retention_decision(
+                            args.db_path,
+                            plan=retention_plan,
+                            namespace=args.namespace,
+                            key=args.key,
+                            actor=actor,
+                            policy_hash=policy_hash,
+                            policy_meta=retention_policy_meta,
+                        )
+                        memory_record_event(
+                            args.db_path,
+                            operation="put",
+                            actor=actor,
+                            policy_hash=policy_hash,
+                            request=request,
+                            result_meta=_merge_result_meta(
+                                _merge_result_meta(
+                                    _memory_policy_result_meta(decision),
+                                    retired_meta,
+                                ),
+                                {
+                                    "retention_event_id": retention_event_id,
+                                    "retention_decision": "denied",
+                                    "retention_reason": "confirmation_declined",
+                                },
+                            ),
+                        )
+                        print(
+                            "Confirmation declined; retention not applied.",
+                            file=sys.stderr,
+                        )
+                        raise SystemExit(2)
+                    retention_decision.confirmation_provided = True
+                    retention_decision.confirmation_mode = "prompt"
+            retention_policy_meta = _memory_policy_result_meta(retention_decision)
+        retention_event_id = memory_record_retention_decision(
+            args.db_path,
+            plan=retention_plan,
+            namespace=args.namespace,
+            key=args.key,
+            actor=actor,
+            policy_hash=policy_hash,
+            policy_meta=retention_policy_meta,
+        )
+        if retention_plan.shortfall:
+            memory_record_event(
+                args.db_path,
+                operation="put",
+                actor=actor,
+                policy_hash=policy_hash,
+                request=request,
+                result_meta=_merge_result_meta(
+                    _merge_result_meta(
+                        _memory_policy_result_meta(decision),
+                        retired_meta,
+                    ),
+                    {
+                        "retention_event_id": retention_event_id,
+                        "retention_decision": "denied",
+                        "retention_reason": "shortfall",
+                    },
+                ),
+            )
+            print(
+                "Memory put blocked: retention rule cannot be satisfied.",
+                file=sys.stderr,
+            )
+            raise SystemExit(2)
+        if retention_plan.evictions:
+            memory_apply_retention_evictions(
+                args.db_path,
+                plan=retention_plan,
+                actor=actor,
+                policy_hash=policy_hash,
+                retention_event_id=retention_event_id,
+            )
+        retention_meta = {
+            "retention_event_id": retention_event_id,
+            "retention_evictions": len(retention_plan.evictions),
+        }
     item = memory_put_item(
         args.db_path,
         namespace=args.namespace,
@@ -1646,7 +2179,7 @@ def run_memory_put(args: argparse.Namespace) -> None:
         policy_hash=policy_hash,
         result_meta_extra=_merge_result_meta(
             _memory_policy_result_meta(decision),
-            retired_meta,
+            _merge_result_meta(retired_meta, retention_meta),
         ),
     )
     print(f"DB: {args.db_path}")
@@ -1940,6 +2473,252 @@ def run_memory_namespace_retire(args: argparse.Namespace) -> None:
         print(f"Retired memory namespace: {namespace.namespace}")
     else:
         print(f"Memory namespace already retired: {namespace.namespace}")
+
+
+def _validate_retention_value(value: int | None, label: str) -> int | None:
+    if value is None:
+        return None
+    if value < 1:
+        print(f"{label} must be >= 1.", file=sys.stderr)
+        raise SystemExit(2)
+    return value
+
+
+def run_memory_retention_list(args: argparse.Namespace) -> None:
+    actor = "operator"
+    _, resolved_policy_path = _load_memory_policy(args.policy)
+    policy_hash = _memory_policy_hash(resolved_policy_path)
+    rules = memory_list_retention_rules(args.db_path)
+    memory_record_event(
+        args.db_path,
+        operation="retention.list",
+        actor=actor,
+        policy_hash=policy_hash,
+        request={},
+        result_meta={"count": len(rules)},
+    )
+    if args.json:
+        payload = [_serialize_memory_retention_detail(rule) for rule in rules]
+        print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+        return
+    _print_memory_retention_list(rules)
+
+
+def run_memory_retention_show(args: argparse.Namespace) -> None:
+    actor = "operator"
+    _, resolved_policy_path = _load_memory_policy(args.policy)
+    policy_hash = _memory_policy_hash(resolved_policy_path)
+    detail = memory_get_retention_detail(args.db_path, namespace=args.namespace)
+    memory_record_event(
+        args.db_path,
+        operation="retention.show",
+        actor=actor,
+        policy_hash=policy_hash,
+        request={"namespace": args.namespace},
+        result_meta={"found": detail is not None},
+    )
+    if detail is None:
+        print(f"Retention rule not found: {args.namespace}")
+        raise SystemExit(2)
+    if args.json:
+        print(json.dumps(_serialize_memory_retention_detail(detail), ensure_ascii=False, sort_keys=True))
+        return
+    _print_memory_retention_detail(detail)
+
+
+def run_memory_retention_set(args: argparse.Namespace) -> None:
+    actor = "operator"
+    policy, resolved_policy_path = _load_memory_policy(args.policy)
+    policy_hash = _memory_policy_hash(resolved_policy_path)
+    max_items = _validate_retention_value(args.max_items, "max-items")
+    ttl_seconds = _validate_retention_value(args.ttl_seconds, "ttl-seconds")
+    if max_items is None and ttl_seconds is None:
+        print("Provide --max-items and/or --ttl-seconds.", file=sys.stderr)
+        raise SystemExit(2)
+    action = "memory.retention.set"
+    decision = _evaluate_memory_policy(policy, action, args.namespace)
+    request = {
+        "namespace": args.namespace,
+        "max_items": max_items,
+        "ttl_seconds": ttl_seconds,
+        "reason": args.reason,
+    }
+    if not decision.allowed:
+        memory_record_event(
+            args.db_path,
+            operation="retention.set",
+            actor=actor,
+            policy_hash=policy_hash,
+            request=request,
+            result_meta=_memory_policy_result_meta(decision),
+        )
+        print("Retention set blocked by policy.", file=sys.stderr)
+        raise SystemExit(2)
+    if decision.confirmation_required:
+        if args.yes:
+            decision.confirmation_provided = True
+            decision.confirmation_mode = "yes-flag"
+        elif args.non_interactive or not _is_interactive_tty():
+            denied = MemoryDecision(
+                action=decision.action,
+                allowed=False,
+                confirmation_required=True,
+                confirmation_provided=False,
+                confirmation_mode=None,
+                reason="confirmation_required",
+            )
+            memory_record_event(
+                args.db_path,
+                operation="retention.set",
+                actor=actor,
+                policy_hash=policy_hash,
+                request=request,
+                result_meta=_memory_policy_result_meta(denied),
+            )
+            print(
+                "Confirmation required for retention set. Re-run with --yes to proceed.",
+                file=sys.stderr,
+            )
+            raise SystemExit(2)
+        else:
+            response = input(
+                f"Set retention for namespace {args.namespace}? [y/N]:"
+            )
+            if response.strip().lower() not in {"y", "yes"}:
+                denied = MemoryDecision(
+                    action=decision.action,
+                    allowed=False,
+                    confirmation_required=True,
+                    confirmation_provided=False,
+                    confirmation_mode=None,
+                    reason="confirmation_declined",
+                )
+                memory_record_event(
+                    args.db_path,
+                    operation="retention.set",
+                    actor=actor,
+                    policy_hash=policy_hash,
+                    request=request,
+                    result_meta=_memory_policy_result_meta(denied),
+                )
+                print("Confirmation declined; retention not updated.", file=sys.stderr)
+                raise SystemExit(2)
+            decision.confirmation_provided = True
+            decision.confirmation_mode = "prompt"
+    rule, changed = memory_set_retention_rule(
+        args.db_path,
+        namespace=args.namespace,
+        max_items=max_items,
+        ttl_seconds=ttl_seconds,
+        policy_source="operator",
+    )
+    result_meta = _merge_result_meta(
+        _memory_policy_result_meta(decision),
+        {
+            "changed": changed,
+            "policy_source": rule.policy_source,
+            "created_at": rule.created_at,
+            "updated_at": rule.updated_at,
+        },
+    )
+    memory_record_event(
+        args.db_path,
+        operation="retention.set",
+        actor=actor,
+        policy_hash=policy_hash,
+        request=request,
+        result_meta=result_meta,
+    )
+    status = "Updated" if changed else "Reaffirmed"
+    print(f"{status} retention for {rule.namespace}.")
+
+
+def run_memory_retention_clear(args: argparse.Namespace) -> None:
+    actor = "operator"
+    policy, resolved_policy_path = _load_memory_policy(args.policy)
+    policy_hash = _memory_policy_hash(resolved_policy_path)
+    action = "memory.retention.clear"
+    decision = _evaluate_memory_policy(policy, action, args.namespace)
+    request = {"namespace": args.namespace}
+    if not decision.allowed:
+        memory_record_event(
+            args.db_path,
+            operation="retention.clear",
+            actor=actor,
+            policy_hash=policy_hash,
+            request=request,
+            result_meta=_memory_policy_result_meta(decision),
+        )
+        print("Retention clear blocked by policy.", file=sys.stderr)
+        raise SystemExit(2)
+    if decision.confirmation_required:
+        if args.yes:
+            decision.confirmation_provided = True
+            decision.confirmation_mode = "yes-flag"
+        elif args.non_interactive or not _is_interactive_tty():
+            denied = MemoryDecision(
+                action=decision.action,
+                allowed=False,
+                confirmation_required=True,
+                confirmation_provided=False,
+                confirmation_mode=None,
+                reason="confirmation_required",
+            )
+            memory_record_event(
+                args.db_path,
+                operation="retention.clear",
+                actor=actor,
+                policy_hash=policy_hash,
+                request=request,
+                result_meta=_memory_policy_result_meta(denied),
+            )
+            print(
+                "Confirmation required for retention clear. Re-run with --yes to proceed.",
+                file=sys.stderr,
+            )
+            raise SystemExit(2)
+        else:
+            response = input(
+                f"Clear retention for namespace {args.namespace}? [y/N]:"
+            )
+            if response.strip().lower() not in {"y", "yes"}:
+                denied = MemoryDecision(
+                    action=decision.action,
+                    allowed=False,
+                    confirmation_required=True,
+                    confirmation_provided=False,
+                    confirmation_mode=None,
+                    reason="confirmation_declined",
+                )
+                memory_record_event(
+                    args.db_path,
+                    operation="retention.clear",
+                    actor=actor,
+                    policy_hash=policy_hash,
+                    request=request,
+                    result_meta=_memory_policy_result_meta(denied),
+                )
+                print("Confirmation declined; retention not cleared.", file=sys.stderr)
+                raise SystemExit(2)
+            decision.confirmation_provided = True
+            decision.confirmation_mode = "prompt"
+    changed = memory_clear_retention_rule(args.db_path, namespace=args.namespace)
+    result_meta = _merge_result_meta(
+        _memory_policy_result_meta(decision),
+        {"changed": changed},
+    )
+    memory_record_event(
+        args.db_path,
+        operation="retention.clear",
+        actor=actor,
+        policy_hash=policy_hash,
+        request=request,
+        result_meta=result_meta,
+    )
+    if changed:
+        print(f"Cleared retention for {args.namespace}.")
+    else:
+        print(f"No retention rule found for {args.namespace}.")
 
 
 def run_export(
@@ -2970,6 +3749,22 @@ def _handle_memory_namespace_show(args: argparse.Namespace) -> None:
 
 def _handle_memory_namespace_retire(args: argparse.Namespace) -> None:
     run_memory_namespace_retire(args)
+
+
+def _handle_memory_retention_list(args: argparse.Namespace) -> None:
+    run_memory_retention_list(args)
+
+
+def _handle_memory_retention_show(args: argparse.Namespace) -> None:
+    run_memory_retention_show(args)
+
+
+def _handle_memory_retention_set(args: argparse.Namespace) -> None:
+    run_memory_retention_set(args)
+
+
+def _handle_memory_retention_clear(args: argparse.Namespace) -> None:
+    run_memory_retention_clear(args)
 
 
 def _handle_export(args: argparse.Namespace) -> None:
@@ -4031,6 +4826,124 @@ def build_parser() -> argparse.ArgumentParser:
         help="Optional policy file path for audit hashing",
     )
     memory_namespace_retire_parser.set_defaults(handler=_handle_memory_namespace_retire)
+
+    memory_retention_parser = memory_subparsers.add_parser(
+        "retention",
+        help="Manage memory retention rules",
+        parents=[db_parent_optional],
+    )
+    memory_retention_subparsers = memory_retention_parser.add_subparsers(
+        dest="memory_retention_command",
+        required=True,
+    )
+    memory_retention_list_parser = memory_retention_subparsers.add_parser(
+        "list",
+        help="List memory retention rules",
+        parents=[db_parent_optional],
+    )
+    memory_retention_list_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Output JSON",
+    )
+    memory_retention_list_parser.add_argument(
+        "--policy",
+        default=None,
+        help="Optional policy file path for audit hashing",
+    )
+    memory_retention_list_parser.set_defaults(handler=_handle_memory_retention_list)
+
+    memory_retention_show_parser = memory_retention_subparsers.add_parser(
+        "show",
+        help="Show memory retention details",
+        parents=[db_parent_optional],
+    )
+    memory_retention_show_parser.add_argument(
+        "namespace",
+        help="Namespace with retention rules",
+    )
+    memory_retention_show_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Output JSON",
+    )
+    memory_retention_show_parser.add_argument(
+        "--policy",
+        default=None,
+        help="Optional policy file path for audit hashing",
+    )
+    memory_retention_show_parser.set_defaults(handler=_handle_memory_retention_show)
+
+    memory_retention_set_parser = memory_retention_subparsers.add_parser(
+        "set",
+        help="Set memory retention rules",
+        parents=[db_parent_optional],
+    )
+    memory_retention_set_parser.add_argument(
+        "namespace",
+        help="Namespace to configure",
+    )
+    memory_retention_set_parser.add_argument(
+        "--max-items",
+        dest="max_items",
+        type=int,
+        default=None,
+        help="Maximum number of active items to retain",
+    )
+    memory_retention_set_parser.add_argument(
+        "--ttl-seconds",
+        dest="ttl_seconds",
+        type=int,
+        default=None,
+        help="Time-to-live in seconds",
+    )
+    memory_retention_set_parser.add_argument(
+        "--reason",
+        required=True,
+        help="Reason for setting retention",
+    )
+    memory_retention_set_parser.add_argument(
+        "--yes",
+        action="store_true",
+        help="Skip confirmation prompts for retention updates",
+    )
+    memory_retention_set_parser.add_argument(
+        "--non-interactive",
+        action="store_true",
+        help="Fail closed instead of prompting for confirmation",
+    )
+    memory_retention_set_parser.add_argument(
+        "--policy",
+        default=None,
+        help="Optional policy file path for audit hashing",
+    )
+    memory_retention_set_parser.set_defaults(handler=_handle_memory_retention_set)
+
+    memory_retention_clear_parser = memory_retention_subparsers.add_parser(
+        "clear",
+        help="Clear memory retention rules",
+        parents=[db_parent_optional],
+    )
+    memory_retention_clear_parser.add_argument(
+        "namespace",
+        help="Namespace to clear",
+    )
+    memory_retention_clear_parser.add_argument(
+        "--yes",
+        action="store_true",
+        help="Skip confirmation prompts for retention clear",
+    )
+    memory_retention_clear_parser.add_argument(
+        "--non-interactive",
+        action="store_true",
+        help="Fail closed instead of prompting for confirmation",
+    )
+    memory_retention_clear_parser.add_argument(
+        "--policy",
+        default=None,
+        help="Optional policy file path for audit hashing",
+    )
+    memory_retention_clear_parser.set_defaults(handler=_handle_memory_retention_clear)
 
     memory_snapshot_parser = memory_subparsers.add_parser(
         "snapshot",

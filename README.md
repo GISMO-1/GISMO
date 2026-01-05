@@ -125,6 +125,10 @@ Memory management (policy-gated; confirmation required for high-risk namespaces)
   gismo memory put --namespace global --key key --kind note --value-text "value" \
     --confidence high --source operator --policy policy/dev-safe.json --yes
   gismo memory delete --namespace global key --policy policy/dev-safe.json --yes
+  gismo memory namespace list --policy policy/dev-safe.json
+  gismo memory namespace show global --policy policy/dev-safe.json
+  gismo memory namespace retire global --reason "governance" \
+    --policy /path/to/policy.json --yes
   gismo memory snapshot export --namespace project:* --out snapshots/project.json \
     --policy policy/dev-safe.json
   gismo memory snapshot diff --in snapshots/project.json --db .gismo/state.db \
@@ -137,6 +141,7 @@ Memory management (policy-gated; confirmation required for high-risk namespaces)
 Notes:
 - Global/project namespaces require confirmation unless policy explicitly exempts them.
 - Use --non-interactive to fail closed instead of prompting.
+- Namespace retirement requires a policy that allows memory.namespace.retire for the target namespace.
 - Snapshot item_hash values are computed from a canonical JSON payload that includes
   created_at/updated_at timestamps; snapshot_hash is the sha256 of ordered item_hashes.
   gismo export RUN_ID

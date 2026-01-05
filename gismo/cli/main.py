@@ -45,11 +45,16 @@ from gismo.llm.ollama import OllamaError, ollama_chat, resolve_ollama_config
 from gismo.llm.prompts import build_system_prompt, build_user_prompt
 from gismo.memory.store import (
     MemoryItem,
+    MemoryNamespaceDetail,
+    MemoryNamespaceSummary,
     get_item as memory_get_item,
+    get_namespace as memory_get_namespace,
     list_prompt_items as memory_list_prompt_items,
+    list_namespaces as memory_list_namespaces,
     policy_hash_for_path,
     put_item as memory_put_item,
     record_event as memory_record_event,
+    retire_namespace as memory_retire_namespace,
     search_items as memory_search_items,
     tombstone_item as memory_tombstone_item,
 )
@@ -110,6 +115,51 @@ def _print_memory_search_results(items: list[MemoryItem]) -> None:
             f"- {item.namespace}/{item.key} kind={item.kind} "
             f"updated={item.updated_at} tombstoned={item.is_tombstoned}"
         )
+
+
+def _serialize_memory_namespace_summary(
+    namespace: MemoryNamespaceSummary,
+) -> dict[str, object]:
+    return {
+        "namespace": namespace.namespace,
+        "item_count": namespace.item_count,
+        "tombstone_count": namespace.tombstone_count,
+        "last_write_at": namespace.last_write_at,
+        "retired": namespace.retired,
+        "retired_at": namespace.retired_at,
+    }
+
+
+def _serialize_memory_namespace_detail(
+    namespace: MemoryNamespaceDetail,
+) -> dict[str, object]:
+    payload = _serialize_memory_namespace_summary(namespace)
+    payload["retired_reason"] = namespace.retired_reason
+    return payload
+
+
+def _print_memory_namespace_list(namespaces: list[MemoryNamespaceSummary]) -> None:
+    if not namespaces:
+        print("(no namespaces)")
+        return
+    for namespace in namespaces:
+        last_write = namespace.last_write_at or "-"
+        retired_flag = "yes" if namespace.retired else "no"
+        print(
+            f"- {namespace.namespace} items={namespace.item_count} "
+            f"tombstones={namespace.tombstone_count} last_write={last_write} "
+            f"retired={retired_flag}"
+        )
+
+
+def _print_memory_namespace_detail(namespace: MemoryNamespaceDetail) -> None:
+    print(f"Namespace:     {namespace.namespace}")
+    print(f"Items:         {namespace.item_count}")
+    print(f"Tombstones:    {namespace.tombstone_count}")
+    print(f"Last write:    {namespace.last_write_at or '-'}")
+    print(f"Retired:       {'yes' if namespace.retired else 'no'}")
+    print(f"Retired at:    {namespace.retired_at or '-'}")
+    print(f"Retired reason: {namespace.retired_reason or '-'}")
 
 
 def _coerce_str_list(value: object) -> list[str]:
@@ -1160,6 +1210,54 @@ def _memory_policy_result_meta(decision: MemoryDecision) -> dict[str, object]:
     }
 
 
+def _retired_namespace_meta(namespace: MemoryNamespaceDetail) -> dict[str, object]:
+    return {
+        "namespace_retired": True,
+        "retired_at": namespace.retired_at,
+        "retired_reason": namespace.retired_reason,
+    }
+
+
+def _merge_result_meta(
+    policy_meta: dict[str, object],
+    extra_meta: dict[str, object],
+) -> dict[str, object]:
+    merged = dict(policy_meta)
+    merged.update(extra_meta)
+    return merged
+
+
+def _memory_write_decision(
+    policy: PermissionPolicy,
+    db_path: str,
+    *,
+    namespace: str,
+    action: str,
+) -> tuple[MemoryDecision, dict[str, object]]:
+    decision = _evaluate_memory_policy(policy, action, namespace)
+    if not decision.allowed:
+        return decision, {}
+    namespace_detail = memory_get_namespace(db_path, namespace=namespace)
+    if not namespace_detail or not namespace_detail.retired:
+        return decision, {}
+    override_action = f"{action}.retired"
+    override_decision = _evaluate_memory_policy(policy, override_action, namespace)
+    retired_meta = _retired_namespace_meta(namespace_detail)
+    if not override_decision.allowed:
+        return override_decision, retired_meta
+    combined = MemoryDecision(
+        action=override_action,
+        allowed=True,
+        confirmation_required=(
+            decision.confirmation_required or override_decision.confirmation_required
+        ),
+        confirmation_provided=False,
+        confirmation_mode=None,
+        reason=None,
+    )
+    return combined, retired_meta
+
+
 def _memory_request_from_suggestion(
     suggestion: dict[str, str],
     *,
@@ -1210,9 +1308,17 @@ def _apply_memory_suggestions(
         decision_path=decision_path,
     )
     candidates: list[tuple[dict[str, str], object, MemoryDecision]] = []
+    retired_meta_by_namespace: dict[str, dict[str, object]] = {}
     for suggestion in suggestions:
         value = json.loads(suggestion["value_json"])
-        decision = _evaluate_memory_policy(policy, action, suggestion["namespace"])
+        decision, retired_meta = _memory_write_decision(
+            policy,
+            db_path,
+            namespace=suggestion["namespace"],
+            action=action,
+        )
+        if retired_meta:
+            retired_meta_by_namespace[suggestion["namespace"]] = retired_meta
         candidates.append((suggestion, value, decision))
         if not decision.allowed:
             memory_record_event(
@@ -1225,7 +1331,10 @@ def _apply_memory_suggestions(
                     value=value,
                     source="llm",
                 ),
-                result_meta=_memory_policy_result_meta(decision),
+                result_meta=_merge_result_meta(
+                    _memory_policy_result_meta(decision),
+                    retired_meta_by_namespace.get(suggestion["namespace"], {}),
+                ),
                 related_ask_event_id=related_event_id,
             )
             result.denied += 1
@@ -1264,7 +1373,10 @@ def _apply_memory_suggestions(
                         value=value,
                         source="llm",
                     ),
-                    result_meta=_memory_policy_result_meta(denied),
+                    result_meta=_merge_result_meta(
+                        _memory_policy_result_meta(denied),
+                        retired_meta_by_namespace.get(suggestion["namespace"], {}),
+                    ),
                     related_ask_event_id=related_event_id,
                 )
                 result.denied += 1
@@ -1293,7 +1405,10 @@ def _apply_memory_suggestions(
                             value=value,
                             source="llm",
                         ),
-                        result_meta=_memory_policy_result_meta(denied),
+                        result_meta=_merge_result_meta(
+                            _memory_policy_result_meta(denied),
+                            retired_meta_by_namespace.get(suggestion["namespace"], {}),
+                        ),
                         related_ask_event_id=related_event_id,
                     )
                     result.denied += 1
@@ -1325,7 +1440,10 @@ def _apply_memory_suggestions(
                             value=value,
                             source="llm",
                         ),
-                        result_meta=_memory_policy_result_meta(denied),
+                        result_meta=_merge_result_meta(
+                            _memory_policy_result_meta(denied),
+                            retired_meta_by_namespace.get(suggestion["namespace"], {}),
+                        ),
                         related_ask_event_id=related_event_id,
                     )
                     result.denied += 1
@@ -1344,6 +1462,10 @@ def _apply_memory_suggestions(
         if decision.confirmation_required and not decision.confirmation_provided:
             result.skipped += 1
             continue
+        extra_meta = _merge_result_meta(
+            _memory_policy_result_meta(decision),
+            retired_meta_by_namespace.get(suggestion["namespace"], {}),
+        )
         item = memory_put_item(
             db_path,
             namespace=suggestion["namespace"],
@@ -1356,7 +1478,7 @@ def _apply_memory_suggestions(
             ttl_seconds=None,
             actor=actor,
             policy_hash=policy_hash,
-            result_meta_extra=_memory_policy_result_meta(decision),
+            result_meta_extra=extra_meta,
             related_ask_event_id=related_event_id,
         )
         result.applied += 1
@@ -1420,7 +1542,12 @@ def run_memory_put(args: argparse.Namespace) -> None:
     value = _parse_memory_value(args.value_text, args.value)
     tags = args.tag or []
     action = "memory.put"
-    decision = _evaluate_memory_policy(policy, action, args.namespace)
+    decision, retired_meta = _memory_write_decision(
+        policy,
+        args.db_path,
+        namespace=args.namespace,
+        action=action,
+    )
     request = {
         "namespace": args.namespace,
         "key": args.key,
@@ -1438,9 +1565,15 @@ def run_memory_put(args: argparse.Namespace) -> None:
             actor=actor,
             policy_hash=policy_hash,
             request=request,
-            result_meta=_memory_policy_result_meta(decision),
+            result_meta=_merge_result_meta(
+                _memory_policy_result_meta(decision),
+                retired_meta,
+            ),
         )
-        print("Memory put blocked by policy.", file=sys.stderr)
+        if retired_meta:
+            print("Memory put blocked: namespace is retired.", file=sys.stderr)
+        else:
+            print("Memory put blocked by policy.", file=sys.stderr)
         raise SystemExit(2)
     if decision.confirmation_required:
         if args.yes:
@@ -1461,7 +1594,10 @@ def run_memory_put(args: argparse.Namespace) -> None:
                 actor=actor,
                 policy_hash=policy_hash,
                 request=request,
-                result_meta=_memory_policy_result_meta(denied),
+                result_meta=_merge_result_meta(
+                    _memory_policy_result_meta(denied),
+                    retired_meta,
+                ),
             )
             print(
                 "Confirmation required for memory put. Re-run with --yes to proceed.",
@@ -1487,7 +1623,10 @@ def run_memory_put(args: argparse.Namespace) -> None:
                     actor=actor,
                     policy_hash=policy_hash,
                     request=request,
-                    result_meta=_memory_policy_result_meta(denied),
+                    result_meta=_merge_result_meta(
+                        _memory_policy_result_meta(denied),
+                        retired_meta,
+                    ),
                 )
                 print("Confirmation declined; memory not written.", file=sys.stderr)
                 raise SystemExit(2)
@@ -1505,7 +1644,10 @@ def run_memory_put(args: argparse.Namespace) -> None:
         ttl_seconds=args.ttl_seconds,
         actor=actor,
         policy_hash=policy_hash,
-        result_meta_extra=_memory_policy_result_meta(decision),
+        result_meta_extra=_merge_result_meta(
+            _memory_policy_result_meta(decision),
+            retired_meta,
+        ),
     )
     print(f"DB: {args.db_path}")
     print("Stored memory item:")
@@ -1646,6 +1788,158 @@ def run_memory_delete(args: argparse.Namespace) -> None:
     print(f"DB: {args.db_path}")
     print("Tombstoned memory item:")
     _print_memory_item_summary(item)
+
+
+def run_memory_namespace_list(args: argparse.Namespace) -> None:
+    actor = "operator"
+    _, resolved_policy_path = _load_memory_policy(args.policy)
+    policy_hash = _memory_policy_hash(resolved_policy_path)
+    namespaces = memory_list_namespaces(args.db_path)
+    memory_record_event(
+        args.db_path,
+        operation="namespace.list",
+        actor=actor,
+        policy_hash=policy_hash,
+        request={},
+        result_meta={"count": len(namespaces)},
+    )
+    if args.json:
+        payload = [_serialize_memory_namespace_summary(entry) for entry in namespaces]
+        print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+        return
+    _print_memory_namespace_list(namespaces)
+
+
+def run_memory_namespace_show(args: argparse.Namespace) -> None:
+    actor = "operator"
+    _, resolved_policy_path = _load_memory_policy(args.policy)
+    policy_hash = _memory_policy_hash(resolved_policy_path)
+    namespace = memory_get_namespace(args.db_path, namespace=args.namespace)
+    memory_record_event(
+        args.db_path,
+        operation="namespace.show",
+        actor=actor,
+        policy_hash=policy_hash,
+        request={"namespace": args.namespace},
+        result_meta={"found": namespace is not None},
+    )
+    if namespace is None:
+        print(f"Memory namespace not found: {args.namespace}")
+        raise SystemExit(2)
+    if args.json:
+        print(json.dumps(_serialize_memory_namespace_detail(namespace), ensure_ascii=False, sort_keys=True))
+        return
+    _print_memory_namespace_detail(namespace)
+
+
+def run_memory_namespace_retire(args: argparse.Namespace) -> None:
+    actor = "operator"
+    policy, resolved_policy_path = _load_memory_policy(args.policy)
+    policy_hash = _memory_policy_hash(resolved_policy_path)
+    action = "memory.namespace.retire"
+    decision = _evaluate_memory_policy(policy, action, args.namespace)
+    request = {"namespace": args.namespace, "reason": args.reason}
+    if not decision.allowed:
+        result_meta = _merge_result_meta(
+            _memory_policy_result_meta(decision),
+            {"policy_path": resolved_policy_path, "retire_reason": args.reason},
+        )
+        memory_record_event(
+            args.db_path,
+            operation="namespace.retire",
+            actor=actor,
+            policy_hash=policy_hash,
+            request=request,
+            result_meta=result_meta,
+        )
+        print("Namespace retirement blocked by policy.", file=sys.stderr)
+        raise SystemExit(2)
+    if decision.confirmation_required:
+        if args.yes:
+            decision.confirmation_provided = True
+            decision.confirmation_mode = "yes-flag"
+        elif args.non_interactive or not _is_interactive_tty():
+            denied = MemoryDecision(
+                action=decision.action,
+                allowed=False,
+                confirmation_required=True,
+                confirmation_provided=False,
+                confirmation_mode=None,
+                reason="confirmation_required",
+            )
+            result_meta = _merge_result_meta(
+                _memory_policy_result_meta(denied),
+                {"policy_path": resolved_policy_path, "retire_reason": args.reason},
+            )
+            memory_record_event(
+                args.db_path,
+                operation="namespace.retire",
+                actor=actor,
+                policy_hash=policy_hash,
+                request=request,
+                result_meta=result_meta,
+            )
+            print(
+                "Confirmation required for namespace retire. Re-run with --yes to proceed.",
+                file=sys.stderr,
+            )
+            raise SystemExit(2)
+        else:
+            response = input(
+                f"Retire memory namespace {args.namespace}? [y/N]:"
+            )
+            if response.strip().lower() not in {"y", "yes"}:
+                denied = MemoryDecision(
+                    action=decision.action,
+                    allowed=False,
+                    confirmation_required=True,
+                    confirmation_provided=False,
+                    confirmation_mode=None,
+                    reason="confirmation_declined",
+                )
+                result_meta = _merge_result_meta(
+                    _memory_policy_result_meta(denied),
+                    {"policy_path": resolved_policy_path, "retire_reason": args.reason},
+                )
+                memory_record_event(
+                    args.db_path,
+                    operation="namespace.retire",
+                    actor=actor,
+                    policy_hash=policy_hash,
+                    request=request,
+                    result_meta=result_meta,
+                )
+                print("Confirmation declined; namespace not retired.", file=sys.stderr)
+                raise SystemExit(2)
+            decision.confirmation_provided = True
+            decision.confirmation_mode = "prompt"
+    namespace, changed = memory_retire_namespace(
+        args.db_path,
+        namespace=args.namespace,
+        reason=args.reason,
+    )
+    result_meta = _merge_result_meta(
+        _memory_policy_result_meta(decision),
+        {
+            "policy_path": resolved_policy_path,
+            "retire_reason": args.reason,
+            "retired": namespace.retired,
+            "retired_at": namespace.retired_at,
+            "changed": changed,
+        },
+    )
+    memory_record_event(
+        args.db_path,
+        operation="namespace.retire",
+        actor=actor,
+        policy_hash=policy_hash,
+        request=request,
+        result_meta=result_meta,
+    )
+    if changed:
+        print(f"Retired memory namespace: {namespace.namespace}")
+    else:
+        print(f"Memory namespace already retired: {namespace.namespace}")
 
 
 def run_export(
@@ -2666,6 +2960,18 @@ def _handle_memory_snapshot_import(args: argparse.Namespace) -> None:
     memory_snapshot_cli.run_memory_snapshot_import(args, _snapshot_dependencies())
 
 
+def _handle_memory_namespace_list(args: argparse.Namespace) -> None:
+    run_memory_namespace_list(args)
+
+
+def _handle_memory_namespace_show(args: argparse.Namespace) -> None:
+    run_memory_namespace_show(args)
+
+
+def _handle_memory_namespace_retire(args: argparse.Namespace) -> None:
+    run_memory_namespace_retire(args)
+
+
 def _handle_export(args: argparse.Namespace) -> None:
     run_id = args.run_id
     if getattr(args, "run_id_arg", None):
@@ -3647,6 +3953,84 @@ def build_parser() -> argparse.ArgumentParser:
         help="Fail closed instead of prompting for confirmation",
     )
     memory_delete_parser.set_defaults(handler=_handle_memory_delete)
+
+    memory_namespace_parser = memory_subparsers.add_parser(
+        "namespace",
+        help="Manage memory namespaces",
+        parents=[db_parent_optional],
+    )
+    memory_namespace_subparsers = memory_namespace_parser.add_subparsers(
+        dest="memory_namespace_command",
+        required=True,
+    )
+    memory_namespace_list_parser = memory_namespace_subparsers.add_parser(
+        "list",
+        help="List memory namespaces",
+        parents=[db_parent_optional],
+    )
+    memory_namespace_list_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Output JSON",
+    )
+    memory_namespace_list_parser.add_argument(
+        "--policy",
+        default=None,
+        help="Optional policy file path for audit hashing",
+    )
+    memory_namespace_list_parser.set_defaults(handler=_handle_memory_namespace_list)
+
+    memory_namespace_show_parser = memory_namespace_subparsers.add_parser(
+        "show",
+        help="Show memory namespace details",
+        parents=[db_parent_optional],
+    )
+    memory_namespace_show_parser.add_argument(
+        "namespace",
+        help="Memory namespace to inspect",
+    )
+    memory_namespace_show_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Output JSON",
+    )
+    memory_namespace_show_parser.add_argument(
+        "--policy",
+        default=None,
+        help="Optional policy file path for audit hashing",
+    )
+    memory_namespace_show_parser.set_defaults(handler=_handle_memory_namespace_show)
+
+    memory_namespace_retire_parser = memory_namespace_subparsers.add_parser(
+        "retire",
+        help="Retire a memory namespace (metadata only)",
+        parents=[db_parent_optional],
+    )
+    memory_namespace_retire_parser.add_argument(
+        "namespace",
+        help="Memory namespace to retire",
+    )
+    memory_namespace_retire_parser.add_argument(
+        "--reason",
+        required=True,
+        help="Reason for retiring the namespace",
+    )
+    memory_namespace_retire_parser.add_argument(
+        "--yes",
+        action="store_true",
+        help="Skip confirmation prompts for namespace retirement",
+    )
+    memory_namespace_retire_parser.add_argument(
+        "--non-interactive",
+        action="store_true",
+        help="Fail closed instead of prompting for confirmation",
+    )
+    memory_namespace_retire_parser.add_argument(
+        "--policy",
+        default=None,
+        help="Optional policy file path for audit hashing",
+    )
+    memory_namespace_retire_parser.set_defaults(handler=_handle_memory_namespace_retire)
 
     memory_snapshot_parser = memory_subparsers.add_parser(
         "snapshot",

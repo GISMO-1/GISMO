@@ -27,6 +27,11 @@ class MemoryCliTest(unittest.TestCase):
     def tearDown(self) -> None:
         self.temp_dir.cleanup()
 
+    def _write_policy(self, policy: dict) -> Path:
+        path = Path(self.temp_dir.name) / "policy.json"
+        path.write_text(json.dumps(policy), encoding="utf-8")
+        return path
+
     def _latest_event_meta(self, operation: str) -> dict[str, object]:
         with sqlite3.connect(self.db_path) as connection:
             row = connection.execute(
@@ -463,6 +468,289 @@ class MemoryCliTest(unittest.TestCase):
         self.assertTrue(self.db_path.exists())
         self.db_path.unlink()
         self.assertFalse(self.db_path.exists())
+
+    def test_memory_namespace_list_show_retire_and_ordering(self) -> None:
+        policy_path = self._write_policy(
+            {
+                "allowed_tools": [
+                    "memory.put",
+                    "memory.delete",
+                    "memory.namespace.retire",
+                ],
+                "memory": {
+                    "allow": {
+                        "memory.put": ["global", "project:alpha"],
+                        "memory.delete": ["global", "project:alpha"],
+                        "memory.namespace.retire": ["project:alpha"],
+                    }
+                },
+            }
+        )
+        put_global = _run_cli(
+            [
+                "memory",
+                "put",
+                "--db",
+                str(self.db_path),
+                "--policy",
+                str(policy_path),
+                "--namespace",
+                "global",
+                "--key",
+                "alpha",
+                "--kind",
+                "note",
+                "--value-text",
+                "one",
+                "--confidence",
+                "low",
+                "--source",
+                "operator",
+            ],
+            cwd=self.repo_root,
+        )
+        self.assertEqual(put_global.returncode, 0, put_global.stderr)
+
+        delete_global = _run_cli(
+            [
+                "memory",
+                "delete",
+                "--db",
+                str(self.db_path),
+                "--policy",
+                str(policy_path),
+                "--namespace",
+                "global",
+                "alpha",
+                "--yes",
+            ],
+            cwd=self.repo_root,
+        )
+        self.assertEqual(delete_global.returncode, 0, delete_global.stderr)
+
+        put_project = _run_cli(
+            [
+                "memory",
+                "put",
+                "--db",
+                str(self.db_path),
+                "--policy",
+                str(policy_path),
+                "--namespace",
+                "project:alpha",
+                "--key",
+                "beta",
+                "--kind",
+                "note",
+                "--value-text",
+                "two",
+                "--confidence",
+                "low",
+                "--source",
+                "operator",
+            ],
+            cwd=self.repo_root,
+        )
+        self.assertEqual(put_project.returncode, 0, put_project.stderr)
+
+        retire = _run_cli(
+            [
+                "memory",
+                "namespace",
+                "retire",
+                "--db",
+                str(self.db_path),
+                "--policy",
+                str(policy_path),
+                "project:alpha",
+                "--reason",
+                "governance",
+            ],
+            cwd=self.repo_root,
+        )
+        self.assertEqual(retire.returncode, 0, retire.stderr)
+
+        namespace_list = _run_cli(
+            [
+                "memory",
+                "namespace",
+                "list",
+                "--db",
+                str(self.db_path),
+                "--policy",
+                str(policy_path),
+                "--json",
+            ],
+            cwd=self.repo_root,
+        )
+        self.assertEqual(namespace_list.returncode, 0, namespace_list.stderr)
+        namespaces = json.loads(namespace_list.stdout)
+        self.assertEqual([entry["namespace"] for entry in namespaces], ["global", "project:alpha"])
+        global_entry = namespaces[0]
+        self.assertEqual(global_entry["item_count"], 0)
+        self.assertEqual(global_entry["tombstone_count"], 1)
+        self.assertIsNotNone(global_entry["last_write_at"])
+        project_entry = namespaces[1]
+        self.assertEqual(project_entry["item_count"], 1)
+        self.assertEqual(project_entry["tombstone_count"], 0)
+        self.assertTrue(project_entry["retired"])
+
+        namespace_show = _run_cli(
+            [
+                "memory",
+                "namespace",
+                "show",
+                "--db",
+                str(self.db_path),
+                "--policy",
+                str(policy_path),
+                "--json",
+                "project:alpha",
+            ],
+            cwd=self.repo_root,
+        )
+        self.assertEqual(namespace_show.returncode, 0, namespace_show.stderr)
+        detail = json.loads(namespace_show.stdout)
+        self.assertTrue(detail["retired"])
+        self.assertEqual(detail["retired_reason"], "governance")
+
+    def test_memory_namespace_retire_non_interactive_fails_closed(self) -> None:
+        policy_path = self._write_policy(
+            {
+                "allowed_tools": ["memory.namespace.retire"],
+                "memory": {
+                    "allow": {"memory.namespace.retire": ["global"]},
+                    "require_confirmation": {"memory.namespace.retire": ["global"]},
+                },
+            }
+        )
+        retire = _run_cli(
+            [
+                "memory",
+                "namespace",
+                "retire",
+                "--db",
+                str(self.db_path),
+                "--policy",
+                str(policy_path),
+                "--non-interactive",
+                "global",
+                "--reason",
+                "freeze",
+            ],
+            cwd=self.repo_root,
+        )
+        self.assertNotEqual(retire.returncode, 0)
+        self.assertIn("Confirmation required", retire.stderr)
+
+        with sqlite3.connect(self.db_path) as connection:
+            row = connection.execute(
+                "SELECT retired_at FROM memory_namespaces WHERE namespace = ?",
+                ("global",),
+            ).fetchone()
+        self.assertIsNone(row)
+        meta = self._latest_event_meta("namespace.retire")
+        self.assertEqual(meta["policy_decision"], "denied")
+        self.assertEqual(meta["policy_reason"], "confirmation_required")
+
+    def test_memory_namespace_retire_idempotent(self) -> None:
+        policy_path = self._write_policy(
+            {
+                "allowed_tools": ["memory.namespace.retire"],
+                "memory": {"allow": {"memory.namespace.retire": ["global"]}},
+            }
+        )
+        first = _run_cli(
+            [
+                "memory",
+                "namespace",
+                "retire",
+                "--db",
+                str(self.db_path),
+                "--policy",
+                str(policy_path),
+                "global",
+                "--reason",
+                "end-of-life",
+            ],
+            cwd=self.repo_root,
+        )
+        self.assertEqual(first.returncode, 0, first.stderr)
+        second = _run_cli(
+            [
+                "memory",
+                "namespace",
+                "retire",
+                "--db",
+                str(self.db_path),
+                "--policy",
+                str(policy_path),
+                "global",
+                "--reason",
+                "end-of-life",
+            ],
+            cwd=self.repo_root,
+        )
+        self.assertEqual(second.returncode, 0, second.stderr)
+        self.assertIn("already retired", second.stdout)
+
+    def test_memory_put_denied_for_retired_namespace(self) -> None:
+        policy_path = self._write_policy(
+            {
+                "allowed_tools": ["memory.put", "memory.namespace.retire"],
+                "memory": {
+                    "allow": {
+                        "memory.put": ["global"],
+                        "memory.namespace.retire": ["global"],
+                    }
+                },
+            }
+        )
+        retire = _run_cli(
+            [
+                "memory",
+                "namespace",
+                "retire",
+                "--db",
+                str(self.db_path),
+                "--policy",
+                str(policy_path),
+                "global",
+                "--reason",
+                "compliance",
+            ],
+            cwd=self.repo_root,
+        )
+        self.assertEqual(retire.returncode, 0, retire.stderr)
+
+        put = _run_cli(
+            [
+                "memory",
+                "put",
+                "--db",
+                str(self.db_path),
+                "--policy",
+                str(policy_path),
+                "--namespace",
+                "global",
+                "--key",
+                "blocked",
+                "--kind",
+                "note",
+                "--value-text",
+                "nope",
+                "--confidence",
+                "low",
+                "--source",
+                "operator",
+            ],
+            cwd=self.repo_root,
+        )
+        self.assertNotEqual(put.returncode, 0)
+        self.assertIn("namespace is retired", put.stderr)
+        meta = self._latest_event_meta("put")
+        self.assertEqual(meta["policy_action"], "memory.put.retired")
+        self.assertEqual(meta["policy_decision"], "denied")
 
 
 if __name__ == "__main__":

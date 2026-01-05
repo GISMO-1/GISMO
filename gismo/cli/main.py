@@ -42,6 +42,7 @@ from gismo.llm.prompts import build_system_prompt, build_user_prompt
 from gismo.memory.store import (
     MemoryItem,
     get_item as memory_get_item,
+    list_prompt_items as memory_list_prompt_items,
     policy_hash_for_path,
     put_item as memory_put_item,
     record_event as memory_record_event,
@@ -1192,6 +1193,81 @@ def run_enqueue(
     print(f"Enqueued {item.id} status={item.status.value}")
 
 
+@dataclass(frozen=True)
+class MemoryInjection:
+    block: str
+    count: int
+    bytes: int
+    keys: list[dict[str, str]]
+
+
+def _serialize_memory_value(value: object) -> str:
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def _memory_entries_for_prompt(items: list[MemoryItem]) -> list[dict[str, str]]:
+    entries: list[dict[str, str]] = []
+    for item in items:
+        entries.append(
+            {
+                "namespace": item.namespace,
+                "key": item.key,
+                "kind": item.kind,
+                "confidence": item.confidence,
+                "source": item.source,
+                "updated_at": item.updated_at,
+                "value_json": _serialize_memory_value(item.value),
+            }
+        )
+    return entries
+
+
+def _build_memory_injection(db_path: str) -> MemoryInjection:
+    items = memory_list_prompt_items(db_path, limit=20)
+    entries = _memory_entries_for_prompt(items)
+    capped_entries: list[dict[str, str]] = []
+    total_bytes = 0
+    for entry in entries:
+        serialized = json.dumps(entry, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        entry_bytes = len(serialized.encode("utf-8"))
+        if len(capped_entries) >= 20:
+            break
+        if total_bytes + entry_bytes > 8192:
+            break
+        capped_entries.append(entry)
+        total_bytes += entry_bytes
+    keys = [{"namespace": entry["namespace"], "key": entry["key"]} for entry in capped_entries]
+    payload_json = json.dumps(capped_entries, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    block = (
+        "READ-ONLY MEMORY CONTEXT (do not modify):\n"
+        "<<<< MEMORY READ ONLY >>>>\n"
+        f"{payload_json}\n"
+        "<<<< END MEMORY >>>>"
+    )
+    return MemoryInjection(
+        block=block,
+        count=len(capped_entries),
+        bytes=total_bytes,
+        keys=keys,
+    )
+
+
+def _apply_memory_injection_payload(
+    payload: dict[str, object],
+    memory_injection: MemoryInjection | None,
+) -> None:
+    if not memory_injection:
+        return
+    payload.update(
+        {
+            "memory_injection_enabled": True,
+            "memory_injected_count": memory_injection.count,
+            "memory_injected_keys": memory_injection.keys,
+            "memory_injected_bytes": memory_injection.bytes,
+        }
+    )
+
+
 def _request_llm_plan(
     db_path: str,
     user_text: str,
@@ -1205,6 +1281,7 @@ def _request_llm_plan(
     explain: bool,
     debug: bool,
     actor: str,
+    memory_injection: MemoryInjection | None = None,
     assessment_policy_path: str | None = None,
 ) -> tuple[dict, PlanAssessment, StateStore]:
     if not user_text or not user_text.strip():
@@ -1212,7 +1289,10 @@ def _request_llm_plan(
     config = resolve_ollama_config(url=host, model=model, timeout_s=timeout_s)
     state_store = StateStore(db_path)
     system_prompt = build_system_prompt()
-    user_prompt = build_user_prompt(user_text)
+    user_prompt = build_user_prompt(
+        user_text,
+        memory_block=memory_injection.block if memory_injection else None,
+    )
     print(f"LLM: {config.model} url={config.url} timeout={config.timeout_s}s")
     try:
         raw_response = ollama_chat(
@@ -1233,6 +1313,7 @@ def _request_llm_plan(
             "dry_run": dry_run,
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
+        _apply_memory_injection_payload(payload, memory_injection)
         state_store.record_event(
             actor=actor,
             event_type=EVENT_TYPE_ASK_FAILED,
@@ -1268,6 +1349,7 @@ def _request_llm_plan(
                 "dry_run": dry_run,
                 "timestamp": datetime.now(timezone.utc).isoformat(),
             }
+            _apply_memory_injection_payload(payload, memory_injection)
             state_store.record_event(
                 actor=actor,
                 event_type=EVENT_TYPE_LLM_PLAN,
@@ -1296,6 +1378,7 @@ def _request_llm_plan(
             "dry_run": dry_run,
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
+        _apply_memory_injection_payload(payload, memory_injection)
         state_store.record_event(
             actor=actor,
             event_type=EVENT_TYPE_LLM_PLAN,
@@ -1325,6 +1408,7 @@ def _request_llm_plan(
             "dry_run": dry_run,
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
+        _apply_memory_injection_payload(payload, memory_injection)
         state_store.record_event(
             actor=actor,
             event_type=EVENT_TYPE_LLM_PLAN,
@@ -1347,6 +1431,7 @@ def _request_llm_plan(
         "dry_run": dry_run,
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
+    _apply_memory_injection_payload(payload, memory_injection)
     state_store.record_event(
         actor=actor,
         event_type=EVENT_TYPE_LLM_PLAN,
@@ -1399,7 +1484,9 @@ def run_ask(
     yes: bool,
     explain: bool,
     debug: bool = False,
+    use_memory: bool = False,
 ) -> None:
+    memory_injection = _build_memory_injection(db_path) if use_memory else None
     plan, assessment, state_store = _request_llm_plan(
         db_path,
         user_text,
@@ -1412,6 +1499,7 @@ def run_ask(
         explain=explain,
         debug=debug,
         actor="ask",
+        memory_injection=memory_injection,
         assessment_policy_path=None,
     )
 
@@ -1842,6 +1930,7 @@ def _handle_ask(args: argparse.Namespace) -> None:
         yes=args.yes,
         explain=args.explain,
         debug=args.debug,
+        use_memory=args.use_memory,
     )
 
 
@@ -2837,6 +2926,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--enqueue",
         action="store_true",
         help="Enqueue validated actions for the daemon to execute",
+    )
+    ask_parser.add_argument(
+        "--memory",
+        dest="use_memory",
+        action="store_true",
+        help="Inject eligible memory items into the planner prompt (read-only)",
     )
     ask_parser.add_argument(
         "--yes",

@@ -378,6 +378,32 @@ class MemoryStore:
             connection.commit()
             return items
 
+    def list_prompt_items(self, *, limit: int = 20) -> list[MemoryItem]:
+        kinds = ["preference", "constraint", "procedure", "fact"]
+        confidences = ["high", "medium"]
+        kind_placeholders = ",".join("?" for _ in kinds)
+        confidence_placeholders = ",".join("?" for _ in confidences)
+        sql = (
+            "SELECT * FROM memory_items "
+            "WHERE is_tombstoned = 0 "
+            "AND (namespace = ? OR namespace LIKE ?) "
+            f"AND kind IN ({kind_placeholders}) "
+            f"AND confidence IN ({confidence_placeholders}) "
+            "ORDER BY updated_at DESC, key ASC "
+            "LIMIT ?"
+        )
+        params: list[Any] = [
+            "global",
+            "project:%",
+            *kinds,
+            *confidences,
+            limit,
+        ]
+        with self._connection() as connection:
+            cursor = connection.cursor()
+            rows = cursor.execute(sql, params).fetchall()
+            return [_row_to_item(row) for row in rows]
+
     def tombstone_item(
         self,
         namespace: str,
@@ -521,7 +547,7 @@ def search_items(
     policy_hash: str,
     related_run_id: Optional[str] = None,
     related_ask_event_id: Optional[str] = None,
-) -> list[MemoryItem]:
+    ) -> list[MemoryItem]:
     return MemoryStore(db_path).search_items(
         query,
         namespace=namespace,
@@ -536,6 +562,14 @@ def search_items(
         related_run_id=related_run_id,
         related_ask_event_id=related_ask_event_id,
     )
+
+
+def list_prompt_items(
+    db_path: str,
+    *,
+    limit: int = 20,
+) -> list[MemoryItem]:
+    return MemoryStore(db_path).list_prompt_items(limit=limit)
 
 
 def tombstone_item(

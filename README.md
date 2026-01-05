@@ -156,6 +156,7 @@ Planner behavior:
 - Produces enqueue-only plans under strict schema.
 - Actions are bounded (hard limit on action count).
 - Normalization/coercion exists so malformed model output does not break the system.
+- Optional memory suggestions may be included in plan output for operator review (advisory only; no auto-write).
 - Ollama is called in JSON mode and uses keep_alive to avoid repeated model reloads.
 - Full audit trail is recorded for planner outputs and execution.
 - Every plan includes a confidence assessment, risk flags, and a short explanation.

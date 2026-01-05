@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import shlex
 import re
 import sys
 import time
@@ -227,9 +228,87 @@ def extract_json_object(text: str) -> str | None:
         return None
     return cleaned[start : end + 1]
 
+MEMORY_SUGGESTION_MAX = 5
+MEMORY_SUGGESTION_KINDS = {
+    "fact",
+    "preference",
+    "constraint",
+    "procedure",
+    "note",
+    "summary",
+}
+MEMORY_SUGGESTION_CONFIDENCE = {"high", "medium", "low"}
+
+
+def _normalize_memory_suggestions(raw: object, notes: list[str]) -> list[dict[str, str]]:
+    if raw is None:
+        return []
+    if not isinstance(raw, list):
+        notes.append("Ignored memory_suggestions because it was not a list.")
+        return []
+    suggestions: list[dict[str, str]] = []
+    invalid_count = 0
+    for index, entry in enumerate(raw):
+        if len(suggestions) >= MEMORY_SUGGESTION_MAX:
+            notes.append(
+                "Truncated memory_suggestions to "
+                f"{MEMORY_SUGGESTION_MAX} item(s)."
+            )
+            break
+        if not isinstance(entry, dict):
+            invalid_count += 1
+            continue
+        namespace = entry.get("namespace", "global")
+        namespace_text = namespace.strip() if isinstance(namespace, str) else ""
+        if not namespace_text:
+            invalid_count += 1
+            continue
+        key = entry.get("key")
+        key_text = key.strip() if isinstance(key, str) else ""
+        if not key_text:
+            invalid_count += 1
+            continue
+        kind = entry.get("kind")
+        kind_text = kind.strip().lower() if isinstance(kind, str) else ""
+        if kind_text not in MEMORY_SUGGESTION_KINDS:
+            invalid_count += 1
+            continue
+        value_json = entry.get("value_json")
+        if not isinstance(value_json, str):
+            invalid_count += 1
+            continue
+        try:
+            json.loads(value_json)
+        except json.JSONDecodeError:
+            invalid_count += 1
+            continue
+        confidence = entry.get("confidence")
+        confidence_text = confidence.strip().lower() if isinstance(confidence, str) else ""
+        if confidence_text not in MEMORY_SUGGESTION_CONFIDENCE:
+            invalid_count += 1
+            continue
+        why = entry.get("why")
+        why_text = why.strip() if isinstance(why, str) else ""
+        if not why_text:
+            invalid_count += 1
+            continue
+        suggestions.append(
+            {
+                "namespace": namespace_text,
+                "key": key_text,
+                "kind": kind_text,
+                "value_json": value_json,
+                "confidence": confidence_text,
+                "why": why_text,
+            }
+        )
+    if invalid_count:
+        notes.append(f"Ignored {invalid_count} invalid memory_suggestion(s).")
+    return suggestions
+
 
 def _normalize_llm_plan(plan: dict, max_actions: int) -> dict:
-    allowed_fields = {"intent", "assumptions", "actions", "notes"}
+    allowed_fields = {"intent", "assumptions", "actions", "notes", "memory_suggestions"}
     unknown_fields = set(plan.keys()) - allowed_fields
     if unknown_fields:
         raise ValueError(
@@ -321,12 +400,31 @@ def _normalize_llm_plan(plan: dict, max_actions: int) -> dict:
     unknown_types = sorted({a["type"] for a in actions if a["type"] and a["type"] != "enqueue"})
     if unknown_types:
         notes.append(f"Ignored unsupported action types: {', '.join(unknown_types)}.")
+    memory_suggestions = _normalize_memory_suggestions(plan.get("memory_suggestions"), notes)
     return {
         "intent": intent_text,
         "assumptions": assumptions,
         "actions": actions,
         "notes": notes,
+        "memory_suggestions": memory_suggestions,
     }
+
+
+def _memory_put_command_for_suggestion(suggestion: dict[str, str]) -> str:
+    value_arg = shlex.quote(suggestion["value_json"])
+    namespace_arg = shlex.quote(suggestion["namespace"])
+    key_arg = shlex.quote(suggestion["key"])
+    kind_arg = shlex.quote(suggestion["kind"])
+    confidence_arg = shlex.quote(suggestion["confidence"])
+    return (
+        "gismo memory put "
+        f"--namespace {namespace_arg} "
+        f"--key {key_arg} "
+        f"--kind {kind_arg} "
+        f"--value {value_arg} "
+        f"--confidence {confidence_arg} "
+        "--source llm"
+    )
 
 
 def _print_llm_plan(plan: dict) -> None:
@@ -363,6 +461,24 @@ def _print_llm_plan(plan: dict) -> None:
         print("Notes:")
         for note in notes:
             print(f"- {note}")
+    suggestions = plan.get("memory_suggestions") or []
+    print("Suggested memory updates (advisory only):")
+    if not suggestions:
+        print("  (none)")
+    else:
+        for index, suggestion in enumerate(suggestions, start=1):
+            namespace = suggestion.get("namespace") or "global"
+            key = suggestion.get("key") or "-"
+            kind = suggestion.get("kind") or "-"
+            confidence = suggestion.get("confidence") or "-"
+            why = suggestion.get("why") or "-"
+            value_json = suggestion.get("value_json") or "-"
+            print(
+                f"{index}. {namespace}/{key} kind={kind} confidence={confidence}"
+            )
+            print(f"   why: {why}")
+            print(f"   value_json: {value_json}")
+            print(f"   apply: {_memory_put_command_for_suggestion(suggestion)}")
 
 
 def _print_plan_assessment(assessment: PlanAssessment, *, explain: bool) -> None:

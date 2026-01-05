@@ -98,6 +98,28 @@ class CliMainParserTest(unittest.TestCase):
         serve_args = parser.parse_args(["ipc", "serve", "--db", db_path])
         self.assertEqual(serve_args.db_path, db_path)
 
+    def test_db_path_before_and_after_subcommand(self) -> None:
+        parser = cli_main.build_parser()
+        db_path = "custom.db"
+
+        queue_before = parser.parse_args(["--db", db_path, "queue", "stats"])
+        self.assertEqual(queue_before.db_path, db_path)
+
+        queue_after = parser.parse_args(["queue", "stats", "--db", db_path])
+        self.assertEqual(queue_after.db_path, db_path)
+
+        run_before = parser.parse_args(["--db", db_path, "run", "echo:", "hi"])
+        self.assertEqual(run_before.db_path, db_path)
+
+        run_after = parser.parse_args(["run", "--db", db_path, "echo:", "hi"])
+        self.assertEqual(run_after.db_path, db_path)
+
+        export_before = parser.parse_args(["--db", db_path, "export", "--latest"])
+        self.assertEqual(export_before.db_path, db_path)
+
+        export_after = parser.parse_args(["export", "--latest", "--db", db_path])
+        self.assertEqual(export_after.db_path, db_path)
+
     def test_supervise_subcommand_routes_to_supervise(self) -> None:
         parser = cli_main.build_parser()
         args = parser.parse_args(["supervise", "status", "--token", "token"])

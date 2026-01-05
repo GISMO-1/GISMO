@@ -66,6 +66,7 @@ Fallback (no console script available):
 STATE & DEFAULT PATHS
 
 - Default DB path: .gismo/state.db
+- The `--db` flag can appear before or after the subcommand (e.g., `gismo --db PATH queue stats` or `gismo queue stats --db PATH`).
 - Exports are DB-anchored:
   By default, exports are written to an `exports/` directory located next to the DB file.
   Example:

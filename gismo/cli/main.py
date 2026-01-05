@@ -2024,7 +2024,7 @@ def build_parser() -> argparse.ArgumentParser:
     queue_parser = subparsers.add_parser(
         "queue",
         help="Inspect the queue (stats, list, show)",
-        parents=[db_parent],
+        parents=[db_parent_optional],
     )
     queue_subparsers = queue_parser.add_subparsers(dest="queue_command", required=True)
 

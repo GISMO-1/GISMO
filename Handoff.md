@@ -175,11 +175,13 @@ Status:
 - Ollama JSON parsing hardens against fenced output and reports richer errors.
 - Ollama-related tests are hermetic by default with an optional integration gate.
 - Ask CLI too-many-actions warning now clarifies confirmation-required behavior.
+- CLI `--db` flag now respects both pre- and post-subcommand placement for queue and other commands.
 
 Next steps:
 - Make planner prompts policy-aware (still pending).
 - Monitor operator feedback on ask timeout UX.
 - Confirm Windows operator docs emphasize the console entrypoint when installed.
+- Watch for any remaining CLI flag ordering regressions as new subcommands land.
 
 Tests run:
 - python scripts/verify.py

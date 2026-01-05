@@ -6,6 +6,7 @@ import json
 import re
 import sys
 import time
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from uuid import UUID
@@ -43,6 +44,7 @@ from gismo.memory.store import (
     get_item as memory_get_item,
     policy_hash_for_path,
     put_item as memory_put_item,
+    record_event as memory_record_event,
     search_items as memory_search_items,
     tombstone_item as memory_tombstone_item,
 )
@@ -807,12 +809,79 @@ def run_list(db_path: str, limit: int, newest_first: bool) -> None:
         )
 
 
+@dataclass
+class MemoryDecision:
+    action: str
+    allowed: bool
+    confirmation_required: bool
+    confirmation_provided: bool
+    confirmation_mode: str | None
+    reason: str | None
+
+
 def _memory_policy_hash(policy_path: str | None) -> str:
     try:
         return policy_hash_for_path(policy_path)
     except FileNotFoundError as exc:
         print(f"Policy file not found: {policy_path}")
         raise SystemExit(2) from exc
+
+
+def _load_memory_policy(policy_path: str | None) -> tuple[PermissionPolicy, str | None]:
+    repo_root = Path(__file__).resolve().parents[2]
+    resolved_path, warn = _resolve_default_policy_path(policy_path, repo_root)
+    if warn:
+        _warn_missing_default_policy()
+    try:
+        policy = load_policy(resolved_path, repo_root=repo_root)
+    except (OSError, ValueError, PermissionError) as exc:
+        print(f"Policy file not valid: {exc}", file=sys.stderr)
+        raise SystemExit(2) from exc
+    return policy, resolved_path
+
+
+def _memory_policy_result_meta(decision: MemoryDecision) -> dict[str, object]:
+    return {
+        "policy_action": decision.action,
+        "policy_decision": "allowed" if decision.allowed else "denied",
+        "policy_reason": decision.reason,
+        "confirmation": {
+            "required": decision.confirmation_required,
+            "provided": decision.confirmation_provided,
+            "mode": decision.confirmation_mode,
+        },
+    }
+
+
+def _evaluate_memory_policy(policy: PermissionPolicy, action: str, namespace: str) -> MemoryDecision:
+    try:
+        policy.check_tool_allowed(action)
+    except PermissionError:
+        return MemoryDecision(
+            action=action,
+            allowed=False,
+            confirmation_required=False,
+            confirmation_provided=False,
+            confirmation_mode=None,
+            reason="policy_denied",
+        )
+    if not policy.memory.is_allowed(action, namespace):
+        return MemoryDecision(
+            action=action,
+            allowed=False,
+            confirmation_required=False,
+            confirmation_provided=False,
+            confirmation_mode=None,
+            reason="policy_denied",
+        )
+    return MemoryDecision(
+        action=action,
+        allowed=True,
+        confirmation_required=policy.memory.requires_confirmation(action, namespace),
+        confirmation_provided=False,
+        confirmation_mode=None,
+        reason=None,
+    )
 
 
 def _parse_memory_value(value_text: str | None, value_json: str | None) -> object:
@@ -833,9 +902,84 @@ def _parse_memory_value(value_text: str | None, value_json: str | None) -> objec
 
 def run_memory_put(args: argparse.Namespace) -> None:
     actor = "operator"
-    policy_hash = _memory_policy_hash(args.policy)
+    policy, resolved_policy_path = _load_memory_policy(args.policy)
+    policy_hash = _memory_policy_hash(resolved_policy_path)
     value = _parse_memory_value(args.value_text, args.value)
     tags = args.tag or []
+    action = "memory.put"
+    decision = _evaluate_memory_policy(policy, action, args.namespace)
+    request = {
+        "namespace": args.namespace,
+        "key": args.key,
+        "kind": args.kind,
+        "value_json": json.dumps(value, ensure_ascii=False, sort_keys=True),
+        "tags_json": json.dumps(tags, ensure_ascii=False, sort_keys=True) if tags else None,
+        "confidence": args.confidence,
+        "source": args.source,
+        "ttl_seconds": args.ttl_seconds,
+    }
+    if not decision.allowed:
+        memory_record_event(
+            args.db_path,
+            operation="put",
+            actor=actor,
+            policy_hash=policy_hash,
+            request=request,
+            result_meta=_memory_policy_result_meta(decision),
+        )
+        print("Memory put blocked by policy.", file=sys.stderr)
+        raise SystemExit(2)
+    if decision.confirmation_required:
+        if args.yes:
+            decision.confirmation_provided = True
+            decision.confirmation_mode = "yes-flag"
+        elif args.non_interactive or not _is_interactive_tty():
+            denied = MemoryDecision(
+                action=decision.action,
+                allowed=False,
+                confirmation_required=True,
+                confirmation_provided=False,
+                confirmation_mode=None,
+                reason="confirmation_required",
+            )
+            memory_record_event(
+                args.db_path,
+                operation="put",
+                actor=actor,
+                policy_hash=policy_hash,
+                request=request,
+                result_meta=_memory_policy_result_meta(denied),
+            )
+            print(
+                "Confirmation required for memory put. Re-run with --yes to proceed.",
+                file=sys.stderr,
+            )
+            raise SystemExit(2)
+        else:
+            response = input(
+                "This memory write requires confirmation. Proceed? [y/N]:"
+            )
+            if response.strip().lower() not in {"y", "yes"}:
+                denied = MemoryDecision(
+                    action=decision.action,
+                    allowed=False,
+                    confirmation_required=True,
+                    confirmation_provided=False,
+                    confirmation_mode=None,
+                    reason="confirmation_declined",
+                )
+                memory_record_event(
+                    args.db_path,
+                    operation="put",
+                    actor=actor,
+                    policy_hash=policy_hash,
+                    request=request,
+                    result_meta=_memory_policy_result_meta(denied),
+                )
+                print("Confirmation declined; memory not written.", file=sys.stderr)
+                raise SystemExit(2)
+            decision.confirmation_provided = True
+            decision.confirmation_mode = "prompt"
     item = memory_put_item(
         args.db_path,
         namespace=args.namespace,
@@ -848,6 +992,7 @@ def run_memory_put(args: argparse.Namespace) -> None:
         ttl_seconds=args.ttl_seconds,
         actor=actor,
         policy_hash=policy_hash,
+        result_meta_extra=_memory_policy_result_meta(decision),
     )
     print(f"DB: {args.db_path}")
     print("Stored memory item:")
@@ -856,7 +1001,8 @@ def run_memory_put(args: argparse.Namespace) -> None:
 
 def run_memory_get(args: argparse.Namespace) -> None:
     actor = "operator"
-    policy_hash = _memory_policy_hash(args.policy)
+    _, resolved_policy_path = _load_memory_policy(args.policy)
+    policy_hash = _memory_policy_hash(resolved_policy_path)
     item = memory_get_item(
         args.db_path,
         args.namespace,
@@ -877,7 +1023,8 @@ def run_memory_get(args: argparse.Namespace) -> None:
 
 def run_memory_search(args: argparse.Namespace) -> None:
     actor = "operator"
-    policy_hash = _memory_policy_hash(args.policy)
+    _, resolved_policy_path = _load_memory_policy(args.policy)
+    policy_hash = _memory_policy_hash(resolved_policy_path)
     items = memory_search_items(
         args.db_path,
         args.query or "",
@@ -902,13 +1049,83 @@ def run_memory_search(args: argparse.Namespace) -> None:
 
 def run_memory_delete(args: argparse.Namespace) -> None:
     actor = "operator"
-    policy_hash = _memory_policy_hash(args.policy)
+    policy, resolved_policy_path = _load_memory_policy(args.policy)
+    policy_hash = _memory_policy_hash(resolved_policy_path)
+    action = "memory.delete"
+    decision = _evaluate_memory_policy(policy, action, args.namespace)
+    request = {
+        "namespace": args.namespace,
+        "key": args.key,
+    }
+    if not decision.allowed:
+        memory_record_event(
+            args.db_path,
+            operation="delete",
+            actor=actor,
+            policy_hash=policy_hash,
+            request=request,
+            result_meta=_memory_policy_result_meta(decision),
+        )
+        print("Memory delete blocked by policy.", file=sys.stderr)
+        raise SystemExit(2)
+    if decision.confirmation_required:
+        if args.yes:
+            decision.confirmation_provided = True
+            decision.confirmation_mode = "yes-flag"
+        elif args.non_interactive or not _is_interactive_tty():
+            denied = MemoryDecision(
+                action=decision.action,
+                allowed=False,
+                confirmation_required=True,
+                confirmation_provided=False,
+                confirmation_mode=None,
+                reason="confirmation_required",
+            )
+            memory_record_event(
+                args.db_path,
+                operation="delete",
+                actor=actor,
+                policy_hash=policy_hash,
+                request=request,
+                result_meta=_memory_policy_result_meta(denied),
+            )
+            print(
+                "Confirmation required for memory delete. Re-run with --yes to proceed.",
+                file=sys.stderr,
+            )
+            raise SystemExit(2)
+        else:
+            response = input(
+                "This memory delete requires confirmation. Proceed? [y/N]:"
+            )
+            if response.strip().lower() not in {"y", "yes"}:
+                denied = MemoryDecision(
+                    action=decision.action,
+                    allowed=False,
+                    confirmation_required=True,
+                    confirmation_provided=False,
+                    confirmation_mode=None,
+                    reason="confirmation_declined",
+                )
+                memory_record_event(
+                    args.db_path,
+                    operation="delete",
+                    actor=actor,
+                    policy_hash=policy_hash,
+                    request=request,
+                    result_meta=_memory_policy_result_meta(denied),
+                )
+                print("Confirmation declined; memory not deleted.", file=sys.stderr)
+                raise SystemExit(2)
+            decision.confirmation_provided = True
+            decision.confirmation_mode = "prompt"
     item = memory_tombstone_item(
         args.db_path,
         args.namespace,
         args.key,
         actor=actor,
         policy_hash=policy_hash,
+        result_meta_extra=_memory_policy_result_meta(decision),
     )
     if item is None:
         print(f"Memory item not found: {args.namespace}/{args.key}")
@@ -2410,6 +2627,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="Optional TTL in seconds",
     )
     memory_put_parser.add_argument(
+        "--yes",
+        action="store_true",
+        help="Skip confirmation prompts for high-risk memory writes",
+    )
+    memory_put_parser.add_argument(
+        "--non-interactive",
+        action="store_true",
+        help="Fail closed instead of prompting for confirmation",
+    )
+    memory_put_parser.add_argument(
         "--policy",
         default=None,
         help="Optional policy file path for audit hashing",
@@ -2519,6 +2746,16 @@ def build_parser() -> argparse.ArgumentParser:
         "--policy",
         default=None,
         help="Optional policy file path for audit hashing",
+    )
+    memory_delete_parser.add_argument(
+        "--yes",
+        action="store_true",
+        help="Skip confirmation prompts for high-risk memory deletes",
+    )
+    memory_delete_parser.add_argument(
+        "--non-interactive",
+        action="store_true",
+        help="Fail closed instead of prompting for confirmation",
     )
     memory_delete_parser.set_defaults(handler=_handle_memory_delete)
 

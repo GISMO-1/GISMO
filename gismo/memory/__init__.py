@@ -7,6 +7,7 @@ from gismo.memory.store import (
     get_item,
     policy_hash_for_path,
     put_item,
+    record_event,
     search_items,
     tombstone_item,
 )
@@ -18,6 +19,7 @@ __all__ = [
     "get_item",
     "policy_hash_for_path",
     "put_item",
+    "record_event",
     "search_items",
     "tombstone_item",
 ]

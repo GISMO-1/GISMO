@@ -118,6 +118,16 @@ Export audit logs:
 
   gismo export --latest
   gismo export --run RUN_ID
+
+Memory management (policy-gated; confirmation required for high-risk namespaces):
+
+  gismo memory put --namespace global --key key --kind note --value-text "value" \
+    --confidence high --source operator --policy policy/dev-safe.json --yes
+  gismo memory delete --namespace global key --policy policy/dev-safe.json --yes
+
+Notes:
+- Global/project namespaces require confirmation unless policy explicitly exempts them.
+- Use --non-interactive to fail closed instead of prompting.
   gismo export RUN_ID
 
 Windows examples (explicit module invocation):

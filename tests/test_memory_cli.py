@@ -22,9 +22,22 @@ class MemoryCliTest(unittest.TestCase):
         self.temp_dir = tempfile.TemporaryDirectory()
         self.repo_root = Path(__file__).resolve().parents[1]
         self.db_path = Path(self.temp_dir.name) / "state.db"
+        self.policy_path = self.repo_root / "policy" / "dev-safe.json"
 
     def tearDown(self) -> None:
         self.temp_dir.cleanup()
+
+    def _latest_event_meta(self, operation: str) -> dict[str, object]:
+        with sqlite3.connect(self.db_path) as connection:
+            row = connection.execute(
+                "SELECT result_meta_json FROM memory_events "
+                "WHERE operation = ? "
+                "ORDER BY timestamp DESC "
+                "LIMIT 1",
+                (operation,),
+            ).fetchone()
+        self.assertIsNotNone(row)
+        return json.loads(row[0])
 
     def test_memory_put_get_search_delete_and_events(self) -> None:
         put = _run_cli(
@@ -33,6 +46,8 @@ class MemoryCliTest(unittest.TestCase):
                 "put",
                 "--db",
                 str(self.db_path),
+                "--policy",
+                str(self.policy_path),
                 "--namespace",
                 "global",
                 "--key",
@@ -45,6 +60,7 @@ class MemoryCliTest(unittest.TestCase):
                 "high",
                 "--source",
                 "operator",
+                "--yes",
             ],
             cwd=self.repo_root,
         )
@@ -56,6 +72,8 @@ class MemoryCliTest(unittest.TestCase):
                 "get",
                 "--db",
                 str(self.db_path),
+                "--policy",
+                str(self.policy_path),
                 "--namespace",
                 "global",
                 "--json",
@@ -74,6 +92,8 @@ class MemoryCliTest(unittest.TestCase):
                 "phi3",
                 "--db",
                 str(self.db_path),
+                "--policy",
+                str(self.policy_path),
                 "--namespace",
                 "global",
                 "--json",
@@ -91,9 +111,12 @@ class MemoryCliTest(unittest.TestCase):
                 "delete",
                 "--db",
                 str(self.db_path),
+                "--policy",
+                str(self.policy_path),
                 "--namespace",
                 "global",
                 "default_model",
+                "--yes",
             ],
             cwd=self.repo_root,
         )
@@ -105,6 +128,8 @@ class MemoryCliTest(unittest.TestCase):
                 "get",
                 "--db",
                 str(self.db_path),
+                "--policy",
+                str(self.policy_path),
                 "--namespace",
                 "global",
                 "default_model",
@@ -120,6 +145,8 @@ class MemoryCliTest(unittest.TestCase):
                 "get",
                 "--db",
                 str(self.db_path),
+                "--policy",
+                str(self.policy_path),
                 "--namespace",
                 "global",
                 "--include-tombstoned",
@@ -144,6 +171,8 @@ class MemoryCliTest(unittest.TestCase):
                 "put",
                 "--db",
                 str(self.db_path),
+                "--policy",
+                str(self.policy_path),
                 "--namespace",
                 "global",
                 "--key",
@@ -156,6 +185,7 @@ class MemoryCliTest(unittest.TestCase):
                 "low",
                 "--source",
                 "operator",
+                "--yes",
             ],
             cwd=self.repo_root,
         )
@@ -167,6 +197,8 @@ class MemoryCliTest(unittest.TestCase):
                 "put",
                 "--db",
                 str(self.db_path),
+                "--policy",
+                str(self.policy_path),
                 "--namespace",
                 "global",
                 "--key",
@@ -179,6 +211,7 @@ class MemoryCliTest(unittest.TestCase):
                 "low",
                 "--source",
                 "operator",
+                "--yes",
             ],
             cwd=self.repo_root,
         )
@@ -190,6 +223,8 @@ class MemoryCliTest(unittest.TestCase):
                 "put",
                 "--db",
                 str(self.db_path),
+                "--policy",
+                str(self.policy_path),
                 "--namespace",
                 "global",
                 "--key",
@@ -202,6 +237,7 @@ class MemoryCliTest(unittest.TestCase):
                 "medium",
                 "--source",
                 "operator",
+                "--yes",
             ],
             cwd=self.repo_root,
         )
@@ -213,6 +249,8 @@ class MemoryCliTest(unittest.TestCase):
                 "get",
                 "--db",
                 str(self.db_path),
+                "--policy",
+                str(self.policy_path),
                 "--namespace",
                 "global",
                 "--json",
@@ -232,6 +270,8 @@ class MemoryCliTest(unittest.TestCase):
                 "",
                 "--db",
                 str(self.db_path),
+                "--policy",
+                str(self.policy_path),
                 "--namespace",
                 "global",
                 "--json",
@@ -244,6 +284,156 @@ class MemoryCliTest(unittest.TestCase):
         self.assertEqual(keys[0], "alpha")
         self.assertEqual(keys[1], "beta")
 
+    def test_memory_put_requires_confirmation_in_non_interactive(self) -> None:
+        put = _run_cli(
+            [
+                "memory",
+                "put",
+                "--db",
+                str(self.db_path),
+                "--policy",
+                str(self.policy_path),
+                "--namespace",
+                "global",
+                "--key",
+                "requires_confirm",
+                "--kind",
+                "note",
+                "--value-text",
+                "blocked",
+                "--confidence",
+                "high",
+                "--source",
+                "operator",
+                "--non-interactive",
+            ],
+            cwd=self.repo_root,
+        )
+        self.assertNotEqual(put.returncode, 0)
+        self.assertIn("Confirmation required", put.stderr)
+
+        with sqlite3.connect(self.db_path) as connection:
+            item_count = connection.execute(
+                "SELECT COUNT(*) FROM memory_items"
+            ).fetchone()[0]
+        self.assertEqual(item_count, 0)
+        meta = self._latest_event_meta("put")
+        self.assertEqual(meta["policy_decision"], "denied")
+        self.assertEqual(meta["policy_reason"], "confirmation_required")
+
+    def test_memory_put_yes_records_confirmation(self) -> None:
+        put = _run_cli(
+            [
+                "memory",
+                "put",
+                "--db",
+                str(self.db_path),
+                "--policy",
+                str(self.policy_path),
+                "--namespace",
+                "global",
+                "--key",
+                "confirmed",
+                "--kind",
+                "note",
+                "--value-text",
+                "allowed",
+                "--confidence",
+                "high",
+                "--source",
+                "operator",
+                "--yes",
+            ],
+            cwd=self.repo_root,
+        )
+        self.assertEqual(put.returncode, 0, put.stderr)
+        meta = self._latest_event_meta("put")
+        self.assertEqual(meta["policy_decision"], "allowed")
+        confirmation = meta["confirmation"]
+        self.assertTrue(confirmation["required"])
+        self.assertTrue(confirmation["provided"])
+        self.assertEqual(confirmation["mode"], "yes-flag")
+
+    def test_memory_delete_yes_records_confirmation(self) -> None:
+        put = _run_cli(
+            [
+                "memory",
+                "put",
+                "--db",
+                str(self.db_path),
+                "--policy",
+                str(self.policy_path),
+                "--namespace",
+                "global",
+                "--key",
+                "to_delete",
+                "--kind",
+                "note",
+                "--value-text",
+                "removable",
+                "--confidence",
+                "high",
+                "--source",
+                "operator",
+                "--yes",
+            ],
+            cwd=self.repo_root,
+        )
+        self.assertEqual(put.returncode, 0, put.stderr)
+
+        delete = _run_cli(
+            [
+                "memory",
+                "delete",
+                "--db",
+                str(self.db_path),
+                "--policy",
+                str(self.policy_path),
+                "--namespace",
+                "global",
+                "to_delete",
+                "--yes",
+            ],
+            cwd=self.repo_root,
+        )
+        self.assertEqual(delete.returncode, 0, delete.stderr)
+        meta = self._latest_event_meta("delete")
+        self.assertEqual(meta["policy_decision"], "allowed")
+        confirmation = meta["confirmation"]
+        self.assertTrue(confirmation["required"])
+        self.assertTrue(confirmation["provided"])
+        self.assertEqual(confirmation["mode"], "yes-flag")
+
+    def test_memory_put_run_namespace_allowed(self) -> None:
+        put = _run_cli(
+            [
+                "memory",
+                "put",
+                "--db",
+                str(self.db_path),
+                "--policy",
+                str(self.policy_path),
+                "--namespace",
+                "run:abc123",
+                "--key",
+                "run_note",
+                "--kind",
+                "note",
+                "--value-text",
+                "run-ok",
+                "--confidence",
+                "low",
+                "--source",
+                "operator",
+            ],
+            cwd=self.repo_root,
+        )
+        self.assertEqual(put.returncode, 0, put.stderr)
+        meta = self._latest_event_meta("put")
+        self.assertEqual(meta["policy_decision"], "allowed")
+        confirmation = meta["confirmation"]
+        self.assertFalse(confirmation["required"])
+
     def test_memory_db_file_released_after_cli(self) -> None:
         put = _run_cli(
             [
@@ -251,6 +441,8 @@ class MemoryCliTest(unittest.TestCase):
                 "put",
                 "--db",
                 str(self.db_path),
+                "--policy",
+                str(self.policy_path),
                 "--namespace",
                 "global",
                 "--key",
@@ -263,6 +455,7 @@ class MemoryCliTest(unittest.TestCase):
                 "high",
                 "--source",
                 "operator",
+                "--yes",
             ],
             cwd=self.repo_root,
         )

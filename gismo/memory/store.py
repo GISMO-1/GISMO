@@ -159,6 +159,7 @@ class MemoryStore:
         ttl_seconds: Optional[int],
         actor: str,
         policy_hash: str,
+        result_meta_extra: Optional[dict[str, Any]] = None,
         related_run_id: Optional[str] = None,
         related_ask_event_id: Optional[str] = None,
     ) -> MemoryItem:
@@ -235,6 +236,8 @@ class MemoryStore:
                 "updated_at": item.updated_at,
                 "is_tombstoned": item.is_tombstoned,
             }
+            if result_meta_extra:
+                result_meta.update(result_meta_extra)
             append_event(
                 connection,
                 operation="put",
@@ -382,6 +385,7 @@ class MemoryStore:
         *,
         actor: str,
         policy_hash: str,
+        result_meta_extra: Optional[dict[str, Any]] = None,
         related_run_id: Optional[str] = None,
         related_ask_event_id: Optional[str] = None,
     ) -> MemoryItem | None:
@@ -412,6 +416,8 @@ class MemoryStore:
                 "item_id": item.id if item else None,
                 "updated_at": item.updated_at if item else None,
             }
+            if result_meta_extra:
+                result_meta.update(result_meta_extra)
             append_event(
                 connection,
                 operation="delete",
@@ -457,6 +463,7 @@ def put_item(
     ttl_seconds: Optional[int],
     actor: str,
     policy_hash: str,
+    result_meta_extra: Optional[dict[str, Any]] = None,
     related_run_id: Optional[str] = None,
     related_ask_event_id: Optional[str] = None,
 ) -> MemoryItem:
@@ -471,6 +478,7 @@ def put_item(
         ttl_seconds=ttl_seconds,
         actor=actor,
         policy_hash=policy_hash,
+        result_meta_extra=result_meta_extra,
         related_run_id=related_run_id,
         related_ask_event_id=related_ask_event_id,
     )
@@ -537,6 +545,7 @@ def tombstone_item(
     *,
     actor: str,
     policy_hash: str,
+    result_meta_extra: Optional[dict[str, Any]] = None,
     related_run_id: Optional[str] = None,
     related_ask_event_id: Optional[str] = None,
 ) -> MemoryItem | None:
@@ -545,9 +554,36 @@ def tombstone_item(
         key,
         actor=actor,
         policy_hash=policy_hash,
+        result_meta_extra=result_meta_extra,
         related_run_id=related_run_id,
         related_ask_event_id=related_ask_event_id,
     )
+
+
+def record_event(
+    db_path: str,
+    *,
+    operation: str,
+    actor: str,
+    policy_hash: str,
+    request: dict[str, Any],
+    result_meta: dict[str, Any],
+    related_run_id: Optional[str] = None,
+    related_ask_event_id: Optional[str] = None,
+) -> None:
+    store = MemoryStore(db_path)
+    with store._connection() as connection:
+        append_event(
+            connection,
+            operation=operation,
+            actor=actor,
+            policy_hash=policy_hash,
+            request=request,
+            result_meta=result_meta,
+            related_run_id=related_run_id,
+            related_ask_event_id=related_ask_event_id,
+        )
+        connection.commit()
 
 
 def append_event(

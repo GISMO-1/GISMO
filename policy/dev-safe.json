@@ -6,7 +6,8 @@
     "allowlist": [
       ["git", "status"],
       ["python", "-m", "unittest"],
-      ["make", "test"]
+      ["make", "test"],
+      ["echo", "hello"]
     ]
   }
 }

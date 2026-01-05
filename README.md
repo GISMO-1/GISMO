@@ -141,6 +141,8 @@ Planner (local LLM via Ollama):
   gismo ask "Summarize the last 10 queue failures" --dry-run
   gismo ask "Do X safely" --enqueue
   gismo ask "Plan with memory context" --dry-run --memory
+  gismo ask "Remember the default model" --apply-memory-suggestions \
+    --policy policy/dev-safe.json --yes
 
 Agent loop (leashed autonomy):
 
@@ -157,6 +159,7 @@ Planner behavior:
 - Actions are bounded (hard limit on action count).
 - Normalization/coercion exists so malformed model output does not break the system.
 - Optional memory suggestions may be included in plan output for operator review (advisory only; no auto-write).
+- Use --apply-memory-suggestions to write memory items from validated suggestions (policy-gated).
 - Ollama is called in JSON mode and uses keep_alive to avoid repeated model reloads.
 - Full audit trail is recorded for planner outputs and execution.
 - Every plan includes a confidence assessment, risk flags, and a short explanation.
@@ -164,6 +167,7 @@ Planner behavior:
 - --explain prints additional assessment details.
 - Use --debug to print tracebacks for ask failures.
 - --memory injects eligible read-only memory context into the planner prompt (bounded, audited).
+- --apply-memory-suggestions writes memory_suggestions after policy + confirmation checks. Use --yes to auto-confirm.
 
 Planner configuration:
 - Increase --timeout-s on CPU machines (60s baseline) if prompts time out.

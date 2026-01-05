@@ -171,14 +171,13 @@ Plan assessment gate:
 LATEST UPDATE (OPERATOR NOTES)
 
 Status:
-- Added policy + confirmation gating for memory put/delete operations in the CLI.
-- Audited memory decision outcomes (allowed/denied/confirmed) in memory events.
-- Added optional ask --memory prompt injection with deterministic filters, bounds, and audit metadata.
-- Added advisory ask memory suggestions in plan output with validation, bounds, and explicit apply commands.
+- Added ask --apply-memory-suggestions to apply vetted memory suggestions with policy + confirmation gates.
+- Linked applied memory events back to the originating ask audit event for traceability.
+- Added ask audit metadata for applied/skipped/denied memory suggestions.
 
 Next steps:
 - Extend policy samples if new memory namespaces are introduced.
-- Validate memory prompt injection ordering against real operator datasets.
+- Validate memory suggestion workflows with operator review cycles.
 - Re-run Windows validation on a native host before release tagging.
 - Consider sample workflows for operator-reviewed memory suggestions.
 
@@ -190,7 +189,7 @@ Operator examples:
 - python -m gismo.cli.main --db .\tmp\dev.db runs list
 - python -m gismo.cli.main --db .\tmp\dev.db runs show RUN_ID
 - python -m gismo.cli.main --db .\tmp\dev.db export RUN_ID
- - python -m gismo.cli.main --db .\tmp\dev.db agent "Summarize last 10 queue failures" --dry-run
+- python -m gismo.cli.main --db .\tmp\dev.db agent "Summarize last 10 queue failures" --dry-run
 
 -------------------------------------------------------------------------------
 

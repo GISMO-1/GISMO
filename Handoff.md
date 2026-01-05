@@ -176,6 +176,7 @@ Status:
 - Ollama-related tests are hermetic by default with an optional integration gate.
 - Ask CLI too-many-actions warning now clarifies confirmation-required behavior.
 - CLI `--db` flag now respects both pre- and post-subcommand placement for queue and other commands.
+- Added a Windows-only CLI regression test that verifies SQLite DB handles are released after queue stats.
 
 Next steps:
 - Make planner prompts policy-aware (still pending).
@@ -184,7 +185,7 @@ Next steps:
 - Watch for any remaining CLI flag ordering regressions as new subcommands land.
 
 Tests run:
-- python scripts/verify.py
+- Not run (not requested).
 
 -------------------------------------------------------------------------------
 

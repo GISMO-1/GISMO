@@ -7,14 +7,19 @@ import sys
 import tempfile
 import unittest
 import warnings
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
 
 from gismo.cli import main as cli_main
+from gismo.core.models import ToolReceipt, ToolReceiptStatus
+from gismo.core.state import StateStore
 from gismo.memory import policy_hash_for_path
+from gismo.memory.snapshot import export_snapshot
 from gismo.memory.store import (
     create_profile as memory_create_profile,
     put_item as memory_put_item,
+    set_retention_rule as memory_set_retention_rule,
 )
 
 
@@ -249,6 +254,382 @@ class DbHandleGuardrailsTest(unittest.TestCase):
                         "model",
                     ],
                     response,
+                )
+                gc.collect()
+                self._assert_db_deletable(db_path)
+
+    def test_memory_doctor_check_releases_db_handle(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "state.db"
+            policy_hash = policy_hash_for_path(str(self.policy_path))
+            memory_put_item(
+                str(db_path),
+                namespace="global",
+                key="doctor_check",
+                kind="fact",
+                value="ok",
+                tags=None,
+                confidence="high",
+                source="operator",
+                ttl_seconds=None,
+                actor="test",
+                policy_hash=policy_hash,
+            )
+            with warnings.catch_warnings():
+                warnings.simplefilter("error", ResourceWarning)
+                try:
+                    self._run_cli(
+                        [
+                            "memory",
+                            "doctor",
+                            "check",
+                            "--db",
+                            str(db_path),
+                            "--policy",
+                            str(self.policy_path),
+                            "--json",
+                        ]
+                    )
+                except SystemExit as exc:
+                    self.assertEqual(exc.code, 0)
+                gc.collect()
+                self._assert_db_deletable(db_path)
+
+    def test_memory_doctor_repair_releases_db_handle(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "state.db"
+            policy_hash = policy_hash_for_path(str(self.policy_path))
+            memory_put_item(
+                str(db_path),
+                namespace="global",
+                key="doctor_repair",
+                kind="fact",
+                value="ok",
+                tags=None,
+                confidence="high",
+                source="operator",
+                ttl_seconds=None,
+                actor="test",
+                policy_hash=policy_hash,
+            )
+            policy_path = self._write_policy(
+                tmpdir,
+                {
+                    "allowed_tools": [],
+                    "memory": {"allow": {"memory.doctor.reindex": ["global"]}},
+                },
+            )
+            with warnings.catch_warnings():
+                warnings.simplefilter("error", ResourceWarning)
+                self._run_cli(
+                    [
+                        "memory",
+                        "doctor",
+                        "repair",
+                        "--db",
+                        str(db_path),
+                        "--policy",
+                        str(policy_path),
+                        "--dry-run",
+                        "--reindex",
+                        "--yes",
+                        "--non-interactive",
+                    ]
+                )
+                gc.collect()
+                self._assert_db_deletable(db_path)
+
+    def test_memory_retention_set_releases_db_handle(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "state.db"
+            policy_path = self._write_policy(
+                tmpdir,
+                {
+                    "allowed_tools": [],
+                    "memory": {"allow": {"memory.retention.set": ["global"]}},
+                },
+            )
+            with warnings.catch_warnings():
+                warnings.simplefilter("error", ResourceWarning)
+                try:
+                    self._run_cli(
+                        [
+                            "memory",
+                            "retention",
+                            "set",
+                            "--db",
+                            str(db_path),
+                            "--policy",
+                            str(policy_path),
+                            "global",
+                            "--max-items",
+                            "1",
+                            "--reason",
+                            "test",
+                            "--yes",
+                            "--non-interactive",
+                        ]
+                    )
+                except SystemExit as exc:
+                    self.assertEqual(exc.code, 2)
+                gc.collect()
+                self._assert_db_deletable(db_path)
+
+    def test_memory_retention_clear_releases_db_handle(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "state.db"
+            memory_set_retention_rule(
+                str(db_path),
+                namespace="global",
+                max_items=1,
+                ttl_seconds=None,
+                policy_source="operator",
+            )
+            policy_path = self._write_policy(
+                tmpdir,
+                {
+                    "allowed_tools": [],
+                    "memory": {"allow": {"memory.retention.clear": ["global"]}},
+                },
+            )
+            with warnings.catch_warnings():
+                warnings.simplefilter("error", ResourceWarning)
+                try:
+                    self._run_cli(
+                        [
+                            "memory",
+                            "retention",
+                            "clear",
+                            "--db",
+                            str(db_path),
+                            "--policy",
+                            str(policy_path),
+                            "global",
+                            "--yes",
+                            "--non-interactive",
+                        ]
+                    )
+                except SystemExit as exc:
+                    self.assertEqual(exc.code, 2)
+                gc.collect()
+                self._assert_db_deletable(db_path)
+
+    def test_memory_retention_enforce_releases_db_handle(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "state.db"
+            policy_hash = policy_hash_for_path(str(self.policy_path))
+            memory_set_retention_rule(
+                str(db_path),
+                namespace="global",
+                max_items=1,
+                ttl_seconds=None,
+                policy_source="operator",
+            )
+            memory_put_item(
+                str(db_path),
+                namespace="global",
+                key="retention_base",
+                kind="fact",
+                value="base",
+                tags=None,
+                confidence="high",
+                source="operator",
+                ttl_seconds=None,
+                actor="test",
+                policy_hash=policy_hash,
+            )
+            policy_path = self._write_policy(
+                tmpdir,
+                {
+                    "allowed_tools": ["memory.put"],
+                    "memory": {
+                        "allow": {
+                            "memory.put": ["global"],
+                            "memory.retention.enforce": ["global"],
+                        }
+                    },
+                },
+            )
+            with warnings.catch_warnings():
+                warnings.simplefilter("error", ResourceWarning)
+                try:
+                    self._run_cli(
+                        [
+                            "memory",
+                            "put",
+                            "--db",
+                            str(db_path),
+                            "--policy",
+                            str(policy_path),
+                            "--namespace",
+                            "global",
+                            "--key",
+                            "retention_new",
+                            "--kind",
+                            "fact",
+                            "--value-text",
+                            "value",
+                            "--confidence",
+                            "high",
+                            "--source",
+                            "operator",
+                            "--yes",
+                        ]
+                    )
+                except SystemExit as exc:
+                    self.assertEqual(exc.code, 2)
+                gc.collect()
+                self._assert_db_deletable(db_path)
+
+    def test_memory_snapshot_import_dry_run_releases_db_handle(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "state.db"
+            policy_hash = policy_hash_for_path(str(self.policy_path))
+            memory_put_item(
+                str(db_path),
+                namespace="global",
+                key="snapshot",
+                kind="fact",
+                value="ok",
+                tags=None,
+                confidence="high",
+                source="operator",
+                ttl_seconds=None,
+                actor="test",
+                policy_hash=policy_hash,
+            )
+            snapshot_payload = export_snapshot(str(db_path), namespace_filter="*")
+            snapshot_path = Path(tmpdir) / "snapshot.json"
+            snapshot_path.write_text(
+                json.dumps(snapshot_payload, ensure_ascii=False, sort_keys=True),
+                encoding="utf-8",
+            )
+            policy_path = self._write_policy(
+                tmpdir,
+                {
+                    "allowed_tools": [],
+                    "memory": {"allow": {"memory.put": ["global"], "memory.delete": ["global"]}},
+                },
+            )
+            with warnings.catch_warnings():
+                warnings.simplefilter("error", ResourceWarning)
+                try:
+                    self._run_cli(
+                        [
+                            "memory",
+                            "snapshot",
+                            "import",
+                            "--db",
+                            str(db_path),
+                            "--in",
+                            str(snapshot_path),
+                            "--dry-run",
+                            "--mode",
+                            "merge",
+                            "--yes",
+                            "--non-interactive",
+                            "--policy",
+                            str(policy_path),
+                        ]
+                    )
+                except SystemExit as exc:
+                    self.assertEqual(exc.code, 2)
+                gc.collect()
+                self._assert_db_deletable(db_path)
+
+    def test_tool_receipts_list_releases_db_handle(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "state.db"
+            with StateStore(str(db_path)) as state_store:
+                run = state_store.create_run(label="tool-receipts", metadata={})
+                started_at = datetime.now(timezone.utc)
+                receipt = ToolReceipt(
+                    run_id=run.id,
+                    tool_name="echo",
+                    tool_kind="system",
+                    request_payload_json="{}",
+                    response_payload_json="{}",
+                    status=ToolReceiptStatus.SUCCESS,
+                    started_at=started_at,
+                    finished_at=started_at,
+                    duration_ms=0,
+                    request_sha256="req",
+                    response_sha256="resp",
+                )
+                state_store.record_tool_receipt(receipt)
+            with warnings.catch_warnings():
+                warnings.simplefilter("error", ResourceWarning)
+                self._run_cli(
+                    [
+                        "tools",
+                        "receipts",
+                        "list",
+                        "--db",
+                        str(db_path),
+                        "--run",
+                        run.id,
+                    ]
+                )
+                gc.collect()
+                self._assert_db_deletable(db_path)
+
+    def test_tool_receipts_show_releases_db_handle(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "state.db"
+            with StateStore(str(db_path)) as state_store:
+                run = state_store.create_run(label="tool-receipts", metadata={})
+                started_at = datetime.now(timezone.utc)
+                receipt = ToolReceipt(
+                    run_id=run.id,
+                    tool_name="echo",
+                    tool_kind="system",
+                    request_payload_json="{}",
+                    response_payload_json="{}",
+                    status=ToolReceiptStatus.SUCCESS,
+                    started_at=started_at,
+                    finished_at=started_at,
+                    duration_ms=0,
+                    request_sha256="req",
+                    response_sha256="resp",
+                )
+                state_store.record_tool_receipt(receipt)
+            with warnings.catch_warnings():
+                warnings.simplefilter("error", ResourceWarning)
+                self._run_cli(
+                    [
+                        "tools",
+                        "receipts",
+                        "show",
+                        "--db",
+                        str(db_path),
+                        receipt.id,
+                    ]
+                )
+                gc.collect()
+                self._assert_db_deletable(db_path)
+
+    def test_agent_session_show_releases_db_handle(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "state.db"
+            with StateStore(str(db_path)) as state_store:
+                session = state_store.create_agent_session(
+                    goal="test",
+                    role_id=None,
+                    role_name=None,
+                    profile_id=None,
+                    profile_name=None,
+                )
+            with warnings.catch_warnings():
+                warnings.simplefilter("error", ResourceWarning)
+                self._run_cli(
+                    [
+                        "agent",
+                        "session",
+                        "show",
+                        "--db",
+                        str(db_path),
+                        session.session_id,
+                    ]
                 )
                 gc.collect()
                 self._assert_db_deletable(db_path)

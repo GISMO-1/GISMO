@@ -1,3 +1,4 @@
+```markdown
 # OPERATOR GUIDE — GISMO
 
 This document is for operators running GISMO day-to-day. It focuses on how to run the system, how to inspect it, how to recover it, and how to keep it safe. This is not a contributor guide and not an architecture deep dive.
@@ -154,7 +155,7 @@ EXECUTE PLAN:
 Planner rules:
 - Produces enqueue-only plans
 - Action count is bounded
-- Output is normalized
+- Output is normalized (schema enforcement; malformed model output fails closed)
 - Uses Ollama JSON mode with keep_alive to reduce reload latency
 - Policy is still enforced at execution time
 - Planner cannot execute directly
@@ -176,6 +177,55 @@ Always prefer:
 - --dry-run first
 - Review plan
 - Then --enqueue
+
+-------------------------------------------------------------------------------
+
+AGENT LOOP (LEASHED AUTONOMY)
+
+The agent is an operator-leashed iteration loop. It plans and acts only through the queue/daemon and never bypasses policy.
+
+ONE-SHOT (PLAN/ACT ONCE):
+
+  gismo agent "summarize last 5 failures" --dry-run
+  gismo agent "do X safely" --once
+
+BOUNDED MULTI-CYCLE:
+
+  gismo agent "do X safely" --max-cycles 3 --yes
+
+Notes:
+- The agent uses the same safety model as ask: bounded actions, enqueue-only plans, policy enforcement.
+- Confirmation gates still apply. Use --non-interactive to fail closed rather than prompting.
+
+-------------------------------------------------------------------------------
+
+MEMORY (PERSISTENT, POLICY-GATED)
+
+Memory is a local SQLite-backed store for facts, preferences, and operational notes.
+
+Direct memory writes (operator-controlled):
+
+  gismo memory put --namespace global --key key --kind note --value-text "value" \
+    --confidence high --source operator --policy policy/dev-safe.json --yes
+
+Read memory:
+
+  gismo memory get --namespace global key --policy policy/dev-safe.json
+  gismo memory namespace list --policy policy/dev-safe.json
+
+Memory in ask/agent (read-only injection):
+
+  gismo ask "plan with memory context" --dry-run --memory
+  gismo ask "plan with operator profile" --dry-run --memory-profile operator
+
+Memory suggestions:
+- The LLM may emit memory_suggestions.
+- Suggestions are advisory by default (no auto-write).
+- Apply them only when explicitly requested:
+
+  gismo ask "remember default model" --dry-run
+  gismo ask "remember default model" --apply-memory-suggestions \
+    --policy policy/dev-safe.json --yes
 
 -------------------------------------------------------------------------------
 
@@ -250,6 +300,7 @@ PERMISSION_DENIED:
 FAILED TASK:
 - Logged and retained intentionally
 - Inspect with queue show
+- Export the run if you need to share the incident trail
 
 DAEMON NOT RUNNING:
 - Start with gismo up or gismo daemon
@@ -266,3 +317,4 @@ Policy before power.
 Explicit over implicit.
 State is truth.
 Audit everything.
+```

@@ -125,23 +125,23 @@ scripts/
 AUTHORITY MODEL (SAFETY BOUNDARY)
 
 Human operator:
-- defines policy (what is allowed)
-- provides intent/goals (ask)
-- starts/stops daemon/supervisor
+- Defines policy (what is allowed)
+- Provides intent/goals (ask/agent)
+- Starts/stops daemon/supervisor
 
 Planner (LLM):
-- proposes plan only
-- must output enqueue-only plan schema
-- bounded actions; normalization/coercion applied
-- cannot bypass policy or execute directly
+- Proposes plan only (enqueue-only)
+- Must output strict plan schema
+- Actions are bounded; normalization/coercion applied
+- Cannot bypass policy or execute directly
 
 Core orchestrator + tools:
-- executes only what is enqueued
-- validates inputs
-- enforces policy at runtime
-- audits everything
+- Executes only what is enqueued
+- Validates inputs
+- Enforces policy at runtime
+- Audits everything
 
-No component is allowed to “silently” do work outside of the above chain.
+No component is allowed to do work outside of this chain.
 
 -------------------------------------------------------------------------------
 
@@ -157,41 +157,34 @@ INTENTIONAL LIMITATIONS (NOT BUGS)
 
 RECENT NOTABLE CHANGE (LATEST WORK)
 
-Leashed agent loop:
-- Added `agent` CLI to turn a goal into a plan, enqueue it, and execute via the daemon.
-- Confirmation gates now apply to high-risk plans and any shell/write actions.
-- Agent summaries report confidence, risk flags, run IDs, and final status.
-- Agent memory handling now mirrors `ask` (read-only context injection, advisory suggestions, gated apply).
+SQLite handle hygiene (Windows reliability):
+- Removed destructor-based cleanup from StateStore/MemoryStore in favor of explicit close semantics.
+- Updated tests to ensure sqlite3 connections are deterministically released.
+- Added a Windows-only regression test to confirm snapshot CLI releases DB handles immediately after CLI operations.
 
-This is a controlled autonomy feature and should be treated as guarded behavior.
-
-Plan assessment gate:
-- ask now prints confidence, risk flags, and an explanation for each plan.
-- High-risk plans require confirmation before enqueueing unless overridden with --yes.
-
-LATEST UPDATE (OPERATOR NOTES)
-
-Status:
-- Removed destructor-based cleanup in favor of explicit close paths and context managers.
-- Switched tests to use `contextlib.closing` around sqlite3 connections for deterministic release.
-- Added a Windows-only snapshot CLI regression test to confirm DB handles release immediately after CLI operations.
-
-Next steps:
-- Consider policy-gated non-dry-run replay after operators validate audit workflows.
-- Extend session metrics (elapsed time per step) once operators validate workflow.
-- Keep exercising Windows DB cleanup checks after additional CLI surfaces land.
+Rationale:
+- On Windows, open SQLite handles can prevent file cleanup and break TemporaryDirectory-based tests.
+- We treat this as a correctness issue, not a platform quirk.
 
 Tests run:
 - python scripts/verify.py
 
-Operator examples:
-- python -m gismo.cli.main --db .\tmp\dev.db runs list
-- python -m gismo.cli.main --db .\tmp\dev.db runs show RUN_ID
-- python -m gismo.cli.main --db .\tmp\dev.db export RUN_ID
-- python -m gismo.cli.main --db .\tmp\dev.db tools receipts list --run RUN_ID
-- python -m gismo.cli.main --db .\tmp\dev.db tools receipts show RECEIPT_ID
-- python -m gismo.cli.main --db .\tmp\dev.db tools replay --run RUN_ID --from-export .\tmp\exports\RUN_ID.jsonl --dry-run
-- python -m gismo.cli.main --db .\tmp\dev.db agent "Summarize last 10 queue failures" --dry-run
+-------------------------------------------------------------------------------
+
+LEASHED AGENT LOOP (CONTROLLED AUTONOMY)
+
+Agent behavior:
+- The `agent` CLI turns a goal into a plan, enqueues it, and executes via the daemon.
+- Confirmation gates apply to higher-risk plans and any write/shell actions unless overridden with --yes.
+- Agent summaries report confidence/risk flags, run IDs, and final status.
+
+Memory behavior:
+- Agent memory handling mirrors `ask`:
+  - read-only context injection (bounded, audited)
+  - memory_suggestions are advisory by default
+  - applying suggestions requires explicit flag + policy + confirmation
+
+This is guarded behavior. Treat changes here as security-sensitive.
 
 -------------------------------------------------------------------------------
 
@@ -209,15 +202,15 @@ OPERATING RULES (ENFORCE THESE)
 DEFINITION OF DONE (PHASE 2)
 
 Phase 2 is complete when:
-- Planner confidence scoring exists (low/medium/high)
-- User confirmation gates exist for higher-risk plans
-- Planner prompts are policy-aware (LLM is told its constraints)
+- Planner confidence scoring exists (low/medium/high) and is consistent
+- User confirmation gates exist for higher-risk plans and are audited
+- Planner prompts are policy-aware (the LLM is explicitly told constraints)
 - Explain-before-execute mode exists (human-legible summary)
 - LLM runtime behavior is stable (predictable timeouts, no hangs)
 - No regressions in queue/daemon/policy
 - pytest passes on Windows reliably
 
-Only after Phase 2 is “boringly reliable” do we move into Phase 3 memory.
+Only after Phase 2 is “boringly reliable” do we move deeper into Phase 3 memory expansion.
 
 -------------------------------------------------------------------------------
 
@@ -227,29 +220,29 @@ Do not add “new features” yet.
 
 Priority sequence:
 1) Stabilize planner runtime:
-   - make timeouts predictable
-   - cap token/context behavior
-   - lock in default fast model profile (phi3:mini or equivalent)
+   - Make timeouts predictable
+   - Cap token/context behavior
+   - Lock in a default fast model profile (phi3:mini or equivalent)
 
-2) Add one confidence + confirmation gate:
-   - simple, auditable, CLI-controlled
-   - no UI creep
-   - default safe behavior
+2) Strengthen one confidence + confirmation gate path:
+   - Simple, auditable, CLI-controlled
+   - Default safe behavior
+   - Minimal flags; clear errors
 
 3) Policy-aware prompts:
-   - planner should be told what tools/ops are allowed
-   - reduce invalid plans upstream
+   - Planner should be told what tools/ops are allowed
+   - Reduce invalid plans upstream
 
 4) Explain-before-execute mode:
-   - summary of plan intent and risk
-   - operator can approve/deny
+   - Summary of plan intent and risk
+   - Operator can approve/deny
 
 -------------------------------------------------------------------------------
 
 RELEASE READINESS (WHAT “A NEW RELEASE” MEANS)
 
 A release should ship only when:
-- verify.py passes
+- scripts/verify.py passes
 - docs reflect actual behavior
 - export paths are deterministic
 - CLI usage examples are accurate

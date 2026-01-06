@@ -1,6 +1,6 @@
 # GISMO
 
-GISMO (General Intelligent System for Multiflow Operations) is a local-first, operator-grade autonomous orchestration system. It can plan, schedule, execute, audit, and recover tasks on a single machine using a controlled local LLM (Large Language Model) for planning. GISMO is not a chatbot or a cloud service – it runs entirely on your hardware and is built for determinism, safety, and clarity.
+GISMO (General Intelligent System for Multiflow Operations) is a local-first, operator-grade autonomous orchestration system. It can plan, schedule, execute, audit, and recover tasks on a single machine using a controlled local LLM (Large Language Model) for planning. GISMO is not a chatbot or a cloud service — it runs entirely on your hardware and is built for determinism, safety, and clarity.
 
 Key Features and Principles:
 
@@ -19,6 +19,12 @@ Key Features and Principles:
 - Auditability:
   Every action and decision is logged. GISMO produces detailed JSONL audit logs per run, capturing tool inputs/outputs, tool receipts (canonical payloads + hashes), and outcomes. Nothing happens silently.
 
+- Memory & Context (Persistent, Policy-Gated):
+  GISMO includes a persistent local memory layer (SQLite-backed) for facts, preferences, notes, and retention-governed context. The planner and agent can inject read-only memory context into prompts (bounded and audited). The LLM may emit “memory suggestions”; these are advisory by default and are only written if explicitly applied (policy + confirmation gated).
+
+- Leashed Autonomy (Agent Loop):
+  GISMO includes an operator-leashed agent loop that can iterate toward a goal under strict guardrails. The agent plans, enqueues, and executes only through the same queue/daemon machinery, with the same confirmation gates and policy checks as ask.
+
 - Cross-Platform, Windows-First:
   GISMO is built to run reliably on Windows first, as well as Linux. It avoids Unix assumptions and handles Windows-specific concerns (paths, subprocess behavior, locking) explicitly.
 
@@ -30,7 +36,7 @@ Key Features and Principles:
 INSTALLATION
 
 Prereqs:
-- Python 3.11+ recommended
+- Python 3.11+ recommended (tested on Python 3.13)
 - A virtual environment is strongly recommended
 - Optional (for planner features): Ollama running locally with an available model
 
@@ -174,7 +180,6 @@ Notes:
 - Memory doctor repairs are operator-controlled, policy-gated, and require explicit flags (no automatic fixes).
 - Snapshot item_hash values are computed from a canonical JSON payload that includes
   created_at/updated_at timestamps; snapshot_hash is the sha256 of ordered item_hashes.
-  gismo export RUN_ID
 
 Windows examples (explicit module invocation):
 
@@ -341,23 +346,28 @@ Phase 1 — Local LLM Planner: COMPLETE
 - Timeout handling + failure auditing
 - Test coverage for planner behavior
 
-Phase 2 — Control & Guardrails: IN PROGRESS
+Phase 2 — Control & Guardrails: COMPLETE
 - Hard limits on action count
 - Enqueue-only execution model
 - Explicit tool allowlists
 - Read-only / dev-safe policy modes
-- Full audit trail for every decision
+- Planner confidence scoring (low/medium/high)
+- Risk assessment + user confirmation gates for higher-risk plans
+- Policy-aware planning prompts
+- Explain-before-enqueue mode
+- Full audit trail for every decision (plan, assessment, receipts, outcomes)
+
+Phase 3 — Memory & Context: IN PROGRESS
+- Persistent memory store (SQLite) with namespaces, profiles, and retention
+- Read-only memory context injection into ask/agent prompts (bounded, audited)
+- Advisory memory suggestions with explicit apply (policy + confirmation gated)
+- Memory snapshots (export/diff/import) with dry-run and tamper detection
+- Memory explain and doctor tooling for observability and operator-controlled maintenance
 
 Next:
-- Planner confidence scoring (low/medium/high)
-- User confirmation gates for higher-risk plans
-- Policy-aware planning prompts
-- Explain-before-execute mode
-
-Phase 3 — Memory & Context: PLANNED
-- Persistent memory layer (prior plans, failures, preferences)
-- Context injection and summarization jobs
-- Session awareness across runs
+- Optional summarization workflows (promote run outcomes into memory under policy)
+- More refined default memory profiles (operator/project/minimal) and documentation
+- Expanded selection traces (why a memory item was included/excluded)
 
 Phase 4 — Interactive GISMO: END GAME
 - CLI/TUI/Local UI interactions

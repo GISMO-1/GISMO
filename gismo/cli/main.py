@@ -17,6 +17,7 @@ from uuid import UUID, uuid4
 from gismo.cli import memory_doctor as memory_doctor_cli
 from gismo.cli import memory_explain as memory_explain_cli
 from gismo.cli import memory_profile as memory_profile_cli
+from gismo.cli import memory_preview as memory_preview_cli
 from gismo.cli import memory_snapshot as memory_snapshot_cli
 from gismo.cli import agent_role as agent_role_cli
 from gismo.cli import agent_session as agent_session_cli
@@ -52,6 +53,17 @@ from gismo.core.toolpacks.fs_tools import FileSystemConfig, ListDirTool, ReadFil
 from gismo.core.toolpacks.shell_tool import ShellConfig, ShellTool
 from gismo.llm.ollama import OllamaError, ollama_chat, resolve_ollama_config
 from gismo.llm.prompts import build_system_prompt, build_user_prompt
+from gismo.memory.injection import (
+    MEMORY_INJECTION_BYTE_CAP,
+    MEMORY_INJECTION_ITEM_CAP,
+    MEMORY_INJECTION_TRACE_AUDIT_LIMIT,
+    MemoryInjectionTrace,
+    build_memory_injection_trace,
+    prompt_selection_filters,
+    profile_filters_payload,
+    profile_selection_filters,
+    select_injection_items,
+)
 from gismo.memory.store import (
     MemoryItem,
     MemoryNamespaceDetail,
@@ -628,6 +640,15 @@ def _print_plan_explain(explain: PlanExplain, *, verbose: bool) -> None:
         print(f"- shell allowlist: {explain.shell_allowlist_summary}")
         write_tools = ", ".join(explain.write_permissions) if explain.write_permissions else "none"
         print(f"- write permissions: {write_tools}")
+        trace = explain.memory_injection_trace
+        if isinstance(trace, dict):
+            eligibility = trace.get("eligibility")
+            selected_count = None
+            if isinstance(eligibility, dict):
+                selected_count = eligibility.get("selected_items")
+            print(f"- memory injection hash: {trace.get('injection_hash')}")
+            if selected_count is not None:
+                print(f"- memory selected count: {selected_count}")
 
 
 def _print_plan_json(
@@ -3083,6 +3104,7 @@ class MemoryInjection:
     keys: list[dict[str, str]]
     cap_items: int
     cap_bytes: int
+    trace: MemoryInjectionTrace
     profile: dict[str, object] | None = None
 
 
@@ -3091,31 +3113,6 @@ class AgentRoleContext:
     role_id: str
     role_name: str
     memory_profile_id: str | None
-
-
-MEMORY_INJECTION_ITEM_CAP = 20
-MEMORY_INJECTION_BYTE_CAP = 8192
-
-
-def _serialize_memory_value(value: object) -> str:
-    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-
-
-def _memory_entries_for_prompt(items: list[MemoryItem]) -> list[dict[str, str]]:
-    entries: list[dict[str, str]] = []
-    for item in items:
-        entries.append(
-            {
-                "namespace": item.namespace,
-                "key": item.key,
-                "kind": item.kind,
-                "confidence": item.confidence,
-                "source": item.source,
-                "updated_at": item.updated_at,
-                "value_json": _serialize_memory_value(item.value),
-            }
-        )
-    return entries
 
 
 def _resolve_memory_profile(db_path: str, selector: str) -> MemoryProfile:
@@ -3129,27 +3126,17 @@ def _resolve_memory_profile(db_path: str, selector: str) -> MemoryProfile:
     return profile
 
 
-def _profile_filters(profile: MemoryProfile, effective_limit: int | None) -> dict[str, object]:
-    return {
-        "profile_id": profile.profile_id,
-        "name": profile.name,
-        "include_namespaces": profile.include_namespaces,
-        "exclude_namespaces": profile.exclude_namespaces,
-        "include_kinds": profile.include_kinds,
-        "exclude_kinds": profile.exclude_kinds,
-        "max_items": profile.max_items,
-        "effective_limit": effective_limit,
-    }
-
-
 def _build_memory_injection(
     db_path: str,
     *,
+    source: str,
     profile_selector: str | None = None,
     plan_id: str | None = None,
     run_id: str | None = None,
 ) -> MemoryInjection:
     profile_filters = None
+    selection_filters = None
+    trace_profile = None
     if profile_selector:
         profile = _resolve_memory_profile(db_path, profile_selector)
         items = memory_list_profile_items(
@@ -3161,7 +3148,9 @@ def _build_memory_injection(
             MEMORY_INJECTION_ITEM_CAP,
             profile.max_items if profile.max_items is not None else MEMORY_INJECTION_ITEM_CAP,
         )
-        profile_filters = _profile_filters(profile, effective_limit)
+        profile_filters = profile_filters_payload(profile, effective_limit)
+        trace_profile = profile_filters
+        selection_filters = profile_selection_filters(profile)
         memory_record_profile_selection_trace(
             db_path,
             profile=profile,
@@ -3171,27 +3160,23 @@ def _build_memory_injection(
         )
     else:
         items = memory_list_prompt_items(db_path, limit=MEMORY_INJECTION_ITEM_CAP)
+        selection_filters = prompt_selection_filters()
         memory_record_prompt_selection_trace(
             db_path,
             selected_items=items,
             run_id=run_id,
             plan_id=plan_id,
         )
-    entries = _memory_entries_for_prompt(items)
-    capped_entries: list[dict[str, str]] = []
-    total_bytes = 0
-    excluded_due_to_cap: list[MemoryItem] = []
-    for index, entry in enumerate(entries):
-        serialized = json.dumps(entry, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-        entry_bytes = len(serialized.encode("utf-8"))
-        if len(capped_entries) >= MEMORY_INJECTION_ITEM_CAP:
-            excluded_due_to_cap.extend(items[index:])
-            break
-        if total_bytes + entry_bytes > MEMORY_INJECTION_BYTE_CAP:
-            excluded_due_to_cap.extend(items[index:])
-            break
-        capped_entries.append(entry)
-        total_bytes += entry_bytes
+    if selection_filters is None:
+        raise RuntimeError("Memory selection filters were not resolved.")
+    selection = select_injection_items(
+        items,
+        cap_items=MEMORY_INJECTION_ITEM_CAP,
+        cap_bytes=MEMORY_INJECTION_BYTE_CAP,
+    )
+    capped_entries = selection.entries
+    total_bytes = selection.total_bytes
+    excluded_due_to_cap = selection.excluded_items
     if excluded_due_to_cap and (plan_id or run_id):
         include_reason = "include.profile" if profile_selector else "include.default"
         for item in excluded_due_to_cap:
@@ -3223,6 +3208,15 @@ def _build_memory_injection(
         keys=keys,
         cap_items=MEMORY_INJECTION_ITEM_CAP,
         cap_bytes=MEMORY_INJECTION_BYTE_CAP,
+        trace=build_memory_injection_trace(
+            db_path,
+            selected_items=selection.items,
+            source=source,
+            filters=selection_filters,
+            cap_items=MEMORY_INJECTION_ITEM_CAP,
+            cap_bytes=MEMORY_INJECTION_BYTE_CAP,
+            profile=trace_profile,
+        ),
         profile=profile_filters,
     )
 
@@ -3328,6 +3322,33 @@ def _record_memory_profile_use(
         policy_hash=policy_hash_for_path(None),
         request=request,
         result_meta=result_meta,
+        related_ask_event_id=related_event_id,
+    )
+
+
+def _record_memory_injection_trace(
+    *,
+    db_path: str,
+    memory_injection: MemoryInjection | None,
+    actor: str,
+    related_event_id: str | None,
+) -> None:
+    if memory_injection is None:
+        return
+    trace_payload = memory_injection.trace.to_dict(
+        max_selected_items=MEMORY_INJECTION_TRACE_AUDIT_LIMIT
+    )
+    request = {
+        "source": memory_injection.trace.source,
+        "profile": memory_injection.trace.profile,
+    }
+    memory_record_event(
+        db_path,
+        operation="memory.inject",
+        actor=actor,
+        policy_hash=policy_hash_for_path(None),
+        request=request,
+        result_meta=trace_payload,
         related_ask_event_id=related_event_id,
     )
 
@@ -3494,11 +3515,13 @@ def _request_llm_plan(
             )
             raise
         risk = classify_plan_risk(plan.get("actions", []))
+        trace_payload = memory_injection.trace.to_dict() if memory_injection else None
         explain_payload = build_plan_explain(
             plan=plan,
             risk=risk,
             policy_summary=policy_summary,
             memory_injection=_memory_injection_status(memory_injection),
+            memory_injection_trace=trace_payload,
             memory_suggestions_count=len(plan.get("memory_suggestions") or []),
         )
         if not json_output:
@@ -3583,10 +3606,18 @@ def run_ask(
     plan_event_id = str(uuid4())
     memory_injection = None
     if use_memory or memory_profile:
+        source = "--memory-profile" if memory_profile else "--memory"
         memory_injection = _build_memory_injection(
             db_path,
+            source=source,
             profile_selector=memory_profile,
             plan_id=plan_event_id,
+        )
+        _record_memory_injection_trace(
+            db_path=db_path,
+            memory_injection=memory_injection,
+            actor="ask",
+            related_event_id=plan_event_id,
         )
     plan, risk, explain_payload, policy_summary, state_store, payload = _request_llm_plan(
         db_path,
@@ -3883,10 +3914,23 @@ def run_agent(
         plan_event_id = str(uuid4())
         memory_injection = None
         if use_memory or memory_profile or role_profile_selector:
+            if role_profile_selector and role_context:
+                source = f"role:{role_context.role_name}"
+            elif memory_profile:
+                source = "--memory-profile"
+            else:
+                source = "--memory"
             memory_injection = _build_memory_injection(
                 db_path,
+                source=source,
                 profile_selector=role_profile_selector or memory_profile,
                 plan_id=plan_event_id,
+            )
+            _record_memory_injection_trace(
+                db_path=db_path,
+                memory_injection=memory_injection,
+                actor="agent",
+                related_event_id=plan_event_id,
             )
         plan, risk, explain_payload, policy_summary, state_store, _payload = _request_llm_plan(
             db_path,
@@ -4304,6 +4348,7 @@ def _agent_session_dependencies() -> agent_session_cli.AgentSessionDependencies:
         request_llm_plan=_request_llm_plan,
         build_memory_injection=_build_memory_injection,
         record_memory_profile_use=_record_memory_profile_use,
+        record_memory_injection_trace=_record_memory_injection_trace,
         confirm_plan_gate=_confirm_plan_gate,
         enqueue_plan_actions=_enqueue_plan_actions,
         drain_queue_items=_drain_queue_items,
@@ -4370,6 +4415,10 @@ def _handle_memory_search(args: argparse.Namespace) -> None:
 
 def _handle_memory_delete(args: argparse.Namespace) -> None:
     run_memory_delete(args)
+
+
+def _handle_memory_preview(args: argparse.Namespace) -> None:
+    memory_preview_cli.run_memory_preview(args)
 
 
 def _handle_memory_doctor_check(args: argparse.Namespace) -> None:
@@ -5517,6 +5566,33 @@ def build_parser() -> argparse.ArgumentParser:
         help="Optional policy file path for audit hashing",
     )
     memory_search_parser.set_defaults(handler=_handle_memory_search)
+
+    memory_preview_parser = memory_subparsers.add_parser(
+        "preview",
+        help="Preview memory injection for a profile",
+        parents=[db_parent_optional],
+    )
+    memory_preview_parser.add_argument(
+        "--memory-profile",
+        required=True,
+        help="Memory profile name or ID",
+    )
+    memory_preview_parser.add_argument(
+        "--namespace",
+        action="append",
+        help="Restrict preview to namespace(s); supports * prefix matching",
+    )
+    memory_preview_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Output JSON",
+    )
+    memory_preview_parser.add_argument(
+        "--policy",
+        default=None,
+        help="Optional policy file path",
+    )
+    memory_preview_parser.set_defaults(handler=_handle_memory_preview)
 
     memory_delete_parser = memory_subparsers.add_parser(
         "delete",

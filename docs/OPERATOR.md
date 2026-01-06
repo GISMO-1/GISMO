@@ -227,6 +227,15 @@ Memory in ask/agent (read-only injection):
   gismo ask "plan with memory context" --dry-run --memory
   gismo ask "plan with operator profile" --dry-run --memory-profile operator
 
+Memory injection trace (bounded, deterministic):
+
+  gismo memory explain --plan PLAN_EVENT_ID --json
+  gismo memory preview --memory-profile operator --json
+
+Notes:
+- Ordering is deterministic (updated_at desc, namespace, key).
+- The trace includes eligibility counts, selected items, dropped counts, and an injection_hash.
+
 Memory suggestions:
 - The LLM may emit memory_suggestions.
 - Suggestions are advisory by default (no auto-write).

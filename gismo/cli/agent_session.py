@@ -25,6 +25,7 @@ class AgentSessionDependencies:
     request_llm_plan: Callable[..., tuple[dict, object, object, object, StateStore, dict[str, object]]]
     build_memory_injection: Callable[..., object]
     record_memory_profile_use: Callable[..., None]
+    record_memory_injection_trace: Callable[..., None]
     confirm_plan_gate: Callable[..., object]
     enqueue_plan_actions: Callable[..., tuple[list[str], list[str]]]
     drain_queue_items: Callable[..., list[QueueStatus]]
@@ -176,10 +177,18 @@ def run_agent_session_resume(args: argparse.Namespace, deps: AgentSessionDepende
     plan_event_id = str(uuid4())
     memory_injection = None
     if session.profile_id or session.profile_name:
+        source = f"role:{session.role_name}" if session.role_name else "--memory-profile"
         memory_injection = deps.build_memory_injection(
             args.db_path,
+            source=source,
             profile_selector=session.profile_id or session.profile_name,
             plan_id=plan_event_id,
+        )
+        deps.record_memory_injection_trace(
+            db_path=args.db_path,
+            memory_injection=memory_injection,
+            actor="agent_session",
+            related_event_id=plan_event_id,
         )
     role_context = None
     if session.role_id and session.role_name:

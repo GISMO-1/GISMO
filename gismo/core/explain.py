@@ -22,6 +22,7 @@ class PlanExplain:
     shell_allowlist_summary: str
     write_permissions: list[str]
     memory_injection: MemoryInjectionStatus
+    memory_injection_trace: dict[str, object] | None
     memory_suggestions: dict[str, object]
 
     def to_dict(self) -> dict[str, object]:
@@ -35,6 +36,7 @@ class PlanExplain:
             "shell_allowlist_summary": self.shell_allowlist_summary,
             "write_permissions": list(self.write_permissions),
             "memory_injection": self.memory_injection,
+            "memory_injection_trace": self.memory_injection_trace,
             "memory_suggestions": dict(self.memory_suggestions),
         }
 
@@ -45,6 +47,7 @@ def build_plan_explain(
     risk: PlanRisk,
     policy_summary: PolicySummary,
     memory_injection: MemoryInjectionStatus,
+    memory_injection_trace: dict[str, object] | None,
     memory_suggestions_count: int,
 ) -> PlanExplain:
     summary = _plan_summary(plan)
@@ -63,6 +66,7 @@ def build_plan_explain(
         shell_allowlist_summary=policy_summary.shell_allowlist_summary,
         write_permissions=policy_summary.write_tools,
         memory_injection=memory_injection,
+        memory_injection_trace=memory_injection_trace,
         memory_suggestions=suggestions_payload,
     )
 

@@ -193,14 +193,22 @@ Agent loop (leashed autonomy):
   gismo agent "Do X safely" --max-cycles 3 --yes
   gismo agent "Plan with memory context" --dry-run --memory
   gismo agent "Plan with operator memory profile" --dry-run --memory-profile operator
+  gismo agent --role planner "Plan as the planner role"
   gismo agent "Apply memory suggestions" --dry-run --apply-memory-suggestions \
     --policy policy/dev-safe.json --yes
+  gismo agent role list --policy policy/dev-safe.json
+  gismo agent role create --name planner --memory-profile operator \
+    --policy policy/dev-safe.json --yes
+  gismo agent role retire planner --policy policy/dev-safe.json --yes
 
 Agent notes:
 - The agent loop is leashed autonomy: it plans, enqueues, and executes only through the queue/daemon.
 - Confirmation is required for high-risk plans or any shell/write actions unless --yes is provided.
 - Memory context and suggestion handling mirror `ask`: suggestions are advisory unless
   --apply-memory-suggestions is set (policy/confirmation-gated; use --non-interactive to fail closed).
+- Agent roles provide sequential, operator-controlled identities; roles determine which memory profile
+  is injected and are recorded in audit logs. Roles cannot be used once retired.
+- Use either --role or --memory/--memory-profile; role selection is authoritative.
 
 Memory profiles (read-only selection):
 - Profiles define which namespaces/kinds are visible for memory injection; they do not write memory.
@@ -208,6 +216,14 @@ Memory profiles (read-only selection):
   - operator: include global preferences/facts with a max-items cap.
   - project: include project:<name> namespace kinds for task context.
   - minimal: no filters (empty profile yields no injected memory).
+
+Agent roles (multi-agent identities):
+- Roles bind a name + description to a memory profile and are immutable except for retirement.
+- Roles are sequential only; they do not enable parallel execution or autonomy.
+- Roles differ from memory profiles: profiles describe visibility rules, while roles bind those rules
+  to a named identity (e.g., planner vs executor).
+- Creating/retiring roles requires policy allowance for agent.role.create/agent.role.retire plus
+  explicit confirmation (use --yes or --non-interactive to fail closed).
 
 Planner behavior:
 - Produces enqueue-only plans under strict schema.

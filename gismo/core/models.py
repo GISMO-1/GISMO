@@ -55,6 +55,16 @@ class Run:
 
 
 @dataclass
+class AgentRole:
+    name: str
+    description: Optional[str] = None
+    memory_profile_id: Optional[str] = None
+    role_id: str = field(default_factory=lambda: str(uuid4()))
+    created_at: datetime = field(default_factory=_utc_now)
+    retired_at: Optional[datetime] = None
+
+
+@dataclass
 class Task:
     run_id: str
     title: str

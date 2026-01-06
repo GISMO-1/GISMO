@@ -1,14 +1,18 @@
+import argparse
 import contextlib
+import gc
 import io
 import json
 import os
 import sqlite3
 import tempfile
 import unittest
+import warnings
 from pathlib import Path
 from unittest import mock
 
 from gismo.cli import main as cli_main
+from gismo.cli import memory_explain as memory_explain_cli
 from gismo.core.models import QueueStatus
 from gismo.core.state import StateStore
 from gismo.memory.store import (
@@ -293,6 +297,117 @@ class AgentCliTest(unittest.TestCase):
             request = json.loads(row[0])
             self.assertEqual(request.get("profile_id"), profile.profile_id)
 
+    def test_agent_role_selects_profile_and_records_role_context(self) -> None:
+        response = json.dumps(
+            {
+                "intent": "recall",
+                "assumptions": [],
+                "actions": [],
+                "notes": [],
+            }
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = str(Path(tmpdir) / "state.db")
+            policy_hash = memory_policy_hash_for_path(None)
+            memory_upsert_item_with_timestamps(
+                db_path,
+                namespace="global",
+                key="alpha",
+                kind="fact",
+                value="alpha",
+                tags=None,
+                confidence="high",
+                source="operator",
+                ttl_seconds=None,
+                is_tombstoned=False,
+                created_at="2024-01-01T00:00:00+00:00",
+                updated_at="2024-01-03T00:00:00+00:00",
+                update_created_at=True,
+                actor="test",
+                policy_hash=policy_hash,
+                operation="put",
+            )
+            memory_upsert_item_with_timestamps(
+                db_path,
+                namespace="global",
+                key="beta",
+                kind="note",
+                value="beta",
+                tags=None,
+                confidence="high",
+                source="operator",
+                ttl_seconds=None,
+                is_tombstoned=False,
+                created_at="2024-01-01T00:00:00+00:00",
+                updated_at="2024-01-02T00:00:00+00:00",
+                update_created_at=True,
+                actor="test",
+                policy_hash=policy_hash,
+                operation="put",
+            )
+            profile = memory_create_profile(
+                db_path,
+                name="role-profile",
+                description=None,
+                include_namespaces=["global"],
+                exclude_namespaces=None,
+                include_kinds=["fact"],
+                exclude_kinds=None,
+                max_items=1,
+            )
+            state_store = StateStore(db_path)
+            role = state_store.create_agent_role(
+                name="planner",
+                description="Planner role",
+                memory_profile_id=profile.profile_id,
+            )
+            state_store.close()
+            with mock.patch.dict(os.environ, self._mock_env(), clear=False):
+                with mock.patch.object(cli_main, "ollama_chat", return_value=response):
+                    cli_main.run_agent(
+                        db_path,
+                        "recall context",
+                        policy_path=None,
+                        once=True,
+                        max_cycles=1,
+                        yes=True,
+                        dry_run=False,
+                        role=role.name,
+                    )
+            state_store = StateStore(db_path)
+            event = next(
+                (item for item in state_store.list_events() if item.json_payload),
+                None,
+            )
+            self.assertIsNotNone(event)
+            payload = event.json_payload or {}
+            injected_keys = payload.get("memory_injected_keys")
+            self.assertEqual(injected_keys, [{"namespace": "global", "key": "alpha"}])
+            role_payload = payload.get("agent_role") or {}
+            self.assertEqual(role_payload.get("role_id"), role.role_id)
+            self.assertEqual(role_payload.get("role_name"), role.name)
+            self.assertEqual(role_payload.get("memory_profile_id"), profile.profile_id)
+            runs = list(state_store.list_runs(limit=5))
+            self.assertEqual(len(runs), 1)
+            run_role = runs[0].metadata_json.get("agent_role", {})
+            self.assertEqual(run_role.get("role_id"), role.role_id)
+            state_store.close()
+
+            args = argparse.Namespace(
+                db_path=db_path,
+                run=None,
+                plan=event.id,
+                limit=memory_explain_cli.DEFAULT_EXPLAIN_LIMIT,
+                json=True,
+            )
+            buffer = io.StringIO()
+            with contextlib.redirect_stdout(buffer):
+                memory_explain_cli.run_memory_explain(args)
+            explain_payload = json.loads(buffer.getvalue())
+            explain_role = explain_payload.get("agent_role") or {}
+            self.assertEqual(explain_role.get("role_id"), role.role_id)
+            self.assertEqual(explain_role.get("memory_profile_id"), profile.profile_id)
+
     def test_agent_apply_memory_suggestions_requires_confirmation(self) -> None:
         response = json.dumps(
             {
@@ -354,6 +469,43 @@ class AgentCliTest(unittest.TestCase):
             state_store = StateStore(db_path)
             event = state_store.list_events()[0]
             self.assertEqual(event.id, related_event_id)
+
+    def test_agent_role_dry_run_releases_db_handle(self) -> None:
+        response = json.dumps(
+            {
+                "intent": "recall",
+                "assumptions": [],
+                "actions": [],
+                "notes": [],
+            }
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "state.db"
+            state_store = StateStore(str(db_path))
+            role = state_store.create_agent_role(
+                name="planner",
+                description=None,
+                memory_profile_id=None,
+            )
+            state_store.close()
+            with warnings.catch_warnings():
+                warnings.simplefilter("error", ResourceWarning)
+                with mock.patch.dict(os.environ, self._mock_env(), clear=False):
+                    with mock.patch.object(cli_main, "ollama_chat", return_value=response):
+                        cli_main.run_agent(
+                            str(db_path),
+                            "recall context",
+                            policy_path=None,
+                            once=True,
+                            max_cycles=1,
+                            yes=True,
+                            dry_run=True,
+                            role=role.name,
+                        )
+                gc.collect()
+                self.assertTrue(db_path.exists())
+                os.remove(db_path)
+                self.assertFalse(db_path.exists())
 
     def test_agent_apply_memory_suggestions_non_interactive_fails_closed(self) -> None:
         response = json.dumps(

@@ -79,6 +79,33 @@ def test_run_show_outputs_summary(repo_root: Path, db_path: Path) -> None:
     assert "output:" in stdout
 
 
+def test_run_show_includes_agent_role_context(repo_root: Path, db_path: Path) -> None:
+    state_store = StateStore(str(db_path))
+    run = state_store.create_run(
+        label="role-run",
+        metadata={
+            "agent_role": {
+                "role_id": "role-123",
+                "role_name": "planner",
+                "memory_profile_id": "profile-123",
+            }
+        },
+    )
+    state_store.close()
+
+    proc = _run_cli(["run", "--db", str(db_path), "show", run.id], cwd=repo_root)
+    assert proc.returncode == 0, proc.stderr
+    stdout = proc.stdout
+    assert "Role:" in stdout
+    assert "planner" in stdout
+    assert "profile-123" in stdout
+
+    proc_json = _run_cli(["runs", "--db", str(db_path), "show", "--json", run.id], cwd=repo_root)
+    assert proc_json.returncode == 0, proc_json.stderr
+    payload = json.loads(proc_json.stdout)
+    assert payload["agent_role"]["role_id"] == "role-123"
+
+
 def test_run_show_includes_memory_provenance(repo_root: Path, db_path: Path) -> None:
     state_store = StateStore(str(db_path))
     plan_event_id = str(uuid4())

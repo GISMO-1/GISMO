@@ -172,11 +172,12 @@ Plan assessment gate:
 LATEST UPDATE (OPERATOR NOTES)
 
 Status:
-- Added memory selection traces and the `gismo memory explain` command to audit inclusion/exclusion reasons for ask/agent runs.
+- Added agent roles with policy/confirmation-gated lifecycle and role-based memory profile selection.
+- Run/show/export/memory explain now surface role context for audit.
 
 Next steps:
-- Decide whether to ship default policy entries for memory profile create/retire actions.
-- Gather operator feedback on the memory explain JSON schema and cap defaults.
+- Decide whether to ship default policy entries for agent role create/retire actions.
+- Gather operator feedback on role-based memory visibility workflows (planner vs executor).
 
 Tests run:
 - python scripts/verify.py

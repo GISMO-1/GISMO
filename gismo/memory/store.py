@@ -12,12 +12,14 @@ from typing import Any, Iterable, Optional
 from uuid import uuid4
 
 MAX_EVENT_STRING_LEN = 1000
+MEMORY_SELECTION_TRACE_CAP = 200
 MEMORY_TABLE_NAMES = (
     "memory_items",
     "memory_events",
     "memory_namespaces",
     "memory_retention_rules",
     "memory_profiles",
+    "memory_selection_traces",
 )
 MEMORY_INDEX_DEFINITIONS = (
     (
@@ -83,7 +85,23 @@ MEMORY_INDEX_DEFINITIONS = (
         ON memory_profiles (name)
         """,
     ),
+    (
+        "idx_memory_selection_traces_run",
+        """
+        CREATE INDEX IF NOT EXISTS idx_memory_selection_traces_run
+        ON memory_selection_traces (run_id)
+        """,
+    ),
+    (
+        "idx_memory_selection_traces_plan",
+        """
+        CREATE INDEX IF NOT EXISTS idx_memory_selection_traces_plan
+        ON memory_selection_traces (plan_id)
+        """,
+    ),
 )
+PROMPT_ALLOWED_KINDS = {"preference", "constraint", "procedure", "fact"}
+PROMPT_ALLOWED_CONFIDENCES = {"high", "medium"}
 
 
 @dataclass(frozen=True)
@@ -164,6 +182,53 @@ class MemoryProfile:
     max_items: Optional[int]
     created_at: str
     retired_at: str | None
+
+
+@dataclass(frozen=True)
+class MemorySelectionReason:
+    code: str
+    detail: str | None = None
+
+    def to_dict(self) -> dict[str, object]:
+        payload: dict[str, object] = {"code": self.code}
+        if self.detail:
+            payload["detail"] = self.detail
+        return payload
+
+
+@dataclass(frozen=True)
+class MemorySelectionTrace:
+    trace_id: str
+    run_id: str | None
+    plan_id: str | None
+    item_key: str
+    namespace: str
+    kind: str
+    decision: str
+    reasons: list[MemorySelectionReason]
+    created_at: str
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "trace_id": self.trace_id,
+            "run_id": self.run_id,
+            "plan_id": self.plan_id,
+            "key": self.item_key,
+            "namespace": self.namespace,
+            "kind": self.kind,
+            "decision": self.decision,
+            "reasons": [reason.to_dict() for reason in self.reasons],
+            "created_at": self.created_at,
+        }
+
+
+@dataclass(frozen=True)
+class MemorySelectionDecision:
+    item_key: str
+    namespace: str
+    kind: str
+    decision: str
+    reasons: list[MemorySelectionReason]
 
 
 class MemoryStore:
@@ -278,6 +343,21 @@ class MemoryStore:
                     max_items INTEGER NULL,
                     created_at TEXT NOT NULL,
                     retired_at TEXT NULL
+                )
+                """
+            )
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS memory_selection_traces (
+                    trace_id TEXT PRIMARY KEY,
+                    run_id TEXT NULL,
+                    plan_id TEXT NULL,
+                    item_key TEXT NOT NULL,
+                    namespace TEXT NOT NULL,
+                    kind TEXT NOT NULL,
+                    decision TEXT NOT NULL,
+                    reasons TEXT NOT NULL,
+                    created_at TEXT NOT NULL
                 )
                 """
             )
@@ -1086,8 +1166,8 @@ class MemoryStore:
             return items
 
     def list_prompt_items(self, *, limit: int = 20) -> list[MemoryItem]:
-        kinds = ["preference", "constraint", "procedure", "fact"]
-        confidences = ["high", "medium"]
+        kinds = sorted(PROMPT_ALLOWED_KINDS)
+        confidences = sorted(PROMPT_ALLOWED_CONFIDENCES)
         kind_placeholders = ",".join("?" for _ in kinds)
         confidence_placeholders = ",".join("?" for _ in confidences)
         sql = (
@@ -1109,6 +1189,451 @@ class MemoryStore:
         with self._connection() as connection:
             cursor = connection.cursor()
             rows = cursor.execute(sql, params).fetchall()
+            return [_row_to_item(row) for row in rows]
+
+    def list_selection_traces(
+        self,
+        *,
+        run_id: str | None,
+        plan_id: str | None,
+        limit: int = 200,
+    ) -> list[MemorySelectionTrace]:
+        if run_id is None and plan_id is None:
+            return []
+        if limit <= 0:
+            raise ValueError("limit must be > 0")
+        clauses = []
+        params: list[object] = []
+        if run_id is not None:
+            clauses.append("run_id = ?")
+            params.append(run_id)
+        if plan_id is not None:
+            clauses.append("plan_id = ?")
+            params.append(plan_id)
+        where_clause = " AND ".join(clauses)
+        sql = (
+            "SELECT * FROM memory_selection_traces "
+            f"WHERE {where_clause} "
+            "ORDER BY created_at ASC, trace_id ASC "
+            "LIMIT ?"
+        )
+        params.append(limit)
+        with self._connection() as connection:
+            rows = connection.cursor().execute(sql, params).fetchall()
+        return [_row_to_selection_trace(row) for row in rows]
+
+    def record_prompt_selection_trace(
+        self,
+        *,
+        selected_items: list[MemoryItem],
+        run_id: str | None,
+        plan_id: str | None,
+        trace_limit: int = MEMORY_SELECTION_TRACE_CAP,
+    ) -> None:
+        decisions = self._prompt_selection_decisions(
+            selected_items=selected_items,
+            trace_limit=trace_limit,
+        )
+        self._record_selection_traces(
+            decisions=decisions,
+            run_id=run_id,
+            plan_id=plan_id,
+        )
+
+    def record_profile_selection_trace(
+        self,
+        *,
+        profile: MemoryProfile,
+        selected_items: list[MemoryItem],
+        run_id: str | None,
+        plan_id: str | None,
+        trace_limit: int = MEMORY_SELECTION_TRACE_CAP,
+    ) -> None:
+        decisions = self._profile_selection_decisions(
+            profile=profile,
+            selected_items=selected_items,
+            trace_limit=trace_limit,
+        )
+        self._record_selection_traces(
+            decisions=decisions,
+            run_id=run_id,
+            plan_id=plan_id,
+        )
+
+    def update_selection_trace_decision(
+        self,
+        *,
+        run_id: str | None,
+        plan_id: str | None,
+        namespace: str,
+        key: str,
+        kind: str,
+        decision: str,
+        reasons: list[MemorySelectionReason],
+    ) -> None:
+        scope_id = _selection_trace_scope_id(run_id=run_id, plan_id=plan_id)
+        if scope_id is None:
+            return
+        trace_id = _selection_trace_id(scope_id, namespace, key, kind)
+        reasons_json = _serialize_selection_reasons(reasons)
+        with self._connection() as connection:
+            cursor = connection.cursor()
+            cursor.execute(
+                """
+                UPDATE memory_selection_traces
+                SET decision = ?, reasons = ?, run_id = ?, plan_id = ?
+                WHERE trace_id = ?
+                """,
+                (
+                    decision,
+                    reasons_json,
+                    run_id,
+                    plan_id,
+                    trace_id,
+                ),
+            )
+            if cursor.rowcount == 0:
+                created_at = _utc_now().isoformat()
+                cursor.execute(
+                    """
+                    INSERT INTO memory_selection_traces (
+                        trace_id,
+                        run_id,
+                        plan_id,
+                        item_key,
+                        namespace,
+                        kind,
+                        decision,
+                        reasons,
+                        created_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        trace_id,
+                        run_id,
+                        plan_id,
+                        key,
+                        namespace,
+                        kind,
+                        decision,
+                        reasons_json,
+                        created_at,
+                    ),
+                )
+            self._enforce_selection_trace_cap(connection, run_id=run_id, plan_id=plan_id)
+            connection.commit()
+
+    def link_selection_traces_to_run(self, *, plan_id: str, run_id: str) -> None:
+        with self._connection() as connection:
+            cursor = connection.cursor()
+            cursor.execute(
+                """
+                UPDATE memory_selection_traces
+                SET run_id = ?
+                WHERE plan_id = ? AND run_id IS NULL
+                """,
+                (run_id, plan_id),
+            )
+            if cursor.rowcount:
+                self._enforce_selection_trace_cap(connection, run_id=run_id, plan_id=None)
+            connection.commit()
+
+    def _record_selection_traces(
+        self,
+        *,
+        decisions: list[MemorySelectionDecision],
+        run_id: str | None,
+        plan_id: str | None,
+    ) -> None:
+        scope_id = _selection_trace_scope_id(run_id=run_id, plan_id=plan_id)
+        if scope_id is None or not decisions:
+            return
+        base_time = _utc_now()
+        with self._connection() as connection:
+            cursor = connection.cursor()
+            for offset, decision in enumerate(decisions):
+                trace_id = _selection_trace_id(
+                    scope_id,
+                    decision.namespace,
+                    decision.item_key,
+                    decision.kind,
+                )
+                created_at = (base_time + timedelta(microseconds=offset)).isoformat()
+                reasons_json = _serialize_selection_reasons(decision.reasons)
+                cursor.execute(
+                    """
+                    INSERT INTO memory_selection_traces (
+                        trace_id,
+                        run_id,
+                        plan_id,
+                        item_key,
+                        namespace,
+                        kind,
+                        decision,
+                        reasons,
+                        created_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(trace_id)
+                    DO UPDATE SET
+                        run_id = excluded.run_id,
+                        plan_id = excluded.plan_id,
+                        item_key = excluded.item_key,
+                        namespace = excluded.namespace,
+                        kind = excluded.kind,
+                        decision = excluded.decision,
+                        reasons = excluded.reasons,
+                        created_at = memory_selection_traces.created_at
+                    """,
+                    (
+                        trace_id,
+                        run_id,
+                        plan_id,
+                        decision.item_key,
+                        decision.namespace,
+                        decision.kind,
+                        decision.decision,
+                        reasons_json,
+                        created_at,
+                    ),
+                )
+            self._enforce_selection_trace_cap(connection, run_id=run_id, plan_id=plan_id)
+            connection.commit()
+
+    def _enforce_selection_trace_cap(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        run_id: str | None,
+        plan_id: str | None,
+    ) -> None:
+        scope_clause, scope_value = _selection_trace_scope_clause(run_id=run_id, plan_id=plan_id)
+        if scope_clause is None:
+            return
+        cursor = connection.cursor()
+        row = cursor.execute(
+            f"SELECT COUNT(*) AS count FROM memory_selection_traces WHERE {scope_clause}",
+            (scope_value,),
+        ).fetchone()
+        total = int(row["count"]) if row else 0
+        if total <= MEMORY_SELECTION_TRACE_CAP:
+            return
+        excess = total - MEMORY_SELECTION_TRACE_CAP
+        cursor.execute(
+            f"""
+            DELETE FROM memory_selection_traces
+            WHERE trace_id IN (
+                SELECT trace_id
+                FROM memory_selection_traces
+                WHERE {scope_clause}
+                ORDER BY created_at ASC, trace_id ASC
+                LIMIT ?
+            )
+            """,
+            (scope_value, excess),
+        )
+
+    def _prompt_selection_decisions(
+        self,
+        *,
+        selected_items: list[MemoryItem],
+        trace_limit: int,
+    ) -> list[MemorySelectionDecision]:
+        selected_keys = {(item.namespace, item.key, item.kind) for item in selected_items}
+        candidate_limit = max(trace_limit, len(selected_items))
+        candidates = self._list_trace_candidates(limit=candidate_limit)
+        decisions: list[MemorySelectionDecision] = []
+        seen: set[tuple[str, str, str]] = set()
+        for item in candidates:
+            key = (item.namespace, item.key, item.kind)
+            if key in seen:
+                continue
+            seen.add(key)
+            if not _namespace_allowed_for_prompt(item.namespace):
+                decisions.append(
+                    MemorySelectionDecision(
+                        item_key=item.key,
+                        namespace=item.namespace,
+                        kind=item.kind,
+                        decision="exclude",
+                        reasons=[MemorySelectionReason(code="exclude.namespace")],
+                    )
+                )
+                continue
+            if item.kind not in PROMPT_ALLOWED_KINDS:
+                decisions.append(
+                    MemorySelectionDecision(
+                        item_key=item.key,
+                        namespace=item.namespace,
+                        kind=item.kind,
+                        decision="exclude",
+                        reasons=[MemorySelectionReason(code="exclude.kind")],
+                    )
+                )
+                continue
+            if item.confidence not in PROMPT_ALLOWED_CONFIDENCES:
+                decisions.append(
+                    MemorySelectionDecision(
+                        item_key=item.key,
+                        namespace=item.namespace,
+                        kind=item.kind,
+                        decision="exclude",
+                        reasons=[
+                            MemorySelectionReason(
+                                code="exclude.other",
+                                detail="confidence filter",
+                            )
+                        ],
+                    )
+                )
+                continue
+            if key in selected_keys:
+                decisions.append(
+                    MemorySelectionDecision(
+                        item_key=item.key,
+                        namespace=item.namespace,
+                        kind=item.kind,
+                        decision="include",
+                        reasons=[MemorySelectionReason(code="include.default")],
+                    )
+                )
+            else:
+                decisions.append(
+                    MemorySelectionDecision(
+                        item_key=item.key,
+                        namespace=item.namespace,
+                        kind=item.kind,
+                        decision="exclude",
+                        reasons=[MemorySelectionReason(code="exclude.cap")],
+                    )
+                )
+        for item in selected_items:
+            key = (item.namespace, item.key, item.kind)
+            if key in seen:
+                continue
+            seen.add(key)
+            decisions.append(
+                MemorySelectionDecision(
+                    item_key=item.key,
+                    namespace=item.namespace,
+                    kind=item.kind,
+                    decision="include",
+                    reasons=[MemorySelectionReason(code="include.default")],
+                )
+            )
+        return decisions
+
+    def _profile_selection_decisions(
+        self,
+        *,
+        profile: MemoryProfile,
+        selected_items: list[MemoryItem],
+        trace_limit: int,
+    ) -> list[MemorySelectionDecision]:
+        selected_keys = {(item.namespace, item.key, item.kind) for item in selected_items}
+        candidate_limit = max(trace_limit, len(selected_items))
+        candidates = self._list_trace_candidates(limit=candidate_limit)
+        include_namespaces = set(profile.include_namespaces)
+        exclude_namespaces = set(profile.exclude_namespaces)
+        include_kinds = set(profile.include_kinds)
+        exclude_kinds = set(profile.exclude_kinds)
+        decisions: list[MemorySelectionDecision] = []
+        seen: set[tuple[str, str, str]] = set()
+        for item in candidates:
+            key = (item.namespace, item.key, item.kind)
+            if key in seen:
+                continue
+            seen.add(key)
+            if include_namespaces and item.namespace not in include_namespaces:
+                decisions.append(
+                    MemorySelectionDecision(
+                        item_key=item.key,
+                        namespace=item.namespace,
+                        kind=item.kind,
+                        decision="exclude",
+                        reasons=[MemorySelectionReason(code="exclude.profile")],
+                    )
+                )
+                continue
+            if exclude_namespaces and item.namespace in exclude_namespaces:
+                decisions.append(
+                    MemorySelectionDecision(
+                        item_key=item.key,
+                        namespace=item.namespace,
+                        kind=item.kind,
+                        decision="exclude",
+                        reasons=[MemorySelectionReason(code="exclude.profile")],
+                    )
+                )
+                continue
+            if include_kinds and item.kind not in include_kinds:
+                decisions.append(
+                    MemorySelectionDecision(
+                        item_key=item.key,
+                        namespace=item.namespace,
+                        kind=item.kind,
+                        decision="exclude",
+                        reasons=[MemorySelectionReason(code="exclude.kind")],
+                    )
+                )
+                continue
+            if exclude_kinds and item.kind in exclude_kinds:
+                decisions.append(
+                    MemorySelectionDecision(
+                        item_key=item.key,
+                        namespace=item.namespace,
+                        kind=item.kind,
+                        decision="exclude",
+                        reasons=[MemorySelectionReason(code="exclude.kind")],
+                    )
+                )
+                continue
+            if key in selected_keys:
+                decisions.append(
+                    MemorySelectionDecision(
+                        item_key=item.key,
+                        namespace=item.namespace,
+                        kind=item.kind,
+                        decision="include",
+                        reasons=[MemorySelectionReason(code="include.profile")],
+                    )
+                )
+            else:
+                decisions.append(
+                    MemorySelectionDecision(
+                        item_key=item.key,
+                        namespace=item.namespace,
+                        kind=item.kind,
+                        decision="exclude",
+                        reasons=[MemorySelectionReason(code="exclude.cap")],
+                    )
+                )
+        for item in selected_items:
+            key = (item.namespace, item.key, item.kind)
+            if key in seen:
+                continue
+            seen.add(key)
+            decisions.append(
+                MemorySelectionDecision(
+                    item_key=item.key,
+                    namespace=item.namespace,
+                    kind=item.kind,
+                    decision="include",
+                    reasons=[MemorySelectionReason(code="include.profile")],
+                )
+            )
+        return decisions
+
+    def _list_trace_candidates(self, *, limit: int) -> list[MemoryItem]:
+        sql = (
+            "SELECT * FROM memory_items "
+            "WHERE is_tombstoned = 0 "
+            "ORDER BY updated_at DESC, namespace ASC, key ASC, id ASC "
+            "LIMIT ?"
+        )
+        with self._connection() as connection:
+            rows = connection.cursor().execute(sql, (limit,)).fetchall()
             return [_row_to_item(row) for row in rows]
 
     def tombstone_item(
@@ -1489,6 +2014,85 @@ def list_prompt_items(
     return MemoryStore(db_path).list_prompt_items(limit=limit)
 
 
+def list_selection_traces(
+    db_path: str,
+    *,
+    run_id: str | None,
+    plan_id: str | None,
+    limit: int = 200,
+) -> list[MemorySelectionTrace]:
+    return MemoryStore(db_path).list_selection_traces(
+        run_id=run_id,
+        plan_id=plan_id,
+        limit=limit,
+    )
+
+
+def record_prompt_selection_trace(
+    db_path: str,
+    *,
+    selected_items: list[MemoryItem],
+    run_id: str | None,
+    plan_id: str | None,
+    trace_limit: int = MEMORY_SELECTION_TRACE_CAP,
+) -> None:
+    MemoryStore(db_path).record_prompt_selection_trace(
+        selected_items=selected_items,
+        run_id=run_id,
+        plan_id=plan_id,
+        trace_limit=trace_limit,
+    )
+
+
+def record_profile_selection_trace(
+    db_path: str,
+    *,
+    profile: MemoryProfile,
+    selected_items: list[MemoryItem],
+    run_id: str | None,
+    plan_id: str | None,
+    trace_limit: int = MEMORY_SELECTION_TRACE_CAP,
+) -> None:
+    MemoryStore(db_path).record_profile_selection_trace(
+        profile=profile,
+        selected_items=selected_items,
+        run_id=run_id,
+        plan_id=plan_id,
+        trace_limit=trace_limit,
+    )
+
+
+def update_selection_trace_decision(
+    db_path: str,
+    *,
+    run_id: str | None,
+    plan_id: str | None,
+    namespace: str,
+    key: str,
+    kind: str,
+    decision: str,
+    reasons: list[MemorySelectionReason],
+) -> None:
+    MemoryStore(db_path).update_selection_trace_decision(
+        run_id=run_id,
+        plan_id=plan_id,
+        namespace=namespace,
+        key=key,
+        kind=kind,
+        decision=decision,
+        reasons=reasons,
+    )
+
+
+def link_selection_traces_to_run(
+    db_path: str,
+    *,
+    plan_id: str,
+    run_id: str,
+) -> None:
+    MemoryStore(db_path).link_selection_traces_to_run(plan_id=plan_id, run_id=run_id)
+
+
 def list_profiles(db_path: str) -> list[MemoryProfile]:
     return MemoryStore(db_path).list_profiles()
 
@@ -1812,6 +2416,20 @@ def _row_to_item(row: sqlite3.Row) -> MemoryItem:
     )
 
 
+def _row_to_selection_trace(row: sqlite3.Row) -> MemorySelectionTrace:
+    return MemorySelectionTrace(
+        trace_id=row["trace_id"],
+        run_id=row["run_id"],
+        plan_id=row["plan_id"],
+        item_key=row["item_key"],
+        namespace=row["namespace"],
+        kind=row["kind"],
+        decision=row["decision"],
+        reasons=_deserialize_selection_reasons(row["reasons"]),
+        created_at=row["created_at"],
+    )
+
+
 def _serialize_bounded_json(payload: dict[str, Any]) -> str:
     normalized = _truncate_large_strings(payload)
     return json.dumps(normalized, ensure_ascii=False, sort_keys=True)
@@ -1907,6 +2525,55 @@ def _deserialize_profile_list(value: str | None) -> list[str]:
     if not isinstance(parsed, list):
         raise ValueError("Profile list must be a JSON list")
     return [str(item) for item in parsed if str(item)]
+
+
+def _serialize_selection_reasons(reasons: list[MemorySelectionReason]) -> str:
+    return json.dumps(
+        [reason.to_dict() for reason in reasons],
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def _deserialize_selection_reasons(raw: str) -> list[MemorySelectionReason]:
+    parsed = json.loads(raw)
+    if not isinstance(parsed, list):
+        raise ValueError("Selection reasons must be a JSON list")
+    reasons: list[MemorySelectionReason] = []
+    for entry in parsed:
+        if not isinstance(entry, dict):
+            raise ValueError("Selection reason must be a JSON object")
+        code = str(entry.get("code") or "")
+        detail_raw = entry.get("detail")
+        detail = str(detail_raw) if detail_raw else None
+        reasons.append(MemorySelectionReason(code=code, detail=detail))
+    return reasons
+
+
+def _selection_trace_id(scope_id: str, namespace: str, key: str, kind: str) -> str:
+    payload = f"{scope_id}:{namespace}:{key}:{kind}"
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _selection_trace_scope_id(run_id: str | None, plan_id: str | None) -> str | None:
+    return plan_id or run_id
+
+
+def _selection_trace_scope_clause(
+    *,
+    run_id: str | None,
+    plan_id: str | None,
+) -> tuple[str | None, str | None]:
+    if run_id is not None:
+        return "run_id = ?", run_id
+    if plan_id is not None:
+        return "run_id IS NULL AND plan_id = ?", plan_id
+    return None, None
+
+
+def _namespace_allowed_for_prompt(namespace: str) -> bool:
+    return namespace == "global" or namespace.startswith("project:")
 
 
 def _profile_is_empty(profile: MemoryProfile) -> bool:

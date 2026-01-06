@@ -148,6 +148,8 @@ Memory management (policy-gated; confirmation required for high-risk namespaces)
     --policy policy/dev-safe.json --yes --non-interactive
   gismo memory snapshot import --in snapshots/project.json --mode merge --dry-run \
     --policy policy/dev-safe.json --yes --non-interactive
+  gismo memory explain --plan PLAN_EVENT_ID
+  gismo memory explain --run RUN_ID --json
   gismo memory doctor check --db .gismo/state.db --policy policy/dev-safe.json
   gismo memory doctor check --db .gismo/state.db --policy policy/dev-safe.json --json
   gismo memory doctor repair --rebuild-indexes --policy /path/to/policy.json --yes
@@ -162,6 +164,7 @@ Notes:
 - Memory profile create/retire requires policy allowance for memory.profile.create and
   memory.profile.retire plus explicit confirmation.
 - Retention enforcement is policy/confirmation-gated via memory.retention.enforce and runs only on writes.
+- Memory explain is observational only; it reads selection traces captured during ask/agent runs.
 - Memory doctor repairs are operator-controlled, policy-gated, and require explicit flags (no automatic fixes).
 - Snapshot item_hash values are computed from a canonical JSON payload that includes
   created_at/updated_at timestamps; snapshot_hash is the sha256 of ordered item_hashes.

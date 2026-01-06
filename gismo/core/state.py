@@ -261,6 +261,21 @@ class StateStore:
             )
             cursor.execute(
                 """
+                CREATE TABLE IF NOT EXISTS memory_selection_traces (
+                    trace_id TEXT PRIMARY KEY,
+                    run_id TEXT NULL,
+                    plan_id TEXT NULL,
+                    item_key TEXT NOT NULL,
+                    namespace TEXT NOT NULL,
+                    kind TEXT NOT NULL,
+                    decision TEXT NOT NULL,
+                    reasons TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                )
+                """
+            )
+            cursor.execute(
+                """
                 CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_items_namespace_key
                 ON memory_items (namespace, key)
                 """
@@ -305,6 +320,18 @@ class StateStore:
                 """
                 CREATE INDEX IF NOT EXISTS idx_memory_events_related_run
                 ON memory_events (related_run_id)
+                """
+            )
+            cursor.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_memory_selection_traces_run
+                ON memory_selection_traces (run_id)
+                """
+            )
+            cursor.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_memory_selection_traces_plan
+                ON memory_selection_traces (plan_id)
                 """
             )
             self._ensure_columns(connection)

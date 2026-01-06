@@ -65,16 +65,16 @@ class AgentSessionCliTest(unittest.TestCase):
     def test_session_resume_non_interactive_fails_closed(self) -> None:
         response = json.dumps(
             {
-                "intent": "queue",
+                "intent": "risky",
                 "assumptions": [],
                 "actions": [
                     {
                         "type": "enqueue",
-                        "command": "echo: queued",
+                        "command": "shell: echo risky",
                         "timeout_seconds": 15,
                         "retries": 0,
                         "why": "record",
-                        "risk": "low",
+                        "risk": "high",
                     }
                 ],
                 "notes": [],

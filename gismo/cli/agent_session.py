@@ -22,10 +22,10 @@ class SessionRoleContext:
 
 @dataclass(frozen=True)
 class AgentSessionDependencies:
-    request_llm_plan: Callable[..., tuple[dict, object, StateStore, dict[str, object]]]
+    request_llm_plan: Callable[..., tuple[dict, object, object, object, StateStore, dict[str, object]]]
     build_memory_injection: Callable[..., object]
     record_memory_profile_use: Callable[..., None]
-    confirm_agent_assessment: Callable[..., None]
+    confirm_plan_gate: Callable[..., object]
     enqueue_plan_actions: Callable[..., tuple[list[str], list[str]]]
     drain_queue_items: Callable[..., list[QueueStatus]]
     queue_status_summary: Callable[..., tuple[str, QueueStatus | None]]
@@ -189,7 +189,7 @@ def run_agent_session_resume(args: argparse.Namespace, deps: AgentSessionDepende
             memory_profile_id=session.profile_id,
         )
 
-    plan, assessment, state_store, payload = deps.request_llm_plan(
+    plan, risk, explain_payload, policy_summary, state_store, payload = deps.request_llm_plan(
         args.db_path,
         session.goal,
         model=None,
@@ -203,7 +203,8 @@ def run_agent_session_resume(args: argparse.Namespace, deps: AgentSessionDepende
         actor="agent_session",
         memory_injection=memory_injection,
         role_context=role_context,
-        assessment_policy_path=args.policy,
+        policy_path=args.policy,
+        json_output=False,
         record_event=False,
     )
     try:
@@ -250,6 +251,14 @@ def run_agent_session_resume(args: argparse.Namespace, deps: AgentSessionDepende
         )
 
         if args.dry_run:
+            deps.confirm_plan_gate(
+                risk,
+                yes=args.yes,
+                non_interactive=args.non_interactive,
+                dry_run=True,
+                context="agent_session",
+                policy_summary=policy_summary,
+            )
             updated_session = _finalize_session_status(updated_session, actions)
             updated_session = state_store.update_agent_session(updated_session)
             _record_session_event(
@@ -268,32 +277,15 @@ def run_agent_session_resume(args: argparse.Namespace, deps: AgentSessionDepende
             print(f"Dry-run completed for session {session.session_id}")
             return
 
-        if actions and args.non_interactive:
-            updated_session = state_store.update_agent_session(
-                replace(updated_session, status=AgentSessionStatus.PAUSED)
-            )
-            _record_session_event(
-                state_store=state_store,
-                actor="agent_session",
-                operation="resume",
-                session=updated_session,
-                request={"non_interactive": True},
-                result_meta={
-                    "status": "blocked",
-                    "plan_event_id": plan_event_id,
-                    "run_id": None,
-                    "queue_status": "blocked",
-                    "reason": "non_interactive",
-                },
-            )
-            print(
-                "Refusing to enqueue in non-interactive mode. Use --yes to override.",
-                file=sys.stderr,
-            )
-            raise SystemExit(2)
-
         try:
-            deps.confirm_agent_assessment(assessment, actions, yes=args.yes)
+            deps.confirm_plan_gate(
+                risk,
+                yes=args.yes,
+                non_interactive=args.non_interactive,
+                dry_run=False,
+                context="agent_session",
+                policy_summary=policy_summary,
+            )
         except SystemExit:
             updated_session = state_store.update_agent_session(
                 replace(updated_session, status=AgentSessionStatus.PAUSED)

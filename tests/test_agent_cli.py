@@ -77,6 +77,11 @@ class AgentCliTest(unittest.TestCase):
 
             state_store = StateStore(db_path)
             self.assertEqual(state_store.list_queue_items(limit=10), [])
+            event = state_store.list_events()[0]
+            payload = event.json_payload
+            assert payload is not None
+            self.assertIn("explain", payload)
+            self.assertEqual(payload["explain"]["risk_level"], "LOW")
 
     def test_agent_once_enqueues_and_executes(self) -> None:
         response = json.dumps(

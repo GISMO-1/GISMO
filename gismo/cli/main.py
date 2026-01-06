@@ -41,7 +41,10 @@ from gismo.core.models import EVENT_TYPE_ASK_FAILED, EVENT_TYPE_LLM_PLAN, QueueS
 from gismo.core.maintenance import run_maintenance_iteration
 from gismo.core.orchestrator import Orchestrator
 from gismo.core.permissions import PermissionPolicy, load_policy
-from gismo.core.plan_assess import PlanAssessment, assess_plan, expanded_explanation
+from gismo.core.explain import PlanExplain, build_plan_explain
+from gismo.core.gating import ConfirmationDecision, confirm_plan_gate
+from gismo.core.policy_summary import PolicySummary, summarize_policy
+from gismo.core.risk import PlanRisk, classify_plan_risk
 from gismo.core.state import StateStore
 from gismo.core.tools import EchoTool, ToolRegistry, WriteNoteTool
 from gismo.core.tool_receipts import ToolReceiptReplayReport, replay_tool_receipts
@@ -596,26 +599,81 @@ def _print_llm_plan(plan: dict) -> None:
             print(f"   apply: {_memory_put_command_for_suggestion(suggestion)}")
 
 
-def _print_plan_assessment(assessment: PlanAssessment, *, explain: bool) -> None:
-    confidence_label = assessment.confidence.upper()
-    print(f"Confidence: {confidence_label}")
-    if assessment.risk_flags:
-        print(f"Risk flags: {', '.join(assessment.risk_flags)}")
+def _print_plan_explain(explain: PlanExplain, *, verbose: bool) -> None:
+    print("=== Plan Explain ===")
+    print(f"Summary: {explain.summary}")
+    print(f"Risk level: {explain.risk_level}")
+    if explain.risk_flags:
+        print(f"Risk flags: {', '.join(explain.risk_flags)}")
     else:
         print("Risk flags: none")
-    print(f"Explanation: {assessment.explanation}")
-    if explain:
-        details = expanded_explanation(assessment)
-        if details:
-            print("Explanation details:")
-            for detail in details:
-                print(f"- {detail}")
+    if explain.rationale:
+        print("Rationale:")
+        for item in explain.rationale:
+            print(f"- {item}")
+    else:
+        print("Rationale: none")
+    print(f"Allowed tools: {explain.allowed_tools_summary}")
+    print(f"Memory injection: {explain.memory_injection}")
+    suggestions = explain.memory_suggestions
+    if suggestions.get("exists"):
+        print(
+            "Memory suggestions: advisory only "
+            f"(count={suggestions.get('count', 0)})"
+        )
+    else:
+        print("Memory suggestions: none")
+    if verbose:
+        print("Explain details:")
+        print(f"- shell allowlist: {explain.shell_allowlist_summary}")
+        write_tools = ", ".join(explain.write_permissions) if explain.write_permissions else "none"
+        print(f"- write permissions: {write_tools}")
+
+
+def _print_plan_json(
+    *,
+    plan: dict,
+    explain_payload: PlanExplain,
+    enqueue: bool,
+    dry_run: bool,
+) -> None:
+    output = {
+        "plan": plan,
+        "explain": explain_payload.to_dict(),
+        "enqueue": enqueue,
+        "dry_run": dry_run,
+    }
+    print(json.dumps(output, ensure_ascii=False, sort_keys=True))
+
+
+def _print_agent_json(
+    *,
+    goal: str,
+    risk: PlanRisk,
+    plan: dict,
+    explain_payload: PlanExplain | None,
+    actions_count: int,
+    run_ids: list[str],
+    final_status: str,
+    error_reason: str | None,
+) -> None:
+    output = {
+        "goal": goal,
+        "plan": plan,
+        "explain": explain_payload.to_dict() if explain_payload else None,
+        "risk": risk.to_dict(),
+        "actions_count": actions_count,
+        "run_ids": run_ids,
+        "final_status": final_status,
+        "error_reason": error_reason,
+    }
+    print(json.dumps(output, ensure_ascii=False, sort_keys=True))
 
 
 def _print_agent_summary(
     *,
     goal: str,
-    assessment: PlanAssessment,
+    risk: PlanRisk,
     actions_count: int,
     run_ids: list[str],
     final_status: str,
@@ -623,8 +681,8 @@ def _print_agent_summary(
 ) -> None:
     print("=== Agent Summary ===")
     print(f"Goal: {goal}")
-    print(f"Plan confidence: {assessment.confidence.upper()}")
-    risk_flags = assessment.risk_flags
+    print(f"Plan risk: {risk.risk_level}")
+    risk_flags = risk.risk_flags
     if risk_flags:
         print(f"Risk flags: {', '.join(risk_flags)}")
     else:
@@ -640,66 +698,38 @@ def _is_interactive_tty() -> bool:
     return sys.stdin.isatty() and sys.stdout.isatty()
 
 
-def _confirm_assessment(assessment: PlanAssessment, *, yes: bool) -> None:
-    if not assessment.requires_confirmation or yes:
-        return
-    if _is_interactive_tty():
-        response = input("This plan requires confirmation. Proceed? [y/N]:")
-        if response.strip().lower() not in {"y", "yes"}:
-            print("Confirmation declined; plan not enqueued.", file=sys.stderr)
-            raise SystemExit(2)
-        return
-    print(
-        "Refusing to enqueue without confirmation in non-interactive mode. Use --yes to override.",
-        file=sys.stderr,
-    )
-    raise SystemExit(2)
-
-
-def _agent_requires_confirmation(assessment: PlanAssessment, actions: list[dict[str, object]]) -> bool:
-    if assessment.requires_confirmation:
-        return True
-    if assessment.confidence == "low":
-        return True
-    if any(flag in {"shell", "writes"} for flag in assessment.risk_flags):
-        return True
-    for action in actions:
-        risk = action.get("risk")
-        if isinstance(risk, str) and risk.strip().lower() == "high":
-            return True
-    return False
-
-
-def _confirm_agent_assessment(
-    assessment: PlanAssessment,
-    actions: list[dict[str, object]],
+def _confirm_plan_gate(
+    risk: PlanRisk,
     *,
     yes: bool,
-) -> None:
-    if not _agent_requires_confirmation(assessment, actions) or yes:
-        return
-    if _is_interactive_tty():
-        response = input("This plan requires confirmation. Proceed? [y/N]:")
-        if response.strip().lower() not in {"y", "yes"}:
-            print("Confirmation declined; plan not enqueued.", file=sys.stderr)
-            raise SystemExit(2)
-        return
-    print(
-        "Refusing to enqueue without confirmation in non-interactive mode. Use --yes to override.",
-        file=sys.stderr,
+    non_interactive: bool,
+    dry_run: bool,
+    context: str,
+    policy_summary: PolicySummary | None,
+) -> ConfirmationDecision:
+    return confirm_plan_gate(
+        risk,
+        yes=yes,
+        non_interactive=non_interactive,
+        dry_run=dry_run,
+        context=context,
+        policy_summary=policy_summary,
+        is_interactive_tty=_is_interactive_tty,
     )
-    raise SystemExit(2)
 
 
-def _load_assessment_policy(policy_path: str | None) -> PermissionPolicy | None:
+def _load_prompt_policy_summary(
+    policy_path: str | None,
+    *,
+    default_allowed_tools: set[str] | None = None,
+) -> PolicySummary:
     repo_root = Path(__file__).resolve().parents[2]
-    resolved_path, _ = _resolve_default_policy_path(policy_path, repo_root)
-    if resolved_path is None:
-        return None
-    try:
-        return load_policy(resolved_path, repo_root=repo_root)
-    except (OSError, ValueError, PermissionError):
-        return None
+    resolved_path, warn = _resolve_default_policy_path(policy_path, repo_root)
+    if warn:
+        _warn_missing_default_policy()
+    allowed = default_allowed_tools or set()
+    policy = load_policy(resolved_path, repo_root=repo_root, default_allowed_tools=allowed)
+    return summarize_policy(policy)
 
 
 def _run_status(tasks: list) -> str:
@@ -3216,6 +3246,14 @@ def _apply_memory_injection_payload(
     )
 
 
+def _memory_injection_status(memory_injection: MemoryInjection | None) -> str:
+    if memory_injection is None:
+        return "none"
+    if memory_injection.profile:
+        return "profile"
+    return "memory"
+
+
 def _apply_agent_role_payload(
     payload: dict[str, object],
     role_context: AgentRoleContext | None,
@@ -3309,20 +3347,26 @@ def _request_llm_plan(
     actor: str,
     memory_injection: MemoryInjection | None = None,
     role_context: AgentRoleContext | None = None,
-    assessment_policy_path: str | None = None,
+    policy_path: str | None = None,
+    json_output: bool = False,
     record_event: bool = True,
-) -> tuple[dict, PlanAssessment, StateStore, dict[str, object]]:
+) -> tuple[dict, PlanRisk, PlanExplain, PolicySummary, StateStore, dict[str, object]]:
     if not user_text or not user_text.strip():
         raise ValueError(f"{actor} requires a natural language request.")
     config = resolve_ollama_config(url=host, model=model, timeout_s=timeout_s)
     state_store = StateStore(db_path)
     try:
-        system_prompt = build_system_prompt()
+        policy_summary = _load_prompt_policy_summary(policy_path)
+        system_prompt = build_system_prompt(
+            policy_summary=policy_summary,
+            max_actions=max_actions,
+        )
         user_prompt = build_user_prompt(
             user_text,
             memory_block=memory_injection.block if memory_injection else None,
         )
-        print(f"LLM: {config.model} url={config.url} timeout={config.timeout_s}s")
+        if not json_output:
+            print(f"LLM: {config.model} url={config.url} timeout={config.timeout_s}s")
         try:
             raw_response = ollama_chat(
                 user_prompt,
@@ -3449,17 +3493,24 @@ def _request_llm_plan(
                 json_payload=payload,
             )
             raise
-        _print_llm_plan(plan)
-        policy = _load_assessment_policy(assessment_policy_path)
-        assessment = assess_plan(plan.get("actions", []), policy=policy)
-        _print_plan_assessment(assessment, explain=explain)
+        risk = classify_plan_risk(plan.get("actions", []))
+        explain_payload = build_plan_explain(
+            plan=plan,
+            risk=risk,
+            policy_summary=policy_summary,
+            memory_injection=_memory_injection_status(memory_injection),
+            memory_suggestions_count=len(plan.get("memory_suggestions") or []),
+        )
+        if not json_output:
+            _print_llm_plan(plan)
+            _print_plan_explain(explain_payload, verbose=explain)
         payload = {
             "model": config.model,
             "host": config.url,
             "timeout_s": config.timeout_s,
             "user_text": user_text,
             "plan": plan,
-            "assessment": assessment.to_dict(),
+            "explain": explain_payload.to_dict(),
             "enqueue": enqueue,
             "dry_run": dry_run,
             "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -3473,7 +3524,7 @@ def _request_llm_plan(
                 message="LLM plan generated.",
                 json_payload=payload,
             )
-        return plan, assessment, state_store, payload
+        return plan, risk, explain_payload, policy_summary, state_store, payload
     except BaseException:
         state_store.close()
         raise
@@ -3527,6 +3578,7 @@ def run_ask(
     apply_memory_suggestions: bool = False,
     non_interactive: bool = False,
     policy_path: str | None = None,
+    json_output: bool = False,
 ) -> None:
     plan_event_id = str(uuid4())
     memory_injection = None
@@ -3536,7 +3588,7 @@ def run_ask(
             profile_selector=memory_profile,
             plan_id=plan_event_id,
         )
-    plan, assessment, state_store, payload = _request_llm_plan(
+    plan, risk, explain_payload, policy_summary, state_store, payload = _request_llm_plan(
         db_path,
         user_text,
         model=model,
@@ -3549,7 +3601,8 @@ def run_ask(
         debug=debug,
         actor="ask",
         memory_injection=memory_injection,
-        assessment_policy_path=None,
+        policy_path=policy_path,
+        json_output=json_output,
         record_event=False,
     )
     try:
@@ -3568,7 +3621,8 @@ def run_ask(
         if apply_memory_suggestions:
             suggestions = plan.get("memory_suggestions") or []
             if not suggestions:
-                print("No suggestions to apply")
+                if not json_output:
+                    print("No suggestions to apply")
             else:
                 apply_result = _apply_memory_suggestions(
                     db_path,
@@ -3601,12 +3655,13 @@ def run_ask(
                     json_payload=payload,
                     event_id=plan_event_id,
                 )
-                print(
-                    "Memory suggestions summary: "
-                    f"applied={apply_result.applied} "
-                    f"skipped={apply_result.skipped} "
-                    f"denied={apply_result.denied}"
-                )
+                if not json_output:
+                    print(
+                        "Memory suggestions summary: "
+                        f"applied={apply_result.applied} "
+                        f"skipped={apply_result.skipped} "
+                        f"denied={apply_result.denied}"
+                    )
                 if apply_result.exit_code is not None:
                     raise SystemExit(apply_result.exit_code)
             if not suggestions:
@@ -3635,6 +3690,13 @@ def run_ask(
                     json_payload=payload,
                     event_id=plan_event_id,
                 )
+                if json_output:
+                    _print_plan_json(
+                        plan=plan,
+                        explain_payload=explain_payload,
+                        enqueue=enqueue,
+                        dry_run=dry_run,
+                    )
                 return
 
         if not apply_memory_suggestions:
@@ -3663,25 +3725,66 @@ def run_ask(
                 json_payload=payload,
                 event_id=plan_event_id,
             )
+        if json_output and not enqueue:
+            _print_plan_json(
+                plan=plan,
+                explain_payload=explain_payload,
+                enqueue=enqueue,
+                dry_run=dry_run,
+            )
+            return
 
         if not enqueue:
             return
         if dry_run:
-            print("Dry run: enqueue requested but no items were enqueued.")
+            if not json_output:
+                print("Dry run: enqueue requested but no items were enqueued.")
+            _confirm_plan_gate(
+                risk,
+                yes=yes,
+                non_interactive=non_interactive,
+                dry_run=True,
+                context="ask",
+                policy_summary=policy_summary,
+            )
+            if json_output:
+                _print_plan_json(
+                    plan=plan,
+                    explain_payload=explain_payload,
+                    enqueue=enqueue,
+                    dry_run=dry_run,
+                )
             return
-        _confirm_assessment(assessment, yes=yes)
+        _confirm_plan_gate(
+            risk,
+            yes=yes,
+            non_interactive=non_interactive,
+            dry_run=False,
+            context="ask",
+            policy_summary=policy_summary,
+        )
 
         enqueued_ids, skipped = _enqueue_plan_actions(state_store, plan)
         if skipped:
-            print("Enqueue notes:")
-            for note in skipped:
-                print(f"- {note}")
+            if not json_output:
+                print("Enqueue notes:")
+                for note in skipped:
+                    print(f"- {note}")
         if enqueued_ids:
-            print("Enqueued items:")
-            for item_id in enqueued_ids:
-                print(f"- {item_id}")
+            if not json_output:
+                print("Enqueued items:")
+                for item_id in enqueued_ids:
+                    print(f"- {item_id}")
         else:
-            print("No items enqueued.")
+            if not json_output:
+                print("No items enqueued.")
+        if json_output:
+            _print_plan_json(
+                plan=plan,
+                explain_payload=explain_payload,
+                enqueue=enqueue,
+                dry_run=dry_run,
+            )
     finally:
         state_store.close()
 
@@ -3757,6 +3860,7 @@ def run_agent(
     apply_memory_suggestions: bool = False,
     non_interactive: bool = False,
     role: str | None = None,
+    json_output: bool = False,
 ) -> None:
     if not goal_text or not goal_text.strip():
         raise ValueError("agent requires a goal description.")
@@ -3767,12 +3871,15 @@ def run_agent(
     run_ids: list[str] = []
     final_status = "unknown"
     final_error: str | None = None
-    last_assessment: PlanAssessment | None = None
+    last_risk: PlanRisk | None = None
+    last_explain: PlanExplain | None = None
+    last_plan: dict | None = None
     last_actions_count = 0
     role_context = _resolve_agent_role(db_path, role) if role else None
     role_profile_selector = role_context.memory_profile_id if role_context else None
     for cycle in range(1, cycles_limit + 1):
-        print(f"=== Agent Cycle {cycle} ===")
+        if not json_output:
+            print(f"=== Agent Cycle {cycle} ===")
         plan_event_id = str(uuid4())
         memory_injection = None
         if use_memory or memory_profile or role_profile_selector:
@@ -3781,7 +3888,7 @@ def run_agent(
                 profile_selector=role_profile_selector or memory_profile,
                 plan_id=plan_event_id,
             )
-        plan, assessment, state_store, _payload = _request_llm_plan(
+        plan, risk, explain_payload, policy_summary, state_store, _payload = _request_llm_plan(
             db_path,
             goal_text,
             model=None,
@@ -3793,7 +3900,8 @@ def run_agent(
             explain=False,
             debug=False,
             actor="agent",
-            assessment_policy_path=policy_path,
+            policy_path=policy_path,
+            json_output=json_output,
             memory_injection=memory_injection,
             role_context=role_context,
             record_event=False,
@@ -3816,7 +3924,8 @@ def run_agent(
             if apply_memory_suggestions:
                 suggestions = plan.get("memory_suggestions") or []
                 if not suggestions:
-                    print("No suggestions to apply")
+                    if not json_output:
+                        print("No suggestions to apply")
                     payload.update(
                         {
                             "apply_memory_suggestions_requested": True,
@@ -3876,12 +3985,13 @@ def run_agent(
                         event_id=plan_event_id,
                     )
                     event_recorded = True
-                    print(
-                        "Memory suggestions summary: "
-                        f"applied={apply_result.applied} "
-                        f"skipped={apply_result.skipped} "
-                        f"denied={apply_result.denied}"
-                    )
+                    if not json_output:
+                        print(
+                            "Memory suggestions summary: "
+                            f"applied={apply_result.applied} "
+                            f"skipped={apply_result.skipped} "
+                            f"denied={apply_result.denied}"
+                        )
                     if apply_result.exit_code is not None:
                         raise SystemExit(apply_result.exit_code)
 
@@ -3914,13 +4024,30 @@ def run_agent(
 
             actions = plan.get("actions", [])
             last_actions_count = len(actions)
-            last_assessment = assessment
+            last_risk = risk
+            last_explain = explain_payload
+            last_plan = plan
 
             if dry_run:
+                _confirm_plan_gate(
+                    risk,
+                    yes=yes,
+                    non_interactive=non_interactive,
+                    dry_run=True,
+                    context="agent",
+                    policy_summary=policy_summary,
+                )
                 final_status = "dry-run"
                 break
 
-            _confirm_agent_assessment(assessment, actions, yes=yes)
+            _confirm_plan_gate(
+                risk,
+                yes=yes,
+                non_interactive=non_interactive,
+                dry_run=False,
+                context="agent",
+                policy_summary=policy_summary,
+            )
 
             run_metadata = {
                 "goal": goal_text,
@@ -3943,13 +4070,15 @@ def run_agent(
 
             enqueued_ids, skipped = _enqueue_plan_actions(state_store, plan, run_id=run.id)
             if skipped:
-                print("Enqueue notes:")
-                for note in skipped:
-                    print(f"- {note}")
+                if not json_output:
+                    print("Enqueue notes:")
+                    for note in skipped:
+                        print(f"- {note}")
             if enqueued_ids:
-                print("Enqueued items:")
-                for item_id in enqueued_ids:
-                    print(f"- {item_id}")
+                if not json_output:
+                    print("Enqueued items:")
+                    for item_id in enqueued_ids:
+                        print(f"- {item_id}")
             else:
                 final_status = "no-actions"
                 final_error = "No enqueue actions were generated."
@@ -3980,16 +4109,27 @@ def run_agent(
         finally:
             state_store.close()
 
-    if last_assessment is None:
-        last_assessment = PlanAssessment(
-            confidence="low",
+    if last_risk is None:
+        last_risk = PlanRisk(
+            risk_level="HIGH",
             risk_flags=[],
-            explanation="No plan was generated.",
-            requires_confirmation=True,
+            rationale=["No plan was generated."],
         )
+    if json_output:
+        _print_agent_json(
+            goal=goal_text,
+            risk=last_risk,
+            plan=last_plan or {},
+            explain_payload=last_explain,
+            actions_count=last_actions_count,
+            run_ids=run_ids,
+            final_status=final_status,
+            error_reason=final_error,
+        )
+        return
     _print_agent_summary(
         goal=goal_text,
-        assessment=last_assessment,
+        risk=last_risk,
         actions_count=last_actions_count,
         run_ids=run_ids,
         final_status=final_status,
@@ -4164,7 +4304,7 @@ def _agent_session_dependencies() -> agent_session_cli.AgentSessionDependencies:
         request_llm_plan=_request_llm_plan,
         build_memory_injection=_build_memory_injection,
         record_memory_profile_use=_record_memory_profile_use,
-        confirm_agent_assessment=_confirm_agent_assessment,
+        confirm_plan_gate=_confirm_plan_gate,
         enqueue_plan_actions=_enqueue_plan_actions,
         drain_queue_items=_drain_queue_items,
         queue_status_summary=_queue_status_summary,
@@ -4399,6 +4539,7 @@ def _handle_ask(args: argparse.Namespace) -> None:
         apply_memory_suggestions=args.apply_memory_suggestions,
         non_interactive=args.non_interactive,
         policy_path=args.policy,
+        json_output=args.json,
     )
 
 
@@ -4418,6 +4559,7 @@ def _handle_agent(args: argparse.Namespace) -> None:
         apply_memory_suggestions=args.apply_memory_suggestions,
         non_interactive=args.non_interactive,
         role=args.role,
+        json_output=args.json,
     )
 
 
@@ -6073,7 +6215,7 @@ def build_parser() -> argparse.ArgumentParser:
     ask_parser.add_argument(
         "--non-interactive",
         action="store_true",
-        help="Fail closed instead of prompting for memory suggestions",
+        help="Fail closed instead of prompting for confirmations",
     )
     ask_parser.add_argument(
         "--yes",
@@ -6083,12 +6225,17 @@ def build_parser() -> argparse.ArgumentParser:
     ask_parser.add_argument(
         "--explain",
         action="store_true",
-        help="Print expanded assessment explanation details",
+        help="Print expanded explain details",
     )
     ask_parser.add_argument(
         "--debug",
         action="store_true",
         help="Print debug tracebacks on LLM request errors",
+    )
+    ask_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit JSON output for the plan explain artifact",
     )
     ask_parser.add_argument(
         "--dry-run",
@@ -6161,12 +6308,17 @@ def build_parser() -> argparse.ArgumentParser:
     agent_parser.add_argument(
         "--non-interactive",
         action="store_true",
-        help="Fail closed instead of prompting for memory suggestions",
+        help="Fail closed instead of prompting for confirmations",
+    )
+    agent_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit JSON output for the plan explain artifact",
     )
     agent_parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Show the plan and assessment without enqueueing",
+        help="Show the plan and explain without enqueueing",
     )
     agent_parser.add_argument(
         "goal",
@@ -6412,7 +6564,7 @@ def build_parser() -> argparse.ArgumentParser:
     agent_session_resume_parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Show the plan and assessment without enqueueing",
+        help="Show the plan and explain without enqueueing",
     )
     agent_session_resume_parser.set_defaults(handler=_handle_agent_session_resume)
 

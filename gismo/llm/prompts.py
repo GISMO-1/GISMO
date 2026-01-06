@@ -1,8 +1,23 @@
 """Prompt helpers for LLM planning."""
 from __future__ import annotations
 
+from gismo.core.policy_summary import PolicySummary
 
-def build_system_prompt() -> str:
+
+def build_system_prompt(
+    *,
+    policy_summary: PolicySummary,
+    max_actions: int,
+) -> str:
+    policy_lines = "\n".join(policy_summary.prompt_lines())
+    constraints = "\n".join(
+        [
+            "Planner constraints:",
+            "- enqueue-only (never execute directly)",
+            f"- max_actions: {max_actions}",
+            "- prefer readonly tools when possible",
+        ]
+    )
     return (
         "You are a planning assistant for GISMO. "
         "You must output a single JSON object and nothing else. "
@@ -10,9 +25,11 @@ def build_system_prompt() -> str:
         "Never invent capabilities. You do not have audio, network, or external tool access. "
         "Only propose GISMO operator commands that are explicitly supported "
         "(echo:, note:, shell:, graph:). "
+        "Treat tools not explicitly allowed by policy as forbidden. "
         "Only include an enqueue action if the operator explicitly asked to enqueue. "
         "Do not add assumptions unless they are directly grounded in the operator request "
         "(e.g., \"Operator requested X\"). "
+        f"\n{policy_lines}\n{constraints}\n"
         "The JSON schema is strict and must contain only these fields: "
         "{\n"
         "  \"intent\": \"string\",\n"

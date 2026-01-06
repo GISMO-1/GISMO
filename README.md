@@ -199,6 +199,9 @@ Planner (local LLM via Ollama):
   gismo ask "Plan with operator memory profile" --dry-run --memory-profile operator
   gismo ask "Remember the default model" --apply-memory-suggestions \
     --policy policy/dev-safe.json --yes
+  Notes:
+  - Inquiries are read-only by default; explicit write intent or flags
+    (for example, --enqueue or --apply-memory-suggestions) are required to log/remember.
 
 Agent loop (leashed autonomy):
 

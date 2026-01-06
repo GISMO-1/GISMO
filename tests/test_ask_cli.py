@@ -1143,6 +1143,134 @@ class AskCliTest(unittest.TestCase):
             notes = plan["notes"]
             self.assertFalse(any("Ignored unsupported action types" in note for note in notes))
 
+    def test_ask_inquire_normalizes_write_actions_to_echo(self) -> None:
+        response = json.dumps(
+            {
+                "intent": "inquire",
+                "assumptions": [],
+                "actions": [
+                    {
+                        "type": "enqueue",
+                        "command": "note: remember this",
+                        "timeout_seconds": 30,
+                        "retries": 0,
+                        "why": "store a note",
+                        "risk": "low",
+                    }
+                ],
+                "notes": [],
+            }
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = str(Path(tmpdir) / "state.db")
+            with mock.patch.object(cli_main, "ollama_chat", return_value=response):
+                cli_main.run_ask(
+                    db_path,
+                    "What is my default model preference?",
+                    model=None,
+                    host=None,
+                    timeout_s=None,
+                    enqueue=False,
+                    dry_run=True,
+                    max_actions=5,
+                    yes=False,
+                    explain=False,
+                )
+            state_store = StateStore(db_path)
+            event = state_store.list_events()[0]
+            payload = event.json_payload
+            assert payload is not None
+            plan = payload["plan"]
+            actions = plan["actions"]
+            self.assertEqual(len(actions), 1)
+            self.assertTrue(actions[0]["command"].startswith("echo:"))
+            self.assertNotIn("note:", actions[0]["command"])
+
+    def test_ask_write_action_risk_is_high_and_matches_plan(self) -> None:
+        response = json.dumps(
+            {
+                "intent": "record",
+                "assumptions": [],
+                "actions": [
+                    {
+                        "type": "enqueue",
+                        "command": "note: record a preference",
+                        "timeout_seconds": 30,
+                        "retries": 0,
+                        "why": "save a note",
+                        "risk": "low",
+                    }
+                ],
+                "notes": [],
+            }
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = str(Path(tmpdir) / "state.db")
+            with mock.patch.object(cli_main, "ollama_chat", return_value=response):
+                cli_main.run_ask(
+                    db_path,
+                    "Remember that I prefer the default model.",
+                    model=None,
+                    host=None,
+                    timeout_s=None,
+                    enqueue=False,
+                    dry_run=True,
+                    max_actions=5,
+                    yes=False,
+                    explain=False,
+                )
+            state_store = StateStore(db_path)
+            event = state_store.list_events()[0]
+            payload = event.json_payload
+            assert payload is not None
+            plan = payload["plan"]
+            actions = plan["actions"]
+            self.assertEqual(actions[0]["risk"], "high")
+            explain = payload["explain"]
+            self.assertEqual(explain["risk_level"], "HIGH")
+
+    def test_ask_inquire_non_interactive_fails_without_readonly_tool(self) -> None:
+        response = json.dumps(
+            {
+                "intent": "inquire",
+                "assumptions": [],
+                "actions": [
+                    {
+                        "type": "enqueue",
+                        "command": "note: store this",
+                        "timeout_seconds": 30,
+                        "retries": 0,
+                        "why": "write a note",
+                        "risk": "low",
+                    }
+                ],
+                "notes": [],
+            }
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = str(Path(tmpdir) / "state.db")
+            policy_path = self._write_policy(
+                tmpdir,
+                {"allowed_tools": [], "fs": {"base_dir": "."}, "memory": {"allow": {}}},
+            )
+            with mock.patch.object(cli_main, "ollama_chat", return_value=response):
+                with self.assertRaises(SystemExit) as context:
+                    cli_main.run_ask(
+                        db_path,
+                        "What is my default model preference?",
+                        model=None,
+                        host=None,
+                        timeout_s=None,
+                        enqueue=False,
+                        dry_run=True,
+                        max_actions=5,
+                        yes=False,
+                        explain=False,
+                        non_interactive=True,
+                        policy_path=policy_path,
+                    )
+            self.assertEqual(context.exception.code, 2)
+
     def test_ask_unsupported_action_still_reported(self) -> None:
         response = json.dumps(
             {

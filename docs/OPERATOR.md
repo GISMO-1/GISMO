@@ -159,6 +159,8 @@ Planner rules:
 - Uses Ollama JSON mode with keep_alive to reduce reload latency
 - Policy is still enforced at execution time
 - Planner cannot execute directly
+- Inquiries are read-only by default; explicit write intent or flags
+  (for example, --enqueue or --apply-memory-suggestions) are required to log/remember.
 - Deterministic risk assessment (LOW/MEDIUM/HIGH), flags, and rationale printed with every plan
 - MEDIUM/HIGH risk plans require confirmation before enqueueing unless --yes is used
 - Non-interactive mode fails closed if confirmation would be required

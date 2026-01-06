@@ -162,3 +162,34 @@ def _matches_memory_mutation(command_lower: str) -> bool:
 
 def _matches_supervisor_lifecycle(command_lower: str) -> bool:
     return any(re.search(pattern, command_lower) for pattern in _SUPERVISOR_PATTERNS)
+
+
+def infer_tools_from_command(command: str) -> list[str]:
+    return _infer_tools_from_command(command)
+
+
+def infer_action_risk(command: str) -> RiskLevel:
+    if not isinstance(command, str):
+        return "LOW"
+    return classify_plan_risk([{"type": "enqueue", "command": command}]).risk_level
+
+
+def command_implies_write(command: str) -> bool:
+    if not isinstance(command, str):
+        return False
+    command_lower = command.strip().lower()
+    tool_names = _infer_tools_from_command(command)
+    if "run_shell" in tool_names or command_lower.startswith("shell:"):
+        return True
+    if _contains_write_tool(tool_names):
+        return True
+    if _matches_memory_mutation(command_lower):
+        return True
+    return False
+
+
+def command_is_readonly(command: str) -> bool:
+    tool_names = _infer_tools_from_command(command)
+    if not tool_names:
+        return False
+    return all(tool == "echo" for tool in tool_names)

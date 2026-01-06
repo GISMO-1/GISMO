@@ -45,7 +45,14 @@ from gismo.core.permissions import PermissionPolicy, load_policy
 from gismo.core.explain import PlanExplain, build_plan_explain
 from gismo.core.gating import ConfirmationDecision, confirm_plan_gate
 from gismo.core.policy_summary import PolicySummary, summarize_policy
-from gismo.core.risk import PlanRisk, classify_plan_risk
+from gismo.core.risk import (
+    PlanRisk,
+    classify_plan_risk,
+    command_implies_write,
+    command_is_readonly,
+    infer_action_risk,
+    infer_tools_from_command,
+)
 from gismo.core.state import StateStore
 from gismo.core.tools import EchoTool, ToolRegistry, WriteNoteTool
 from gismo.core.tool_receipts import ToolReceiptReplayReport, replay_tool_receipts
@@ -289,6 +296,90 @@ def _coerce_action_type_to_command(action_type_text: str) -> str | None:
     return candidate
 
 
+_RISK_ORDER = {"low": 0, "medium": 1, "high": 2}
+
+
+def _merge_action_risk(action_risk: str, inferred: str) -> str:
+    if action_risk not in _RISK_ORDER:
+        return inferred
+    if inferred not in _RISK_ORDER:
+        return action_risk
+    return action_risk if _RISK_ORDER[action_risk] >= _RISK_ORDER[inferred] else inferred
+
+
+def _action_tools_allowed(command_text: str, policy_summary: PolicySummary) -> bool:
+    tool_names = infer_tools_from_command(command_text)
+    if not tool_names:
+        return False
+    return all(tool in policy_summary.allowed_tools for tool in tool_names)
+
+
+def _select_inquire_action(
+    actions: list[dict[str, object]],
+    *,
+    policy_summary: PolicySummary,
+) -> dict[str, object] | None:
+    for action in actions:
+        command_text = action.get("command") or ""
+        if not command_is_readonly(command_text):
+            continue
+        if _action_tools_allowed(command_text, policy_summary):
+            return action
+    if "echo" in policy_summary.allowed_tools:
+        return {
+            "type": "enqueue",
+            "command": (
+                "echo: No action required; inquiries are read-only. "
+                "Use `gismo memory get ...` if you need to inspect stored state."
+            ),
+            "timeout_seconds": 30,
+            "retries": 0,
+            "why": "inquiry response without side effects",
+            "risk": "low",
+        }
+    return None
+
+
+def _enforce_inquire_readonly(
+    plan: dict,
+    *,
+    policy_summary: PolicySummary,
+    non_interactive: bool,
+) -> dict:
+    intent = plan.get("intent")
+    intent_text = intent.strip().lower() if isinstance(intent, str) else ""
+    if intent_text != "inquire":
+        return plan
+    actions = list(plan.get("actions") or [])
+    if not actions:
+        return plan
+    if not any(command_implies_write(action.get("command") or "") for action in actions):
+        return plan
+    fallback = _select_inquire_action(actions, policy_summary=policy_summary)
+    if fallback is None:
+        message = (
+            "Inquire intent included write actions, but no read-only fallback is allowed by policy."
+        )
+        if non_interactive:
+            print(f"ERROR: {message}", file=sys.stderr)
+            raise SystemExit(2)
+        notes = _coerce_str_list(plan.get("notes"))
+        notes.append(message)
+        plan["actions"] = []
+        plan["notes"] = notes
+        return plan
+    fallback = dict(fallback)
+    fallback["risk"] = _merge_action_risk(
+        str(fallback.get("risk") or "medium"),
+        infer_action_risk(str(fallback.get("command") or "")).lower(),
+    )
+    plan["actions"] = [fallback]
+    notes = _coerce_str_list(plan.get("notes"))
+    notes.append("Normalized inquire intent to read-only action; removed write actions.")
+    plan["notes"] = notes
+    return plan
+
+
 def _first_non_option_token(argv: list[str]) -> str | None:
     skip_next = False
     force_positional = False
@@ -503,6 +594,8 @@ def _normalize_llm_plan(plan: dict, max_actions: int) -> dict:
                     timeout_seconds = 30
                     retries = 0
                     risk_text = "medium"
+            inferred_risk = infer_action_risk(command_text).lower() if command_text else "low"
+            risk_text = _merge_action_risk(risk_text, inferred_risk)
             actions.append(
                 {
                     "type": action_type_text,
@@ -3366,6 +3459,7 @@ def _request_llm_plan(
     explain: bool,
     debug: bool,
     actor: str,
+    non_interactive: bool,
     memory_injection: MemoryInjection | None = None,
     role_context: AgentRoleContext | None = None,
     policy_path: str | None = None,
@@ -3514,6 +3608,11 @@ def _request_llm_plan(
                 json_payload=payload,
             )
             raise
+        plan = _enforce_inquire_readonly(
+            plan,
+            policy_summary=policy_summary,
+            non_interactive=non_interactive,
+        )
         risk = classify_plan_risk(plan.get("actions", []))
         trace_payload = memory_injection.trace.to_dict() if memory_injection else None
         explain_payload = build_plan_explain(
@@ -3631,6 +3730,7 @@ def run_ask(
         explain=explain,
         debug=debug,
         actor="ask",
+        non_interactive=non_interactive,
         memory_injection=memory_injection,
         policy_path=policy_path,
         json_output=json_output,
@@ -3944,6 +4044,7 @@ def run_agent(
             explain=False,
             debug=False,
             actor="agent",
+            non_interactive=non_interactive,
             policy_path=policy_path,
             json_output=json_output,
             memory_injection=memory_injection,

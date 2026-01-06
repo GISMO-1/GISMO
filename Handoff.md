@@ -107,6 +107,7 @@ gismo/
 
 policy/
   dev-safe.json
+  dev-operator.json
   readonly.json
 
 docs/
@@ -155,15 +156,14 @@ INTENTIONAL LIMITATIONS (NOT BUGS)
 
 RECENT NOTABLE CHANGE (LATEST WORK)
 
-Phase 3 kickoff (memory injection trace + preview):
-- Added deterministic memory injection trace artifacts (hash + counts + ordered items) in explain JSON.
-- Added memory injection audit events with bounded trace summaries (export-friendly).
-- Added `gismo memory preview --memory-profile ...` (policy-aware, read-only).
-- Updated policies, tests, and docs to cover memory.read and trace visibility.
+Memory profile policy separation:
+- Added an operator policy for memory profile lifecycle (memory.profile.create/retire).
+- Kept dev-safe/readonly policies readonly for profile governance.
+- Updated docs and tests to reflect profile lifecycle gating and preview usage.
 
 Next steps:
-- Validate policy-denied namespace behavior on Windows with real profiles.
-- Consider extending preview to prompt-based injection if operators need parity.
+- Validate operator profile workflows against real Windows operator runs.
+- Consider shipping default profile templates once governance workflows stabilize.
 
 Tests run:
 - python scripts/verify.py

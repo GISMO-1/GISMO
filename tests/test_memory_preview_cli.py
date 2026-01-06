@@ -76,6 +76,80 @@ class MemoryPreviewCliTest(unittest.TestCase):
         eligibility = payload.get("eligibility", {})
         self.assertEqual(eligibility.get("selected_items"), 1)
 
+    def test_memory_preview_requires_profile_then_succeeds(self) -> None:
+        policy_path = self.repo_root / "policy" / "dev-operator.json"
+        missing = _run_cli(
+            [
+                "memory",
+                "preview",
+                "--db",
+                str(self.db_path),
+                "--memory-profile",
+                "operator",
+                "--policy",
+                str(policy_path),
+            ],
+            cwd=self.repo_root,
+        )
+        self.assertNotEqual(missing.returncode, 0)
+        self.assertIn("Memory profile not found", missing.stderr)
+
+        create = _run_cli(
+            [
+                "memory",
+                "profile",
+                "create",
+                "--db",
+                str(self.db_path),
+                "--policy",
+                str(policy_path),
+                "--name",
+                "operator",
+                "--description",
+                "Operator profile",
+                "--include-namespace",
+                "global",
+                "--include-kind",
+                "preference",
+                "--yes",
+            ],
+            cwd=self.repo_root,
+        )
+        self.assertEqual(create.returncode, 0, create.stderr)
+
+        memory_put_item(
+            str(self.db_path),
+            namespace="global",
+            key="default_model",
+            kind="preference",
+            value="phi3:mini",
+            tags=None,
+            confidence="high",
+            source="operator",
+            ttl_seconds=None,
+            actor="operator",
+            policy_hash=memory_policy_hash_for_path(str(policy_path)),
+        )
+
+        preview = _run_cli(
+            [
+                "memory",
+                "preview",
+                "--db",
+                str(self.db_path),
+                "--memory-profile",
+                "operator",
+                "--policy",
+                str(policy_path),
+                "--json",
+            ],
+            cwd=self.repo_root,
+        )
+        self.assertEqual(preview.returncode, 0, preview.stderr)
+        payload = json.loads(preview.stdout)
+        eligibility = payload.get("eligibility", {})
+        self.assertEqual(eligibility.get("selected_items"), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

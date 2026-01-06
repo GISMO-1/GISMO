@@ -15,6 +15,7 @@ from typing import Iterator
 from uuid import UUID, uuid4
 
 from gismo.cli import memory_doctor as memory_doctor_cli
+from gismo.cli import memory_explain as memory_explain_cli
 from gismo.cli import memory_profile as memory_profile_cli
 from gismo.cli import memory_snapshot as memory_snapshot_cli
 from gismo.cli.operator import (
@@ -51,6 +52,7 @@ from gismo.memory.store import (
     MemoryNamespaceSummary,
     MemoryRetentionDetail,
     MemoryProfile,
+    MemorySelectionReason,
     get_item as memory_get_item,
     get_namespace as memory_get_namespace,
     get_profile_by_selector as memory_get_profile_by_selector,
@@ -59,15 +61,19 @@ from gismo.memory.store import (
     list_prompt_items as memory_list_prompt_items,
     list_namespaces as memory_list_namespaces,
     list_retention_rules as memory_list_retention_rules,
+    link_selection_traces_to_run as memory_link_selection_traces_to_run,
     plan_retention_for_write as memory_plan_retention_for_write,
     policy_hash_for_path,
     put_item as memory_put_item,
+    record_profile_selection_trace as memory_record_profile_selection_trace,
+    record_prompt_selection_trace as memory_record_prompt_selection_trace,
     record_retention_decision as memory_record_retention_decision,
     record_event as memory_record_event,
     retire_namespace as memory_retire_namespace,
     search_items as memory_search_items,
     set_retention_rule as memory_set_retention_rule,
     tombstone_item as memory_tombstone_item,
+    update_selection_trace_decision as memory_update_selection_trace_decision,
     apply_retention_evictions as memory_apply_retention_evictions,
     clear_retention_rule as memory_clear_retention_rule,
 )
@@ -2869,6 +2875,8 @@ def _build_memory_injection(
     db_path: str,
     *,
     profile_selector: str | None = None,
+    plan_id: str | None = None,
+    run_id: str | None = None,
 ) -> MemoryInjection:
     profile_filters = None
     if profile_selector:
@@ -2883,20 +2891,52 @@ def _build_memory_injection(
             profile.max_items if profile.max_items is not None else MEMORY_INJECTION_ITEM_CAP,
         )
         profile_filters = _profile_filters(profile, effective_limit)
+        memory_record_profile_selection_trace(
+            db_path,
+            profile=profile,
+            selected_items=items,
+            run_id=run_id,
+            plan_id=plan_id,
+        )
     else:
         items = memory_list_prompt_items(db_path, limit=MEMORY_INJECTION_ITEM_CAP)
+        memory_record_prompt_selection_trace(
+            db_path,
+            selected_items=items,
+            run_id=run_id,
+            plan_id=plan_id,
+        )
     entries = _memory_entries_for_prompt(items)
     capped_entries: list[dict[str, str]] = []
     total_bytes = 0
-    for entry in entries:
+    excluded_due_to_cap: list[MemoryItem] = []
+    for index, entry in enumerate(entries):
         serialized = json.dumps(entry, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         entry_bytes = len(serialized.encode("utf-8"))
         if len(capped_entries) >= MEMORY_INJECTION_ITEM_CAP:
+            excluded_due_to_cap.extend(items[index:])
             break
         if total_bytes + entry_bytes > MEMORY_INJECTION_BYTE_CAP:
+            excluded_due_to_cap.extend(items[index:])
             break
         capped_entries.append(entry)
         total_bytes += entry_bytes
+    if excluded_due_to_cap and (plan_id or run_id):
+        include_reason = "include.profile" if profile_selector else "include.default"
+        for item in excluded_due_to_cap:
+            memory_update_selection_trace_decision(
+                db_path,
+                run_id=run_id,
+                plan_id=plan_id,
+                namespace=item.namespace,
+                key=item.key,
+                kind=item.kind,
+                decision="exclude",
+                reasons=[
+                    MemorySelectionReason(code="exclude.cap"),
+                    MemorySelectionReason(code=include_reason),
+                ],
+            )
     keys = [{"namespace": entry["namespace"], "key": entry["key"]} for entry in capped_entries]
     payload_json = json.dumps(capped_entries, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     block = (
@@ -3201,6 +3241,7 @@ def run_ask(
         memory_injection = _build_memory_injection(
             db_path,
             profile_selector=memory_profile,
+            plan_id=plan_event_id,
         )
     plan, assessment, state_store, payload = _request_llm_plan(
         db_path,
@@ -3433,11 +3474,13 @@ def run_agent(
     last_actions_count = 0
     for cycle in range(1, cycles_limit + 1):
         print(f"=== Agent Cycle {cycle} ===")
+        plan_event_id = str(uuid4())
         memory_injection = None
         if use_memory or memory_profile:
             memory_injection = _build_memory_injection(
                 db_path,
                 profile_selector=memory_profile,
+                plan_id=plan_event_id,
             )
         plan, assessment, state_store, _payload = _request_llm_plan(
             db_path,
@@ -3463,7 +3506,6 @@ def run_agent(
                 denied=0,
                 applied_items=[],
             )
-            plan_event_id = str(uuid4())
             _record_memory_profile_use(
                 db_path=db_path,
                 memory_injection=memory_injection,
@@ -3590,6 +3632,11 @@ def run_agent(
                 },
             )
             run_ids.append(run.id)
+            memory_link_selection_traces_to_run(
+                db_path,
+                plan_id=plan_event_id,
+                run_id=run.id,
+            )
 
             enqueued_ids, skipped = _enqueue_plan_actions(state_store, plan, run_id=run.id)
             if skipped:
@@ -3896,6 +3943,10 @@ def _handle_memory_profile_create(args: argparse.Namespace) -> None:
 
 def _handle_memory_profile_retire(args: argparse.Namespace) -> None:
     memory_profile_cli.run_memory_profile_retire(args)
+
+
+def _handle_memory_explain(args: argparse.Namespace) -> None:
+    memory_explain_cli.run_memory_explain(args)
 
 
 def _handle_memory_retention_list(args: argparse.Namespace) -> None:
@@ -5119,6 +5170,32 @@ def build_parser() -> argparse.ArgumentParser:
         help="Path to a JSON policy file",
     )
     memory_profile_retire_parser.set_defaults(handler=_handle_memory_profile_retire)
+
+    memory_explain_parser = memory_subparsers.add_parser(
+        "explain",
+        help="Explain memory selection decisions for a run or plan",
+        parents=[db_parent_optional],
+    )
+    memory_explain_parser.add_argument(
+        "--run",
+        help="Run ID to explain memory selection for",
+    )
+    memory_explain_parser.add_argument(
+        "--plan",
+        help="Plan event ID to explain memory selection for",
+    )
+    memory_explain_parser.add_argument(
+        "--limit",
+        type=int,
+        default=memory_explain_cli.DEFAULT_EXPLAIN_LIMIT,
+        help="Maximum number of trace entries to display",
+    )
+    memory_explain_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit selection traces as JSON",
+    )
+    memory_explain_parser.set_defaults(handler=_handle_memory_explain)
 
     memory_retention_parser = memory_subparsers.add_parser(
         "retention",

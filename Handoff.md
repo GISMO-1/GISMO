@@ -172,10 +172,11 @@ Plan assessment gate:
 LATEST UPDATE (OPERATOR NOTES)
 
 Status:
-- Added memory profiles for read-only memory visibility, plus profile-aware ask/agent injection and audit events.
+- Added memory selection traces and the `gismo memory explain` command to audit inclusion/exclusion reasons for ask/agent runs.
 
 Next steps:
 - Decide whether to ship default policy entries for memory profile create/retire actions.
+- Gather operator feedback on the memory explain JSON schema and cap defaults.
 
 Tests run:
 - python scripts/verify.py

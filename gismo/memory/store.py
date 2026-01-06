@@ -4,7 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -237,6 +237,18 @@ class MemoryStore:
         self._open_connections: set[sqlite3.Connection] = set()
         self._init_db()
 
+    def __enter__(self) -> "MemoryStore":
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        traceback: object | None,
+    ) -> bool:
+        self.close()
+        return False
+
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.db_path)
         connection.row_factory = sqlite3.Row
@@ -262,6 +274,11 @@ class MemoryStore:
         finally:
             self._close_connection(connection)
 
+    @contextmanager
+    def _cursor(self, connection: sqlite3.Connection) -> Iterable[sqlite3.Cursor]:
+        with closing(connection.cursor()) as cursor:
+            yield cursor
+
     def _close_connection(self, connection: sqlite3.Connection) -> None:
         try:
             connection.close()
@@ -275,94 +292,94 @@ class MemoryStore:
     def _init_db(self) -> None:
         Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
         with self._connection() as connection:
-            cursor = connection.cursor()
-            cursor.execute(
-                """
-                CREATE TABLE IF NOT EXISTS memory_items (
-                    id TEXT PRIMARY KEY,
-                    namespace TEXT NOT NULL,
-                    key TEXT NOT NULL,
-                    kind TEXT NOT NULL,
-                    value_json TEXT NOT NULL,
-                    tags_json TEXT NULL,
-                    confidence TEXT NOT NULL,
-                    source TEXT NOT NULL,
-                    ttl_seconds INTEGER NULL,
-                    is_tombstoned INTEGER NOT NULL DEFAULT 0,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
+            with self._cursor(connection) as cursor:
+                cursor.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS memory_items (
+                        id TEXT PRIMARY KEY,
+                        namespace TEXT NOT NULL,
+                        key TEXT NOT NULL,
+                        kind TEXT NOT NULL,
+                        value_json TEXT NOT NULL,
+                        tags_json TEXT NULL,
+                        confidence TEXT NOT NULL,
+                        source TEXT NOT NULL,
+                        ttl_seconds INTEGER NULL,
+                        is_tombstoned INTEGER NOT NULL DEFAULT 0,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL
+                    )
+                    """
                 )
-                """
-            )
-            cursor.execute(
-                """
-                CREATE TABLE IF NOT EXISTS memory_events (
-                    id TEXT PRIMARY KEY,
-                    timestamp TEXT NOT NULL,
-                    operation TEXT NOT NULL,
-                    actor TEXT NOT NULL,
-                    policy_hash TEXT NOT NULL,
-                    request_json TEXT NOT NULL,
-                    result_meta_json TEXT NOT NULL,
-                    related_run_id TEXT NULL,
-                    related_ask_event_id TEXT NULL
+                cursor.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS memory_events (
+                        id TEXT PRIMARY KEY,
+                        timestamp TEXT NOT NULL,
+                        operation TEXT NOT NULL,
+                        actor TEXT NOT NULL,
+                        policy_hash TEXT NOT NULL,
+                        request_json TEXT NOT NULL,
+                        result_meta_json TEXT NOT NULL,
+                        related_run_id TEXT NULL,
+                        related_ask_event_id TEXT NULL
+                    )
+                    """
                 )
-                """
-            )
-            cursor.execute(
-                """
-                CREATE TABLE IF NOT EXISTS memory_namespaces (
-                    namespace TEXT PRIMARY KEY,
-                    retired_at TEXT NULL,
-                    retired_reason TEXT NULL
+                cursor.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS memory_namespaces (
+                        namespace TEXT PRIMARY KEY,
+                        retired_at TEXT NULL,
+                        retired_reason TEXT NULL
+                    )
+                    """
                 )
-                """
-            )
-            cursor.execute(
-                """
-                CREATE TABLE IF NOT EXISTS memory_retention_rules (
-                    namespace TEXT PRIMARY KEY,
-                    max_items INTEGER NULL,
-                    ttl_seconds INTEGER NULL,
-                    policy_source TEXT NOT NULL,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
+                cursor.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS memory_retention_rules (
+                        namespace TEXT PRIMARY KEY,
+                        max_items INTEGER NULL,
+                        ttl_seconds INTEGER NULL,
+                        policy_source TEXT NOT NULL,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL
+                    )
+                    """
                 )
-                """
-            )
-            cursor.execute(
-                """
-                CREATE TABLE IF NOT EXISTS memory_profiles (
-                    profile_id TEXT PRIMARY KEY,
-                    name TEXT NOT NULL UNIQUE,
-                    description TEXT NULL,
-                    include_namespaces_json TEXT NULL,
-                    exclude_namespaces_json TEXT NULL,
-                    include_kinds_json TEXT NULL,
-                    exclude_kinds_json TEXT NULL,
-                    max_items INTEGER NULL,
-                    created_at TEXT NOT NULL,
-                    retired_at TEXT NULL
+                cursor.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS memory_profiles (
+                        profile_id TEXT PRIMARY KEY,
+                        name TEXT NOT NULL UNIQUE,
+                        description TEXT NULL,
+                        include_namespaces_json TEXT NULL,
+                        exclude_namespaces_json TEXT NULL,
+                        include_kinds_json TEXT NULL,
+                        exclude_kinds_json TEXT NULL,
+                        max_items INTEGER NULL,
+                        created_at TEXT NOT NULL,
+                        retired_at TEXT NULL
+                    )
+                    """
                 )
-                """
-            )
-            cursor.execute(
-                """
-                CREATE TABLE IF NOT EXISTS memory_selection_traces (
-                    trace_id TEXT PRIMARY KEY,
-                    run_id TEXT NULL,
-                    plan_id TEXT NULL,
-                    item_key TEXT NOT NULL,
-                    namespace TEXT NOT NULL,
-                    kind TEXT NOT NULL,
-                    decision TEXT NOT NULL,
-                    reasons TEXT NOT NULL,
-                    created_at TEXT NOT NULL
+                cursor.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS memory_selection_traces (
+                        trace_id TEXT PRIMARY KEY,
+                        run_id TEXT NULL,
+                        plan_id TEXT NULL,
+                        item_key TEXT NOT NULL,
+                        namespace TEXT NOT NULL,
+                        kind TEXT NOT NULL,
+                        decision TEXT NOT NULL,
+                        reasons TEXT NOT NULL,
+                        created_at TEXT NOT NULL
+                    )
+                    """
                 )
-                """
-            )
-            for _, statement in MEMORY_INDEX_DEFINITIONS:
-                cursor.execute(statement)
+                for _, statement in MEMORY_INDEX_DEFINITIONS:
+                    cursor.execute(statement)
             connection.commit()
 
     def list_namespaces(self) -> list[MemoryNamespaceSummary]:
@@ -394,7 +411,7 @@ class MemoryStore:
             ORDER BY namespace_union.namespace ASC
         """
         with self._connection() as connection:
-            rows = connection.cursor().execute(sql).fetchall()
+            rows = connection.execute(sql).fetchall()
             return [_row_to_namespace_summary(row) for row in rows]
 
     def get_namespace(self, *, namespace: str) -> MemoryNamespaceDetail | None:
@@ -426,7 +443,7 @@ class MemoryStore:
             WHERE namespace_union.namespace = ?
         """
         with self._connection() as connection:
-            row = connection.cursor().execute(sql, (namespace,)).fetchone()
+            row = connection.execute(sql, (namespace,)).fetchone()
             if not row:
                 return None
             return _row_to_namespace_detail(row)
@@ -457,13 +474,13 @@ class MemoryStore:
             ORDER BY memory_retention_rules.namespace ASC
         """
         with self._connection() as connection:
-            rows = connection.cursor().execute(sql).fetchall()
+            rows = connection.execute(sql).fetchall()
             return [_row_to_retention_detail(row) for row in rows]
 
     def get_retention_rule(self, *, namespace: str) -> MemoryRetentionRule | None:
         sql = "SELECT * FROM memory_retention_rules WHERE namespace = ?"
         with self._connection() as connection:
-            row = connection.cursor().execute(sql, (namespace,)).fetchone()
+            row = connection.execute(sql, (namespace,)).fetchone()
             if not row:
                 return None
             return _row_to_retention_rule(row)
@@ -494,7 +511,7 @@ class MemoryStore:
             WHERE memory_retention_rules.namespace = ?
         """
         with self._connection() as connection:
-            row = connection.cursor().execute(sql, (namespace,)).fetchone()
+            row = connection.execute(sql, (namespace,)).fetchone()
             if not row:
                 return None
             return _row_to_retention_detail(row)
@@ -502,7 +519,7 @@ class MemoryStore:
     def list_profiles(self) -> list[MemoryProfile]:
         sql = "SELECT * FROM memory_profiles ORDER BY name ASC"
         with self._connection() as connection:
-            rows = connection.cursor().execute(sql).fetchall()
+            rows = connection.execute(sql).fetchall()
             return [_row_to_profile(row) for row in rows]
 
     def get_profile(
@@ -518,7 +535,7 @@ class MemoryStore:
         )
         value = profile_id or name
         with self._connection() as connection:
-            row = connection.cursor().execute(sql, (value,)).fetchone()
+            row = connection.execute(sql, (value,)).fetchone()
             if not row:
                 return None
             return _row_to_profile(row)
@@ -526,16 +543,16 @@ class MemoryStore:
     def get_profile_by_selector(self, selector: str) -> MemoryProfile | None:
         sql = "SELECT * FROM memory_profiles WHERE profile_id = ?"
         with self._connection() as connection:
-            cursor = connection.cursor()
-            row = cursor.execute(sql, (selector,)).fetchone()
-            if not row:
-                row = cursor.execute(
-                    "SELECT * FROM memory_profiles WHERE name = ?",
-                    (selector,),
-                ).fetchone()
-            if not row:
-                return None
-            return _row_to_profile(row)
+            with self._cursor(connection) as cursor:
+                row = cursor.execute(sql, (selector,)).fetchone()
+                if not row:
+                    row = cursor.execute(
+                        "SELECT * FROM memory_profiles WHERE name = ?",
+                        (selector,),
+                    ).fetchone()
+                if not row:
+                    return None
+                return _row_to_profile(row)
 
     def create_profile(
         self,
@@ -556,41 +573,41 @@ class MemoryStore:
         include_kinds_json = _serialize_profile_list(include_kinds)
         exclude_kinds_json = _serialize_profile_list(exclude_kinds)
         with self._connection() as connection:
-            cursor = connection.cursor()
-            existing = cursor.execute(
-                "SELECT profile_id FROM memory_profiles WHERE name = ?",
-                (name,),
-            ).fetchone()
-            if existing:
-                raise ValueError(f"Memory profile already exists: {name}")
-            cursor.execute(
-                """
-                INSERT INTO memory_profiles (
-                    profile_id,
-                    name,
-                    description,
-                    include_namespaces_json,
-                    exclude_namespaces_json,
-                    include_kinds_json,
-                    exclude_kinds_json,
-                    max_items,
-                    created_at,
-                    retired_at
+            with self._cursor(connection) as cursor:
+                existing = cursor.execute(
+                    "SELECT profile_id FROM memory_profiles WHERE name = ?",
+                    (name,),
+                ).fetchone()
+                if existing:
+                    raise ValueError(f"Memory profile already exists: {name}")
+                cursor.execute(
+                    """
+                    INSERT INTO memory_profiles (
+                        profile_id,
+                        name,
+                        description,
+                        include_namespaces_json,
+                        exclude_namespaces_json,
+                        include_kinds_json,
+                        exclude_kinds_json,
+                        max_items,
+                        created_at,
+                        retired_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+                    """,
+                    (
+                        profile_id,
+                        name,
+                        description,
+                        include_namespaces_json,
+                        exclude_namespaces_json,
+                        include_kinds_json,
+                        exclude_kinds_json,
+                        max_items,
+                        created_at,
+                    ),
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
-                """,
-                (
-                    profile_id,
-                    name,
-                    description,
-                    include_namespaces_json,
-                    exclude_namespaces_json,
-                    include_kinds_json,
-                    exclude_kinds_json,
-                    max_items,
-                    created_at,
-                ),
-            )
             connection.commit()
         profile = self.get_profile(profile_id=profile_id)
         if profile is None:
@@ -605,22 +622,22 @@ class MemoryStore:
     ) -> tuple[MemoryProfile, bool]:
         retired_at = retired_at or _utc_now().isoformat()
         with self._connection() as connection:
-            cursor = connection.cursor()
-            existing = cursor.execute(
-                "SELECT retired_at FROM memory_profiles WHERE profile_id = ?",
-                (profile_id,),
-            ).fetchone()
-            if not existing:
-                raise ValueError(f"Memory profile not found: {profile_id}")
-            if existing["retired_at"]:
-                profile = self.get_profile(profile_id=profile_id)
-                if profile is None:
-                    raise RuntimeError("Failed to load memory profile after retire")
-                return profile, False
-            cursor.execute(
-                "UPDATE memory_profiles SET retired_at = ? WHERE profile_id = ?",
-                (retired_at, profile_id),
-            )
+            with self._cursor(connection) as cursor:
+                existing = cursor.execute(
+                    "SELECT retired_at FROM memory_profiles WHERE profile_id = ?",
+                    (profile_id,),
+                ).fetchone()
+                if not existing:
+                    raise ValueError(f"Memory profile not found: {profile_id}")
+                if existing["retired_at"]:
+                    profile = self.get_profile(profile_id=profile_id)
+                    if profile is None:
+                        raise RuntimeError("Failed to load memory profile after retire")
+                    return profile, False
+                cursor.execute(
+                    "UPDATE memory_profiles SET retired_at = ? WHERE profile_id = ?",
+                    (retired_at, profile_id),
+                )
             connection.commit()
         profile = self.get_profile(profile_id=profile_id)
         if profile is None:
@@ -635,7 +652,7 @@ class MemoryStore:
             ORDER BY namespace ASC
         """
         with self._connection() as connection:
-            rows = connection.cursor().execute(sql).fetchall()
+            rows = connection.execute(sql).fetchall()
             return [row["namespace"] for row in rows]
 
     def list_profile_items(
@@ -675,7 +692,7 @@ class MemoryStore:
             sql = f"{sql} LIMIT ?"
             params.append(effective_limit)
         with self._connection() as connection:
-            rows = connection.cursor().execute(sql, params).fetchall()
+            rows = connection.execute(sql, params).fetchall()
             return [_row_to_item(row) for row in rows]
 
     def set_retention_rule(
@@ -689,52 +706,52 @@ class MemoryStore:
     ) -> tuple[MemoryRetentionRule, bool]:
         updated_at = updated_at or _utc_now().isoformat()
         with self._connection() as connection:
-            cursor = connection.cursor()
-            existing = cursor.execute(
-                """
-                SELECT namespace, max_items, ttl_seconds, policy_source, created_at
-                FROM memory_retention_rules
-                WHERE namespace = ?
-                """,
-                (namespace,),
-            ).fetchone()
-            if existing:
-                created_at = existing["created_at"]
-                changed = (
-                    existing["max_items"] != max_items
-                    or existing["ttl_seconds"] != ttl_seconds
-                    or existing["policy_source"] != policy_source
+            with self._cursor(connection) as cursor:
+                existing = cursor.execute(
+                    """
+                    SELECT namespace, max_items, ttl_seconds, policy_source, created_at
+                    FROM memory_retention_rules
+                    WHERE namespace = ?
+                    """,
+                    (namespace,),
+                ).fetchone()
+                if existing:
+                    created_at = existing["created_at"]
+                    changed = (
+                        existing["max_items"] != max_items
+                        or existing["ttl_seconds"] != ttl_seconds
+                        or existing["policy_source"] != policy_source
+                    )
+                else:
+                    created_at = updated_at
+                    changed = True
+                cursor.execute(
+                    """
+                    INSERT INTO memory_retention_rules (
+                        namespace,
+                        max_items,
+                        ttl_seconds,
+                        policy_source,
+                        created_at,
+                        updated_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(namespace)
+                    DO UPDATE SET
+                        max_items = excluded.max_items,
+                        ttl_seconds = excluded.ttl_seconds,
+                        policy_source = excluded.policy_source,
+                        updated_at = excluded.updated_at
+                    """,
+                    (
+                        namespace,
+                        max_items,
+                        ttl_seconds,
+                        policy_source,
+                        created_at,
+                        updated_at,
+                    ),
                 )
-            else:
-                created_at = updated_at
-                changed = True
-            cursor.execute(
-                """
-                INSERT INTO memory_retention_rules (
-                    namespace,
-                    max_items,
-                    ttl_seconds,
-                    policy_source,
-                    created_at,
-                    updated_at
-                )
-                VALUES (?, ?, ?, ?, ?, ?)
-                ON CONFLICT(namespace)
-                DO UPDATE SET
-                    max_items = excluded.max_items,
-                    ttl_seconds = excluded.ttl_seconds,
-                    policy_source = excluded.policy_source,
-                    updated_at = excluded.updated_at
-                """,
-                (
-                    namespace,
-                    max_items,
-                    ttl_seconds,
-                    policy_source,
-                    created_at,
-                    updated_at,
-                ),
-            )
             connection.commit()
         rule = self.get_retention_rule(namespace=namespace)
         if rule is None:
@@ -743,12 +760,12 @@ class MemoryStore:
 
     def clear_retention_rule(self, *, namespace: str) -> bool:
         with self._connection() as connection:
-            cursor = connection.cursor()
-            cursor.execute(
-                "DELETE FROM memory_retention_rules WHERE namespace = ?",
-                (namespace,),
-            )
-            changed = cursor.rowcount > 0
+            with self._cursor(connection) as cursor:
+                cursor.execute(
+                    "DELETE FROM memory_retention_rules WHERE namespace = ?",
+                    (namespace,),
+                )
+                changed = cursor.rowcount > 0
             connection.commit()
         return changed
 
@@ -765,15 +782,15 @@ class MemoryStore:
         now = now or _utc_now()
         evaluated_at = now.isoformat()
         with self._connection() as connection:
-            cursor = connection.cursor()
-            rows = cursor.execute(
-                """
-                SELECT * FROM memory_items
-                WHERE namespace = ? AND is_tombstoned = 0
-                ORDER BY created_at ASC, key ASC, id ASC
-                """,
-                (namespace,),
-            ).fetchall()
+            with self._cursor(connection) as cursor:
+                rows = cursor.execute(
+                    """
+                    SELECT * FROM memory_items
+                    WHERE namespace = ? AND is_tombstoned = 0
+                    ORDER BY created_at ASC, key ASC, id ASC
+                    """,
+                    (namespace,),
+                ).fetchall()
         items = [_row_to_item(row) for row in rows]
         before_count = len(items)
         incoming_new = all(item.key != key for item in items)
@@ -902,31 +919,31 @@ class MemoryStore:
     ) -> tuple[MemoryNamespaceDetail, bool]:
         retired_at = retired_at or _utc_now().isoformat()
         with self._connection() as connection:
-            cursor = connection.cursor()
-            existing = cursor.execute(
-                """
-                SELECT retired_at, retired_reason
-                FROM memory_namespaces
-                WHERE namespace = ?
-                """,
-                (namespace,),
-            ).fetchone()
-            if existing and existing["retired_at"]:
-                detail = self.get_namespace(namespace=namespace)
-                if detail is None:
-                    raise RuntimeError("Failed to load namespace metadata after retire")
-                return detail, False
-            cursor.execute(
-                """
-                INSERT INTO memory_namespaces (namespace, retired_at, retired_reason)
-                VALUES (?, ?, ?)
-                ON CONFLICT(namespace)
-                DO UPDATE SET
-                    retired_at = excluded.retired_at,
-                    retired_reason = excluded.retired_reason
-                """,
-                (namespace, retired_at, reason),
-            )
+            with self._cursor(connection) as cursor:
+                existing = cursor.execute(
+                    """
+                    SELECT retired_at, retired_reason
+                    FROM memory_namespaces
+                    WHERE namespace = ?
+                    """,
+                    (namespace,),
+                ).fetchone()
+                if existing and existing["retired_at"]:
+                    detail = self.get_namespace(namespace=namespace)
+                    if detail is None:
+                        raise RuntimeError("Failed to load namespace metadata after retire")
+                    return detail, False
+                cursor.execute(
+                    """
+                    INSERT INTO memory_namespaces (namespace, retired_at, retired_reason)
+                    VALUES (?, ?, ?)
+                    ON CONFLICT(namespace)
+                    DO UPDATE SET
+                        retired_at = excluded.retired_at,
+                        retired_reason = excluded.retired_reason
+                    """,
+                    (namespace, retired_at, reason),
+                )
             connection.commit()
         detail = self.get_namespace(namespace=namespace)
         if detail is None:
@@ -956,49 +973,49 @@ class MemoryStore:
         tags_json = json.dumps(tags, ensure_ascii=False, sort_keys=True) if tags else None
         new_id = str(uuid4())
         with self._connection() as connection:
-            cursor = connection.cursor()
-            cursor.execute(
-                """
-                INSERT INTO memory_items (
-                    id,
-                    namespace,
-                    key,
-                    kind,
-                    value_json,
-                    tags_json,
-                    confidence,
-                    source,
-                    ttl_seconds,
-                    is_tombstoned,
-                    created_at,
-                    updated_at
+            with self._cursor(connection) as cursor:
+                cursor.execute(
+                    """
+                    INSERT INTO memory_items (
+                        id,
+                        namespace,
+                        key,
+                        kind,
+                        value_json,
+                        tags_json,
+                        confidence,
+                        source,
+                        ttl_seconds,
+                        is_tombstoned,
+                        created_at,
+                        updated_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
+                    ON CONFLICT(namespace, key)
+                    DO UPDATE SET
+                        kind = excluded.kind,
+                        value_json = excluded.value_json,
+                        tags_json = excluded.tags_json,
+                        confidence = excluded.confidence,
+                        source = excluded.source,
+                        ttl_seconds = excluded.ttl_seconds,
+                        is_tombstoned = 0,
+                        updated_at = excluded.updated_at
+                    """,
+                    (
+                        new_id,
+                        namespace,
+                        key,
+                        kind,
+                        value_json,
+                        tags_json,
+                        confidence,
+                        source,
+                        ttl_seconds,
+                        created_at,
+                        updated_at,
+                    ),
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
-                ON CONFLICT(namespace, key)
-                DO UPDATE SET
-                    kind = excluded.kind,
-                    value_json = excluded.value_json,
-                    tags_json = excluded.tags_json,
-                    confidence = excluded.confidence,
-                    source = excluded.source,
-                    ttl_seconds = excluded.ttl_seconds,
-                    is_tombstoned = 0,
-                    updated_at = excluded.updated_at
-                """,
-                (
-                    new_id,
-                    namespace,
-                    key,
-                    kind,
-                    value_json,
-                    tags_json,
-                    confidence,
-                    source,
-                    ttl_seconds,
-                    created_at,
-                    updated_at,
-                ),
-            )
             connection.commit()
             item = self._fetch_item(
                 connection,
@@ -1136,34 +1153,34 @@ class MemoryStore:
         params.append(limit)
 
         with self._connection() as connection:
-            cursor = connection.cursor()
-            rows = cursor.execute(sql, params).fetchall()
-            items = [_row_to_item(row) for row in rows]
-            request = {
-                "query": query,
-                "namespace": namespace,
-                "kind": kind,
-                "tag": tag,
-                "source": source,
-                "confidence_min": confidence_min,
-                "include_tombstoned": include_tombstoned,
-                "limit": limit,
-            }
-            result_meta = {
-                "count": len(items),
-            }
-            append_event(
-                connection,
-                operation="search",
-                actor=actor,
-                policy_hash=policy_hash,
-                request=request,
-                result_meta=result_meta,
-                related_run_id=related_run_id,
-                related_ask_event_id=related_ask_event_id,
-            )
-            connection.commit()
-            return items
+            with self._cursor(connection) as cursor:
+                rows = cursor.execute(sql, params).fetchall()
+                items = [_row_to_item(row) for row in rows]
+                request = {
+                    "query": query,
+                    "namespace": namespace,
+                    "kind": kind,
+                    "tag": tag,
+                    "source": source,
+                    "confidence_min": confidence_min,
+                    "include_tombstoned": include_tombstoned,
+                    "limit": limit,
+                }
+                result_meta = {
+                    "count": len(items),
+                }
+                append_event(
+                    connection,
+                    operation="search",
+                    actor=actor,
+                    policy_hash=policy_hash,
+                    request=request,
+                    result_meta=result_meta,
+                    related_run_id=related_run_id,
+                    related_ask_event_id=related_ask_event_id,
+                )
+                connection.commit()
+                return items
 
     def list_prompt_items(self, *, limit: int = 20) -> list[MemoryItem]:
         kinds = sorted(PROMPT_ALLOWED_KINDS)
@@ -1187,9 +1204,9 @@ class MemoryStore:
             limit,
         ]
         with self._connection() as connection:
-            cursor = connection.cursor()
-            rows = cursor.execute(sql, params).fetchall()
-            return [_row_to_item(row) for row in rows]
+            with self._cursor(connection) as cursor:
+                rows = cursor.execute(sql, params).fetchall()
+                return [_row_to_item(row) for row in rows]
 
     def list_selection_traces(
         self,
@@ -1219,7 +1236,7 @@ class MemoryStore:
         )
         params.append(limit)
         with self._connection() as connection:
-            rows = connection.cursor().execute(sql, params).fetchall()
+            rows = connection.execute(sql, params).fetchall()
         return [_row_to_selection_trace(row) for row in rows]
 
     def record_prompt_selection_trace(
@@ -1277,67 +1294,67 @@ class MemoryStore:
         trace_id = _selection_trace_id(scope_id, namespace, key, kind)
         reasons_json = _serialize_selection_reasons(reasons)
         with self._connection() as connection:
-            cursor = connection.cursor()
-            cursor.execute(
-                """
-                UPDATE memory_selection_traces
-                SET decision = ?, reasons = ?, run_id = ?, plan_id = ?
-                WHERE trace_id = ?
-                """,
-                (
-                    decision,
-                    reasons_json,
-                    run_id,
-                    plan_id,
-                    trace_id,
-                ),
-            )
-            if cursor.rowcount == 0:
-                created_at = _utc_now().isoformat()
+            with self._cursor(connection) as cursor:
                 cursor.execute(
                     """
-                    INSERT INTO memory_selection_traces (
-                        trace_id,
-                        run_id,
-                        plan_id,
-                        item_key,
-                        namespace,
-                        kind,
-                        decision,
-                        reasons,
-                        created_at
-                    )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    UPDATE memory_selection_traces
+                    SET decision = ?, reasons = ?, run_id = ?, plan_id = ?
+                    WHERE trace_id = ?
                     """,
                     (
-                        trace_id,
-                        run_id,
-                        plan_id,
-                        key,
-                        namespace,
-                        kind,
                         decision,
                         reasons_json,
-                        created_at,
+                        run_id,
+                        plan_id,
+                        trace_id,
                     ),
                 )
-            self._enforce_selection_trace_cap(connection, run_id=run_id, plan_id=plan_id)
-            connection.commit()
+                if cursor.rowcount == 0:
+                    created_at = _utc_now().isoformat()
+                    cursor.execute(
+                        """
+                        INSERT INTO memory_selection_traces (
+                            trace_id,
+                            run_id,
+                            plan_id,
+                            item_key,
+                            namespace,
+                            kind,
+                            decision,
+                            reasons,
+                            created_at
+                        )
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            trace_id,
+                            run_id,
+                            plan_id,
+                            key,
+                            namespace,
+                            kind,
+                            decision,
+                            reasons_json,
+                            created_at,
+                        ),
+                    )
+                self._enforce_selection_trace_cap(connection, run_id=run_id, plan_id=plan_id)
+                connection.commit()
 
     def link_selection_traces_to_run(self, *, plan_id: str, run_id: str) -> None:
         with self._connection() as connection:
-            cursor = connection.cursor()
-            cursor.execute(
-                """
-                UPDATE memory_selection_traces
-                SET run_id = ?
-                WHERE plan_id = ? AND run_id IS NULL
-                """,
-                (run_id, plan_id),
-            )
-            if cursor.rowcount:
-                self._enforce_selection_trace_cap(connection, run_id=run_id, plan_id=None)
-            connection.commit()
+            with self._cursor(connection) as cursor:
+                cursor.execute(
+                    """
+                    UPDATE memory_selection_traces
+                    SET run_id = ?
+                    WHERE plan_id = ? AND run_id IS NULL
+                    """,
+                    (run_id, plan_id),
+                )
+                if cursor.rowcount:
+                    self._enforce_selection_trace_cap(connection, run_id=run_id, plan_id=None)
+                connection.commit()
 
     def _record_selection_traces(
         self,
@@ -1351,55 +1368,55 @@ class MemoryStore:
             return
         base_time = _utc_now()
         with self._connection() as connection:
-            cursor = connection.cursor()
-            for offset, decision in enumerate(decisions):
-                trace_id = _selection_trace_id(
-                    scope_id,
-                    decision.namespace,
-                    decision.item_key,
-                    decision.kind,
-                )
-                created_at = (base_time + timedelta(microseconds=offset)).isoformat()
-                reasons_json = _serialize_selection_reasons(decision.reasons)
-                cursor.execute(
-                    """
-                    INSERT INTO memory_selection_traces (
-                        trace_id,
-                        run_id,
-                        plan_id,
-                        item_key,
-                        namespace,
-                        kind,
-                        decision,
-                        reasons,
-                        created_at
-                    )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(trace_id)
-                    DO UPDATE SET
-                        run_id = excluded.run_id,
-                        plan_id = excluded.plan_id,
-                        item_key = excluded.item_key,
-                        namespace = excluded.namespace,
-                        kind = excluded.kind,
-                        decision = excluded.decision,
-                        reasons = excluded.reasons,
-                        created_at = memory_selection_traces.created_at
-                    """,
-                    (
-                        trace_id,
-                        run_id,
-                        plan_id,
-                        decision.item_key,
+            with self._cursor(connection) as cursor:
+                for offset, decision in enumerate(decisions):
+                    trace_id = _selection_trace_id(
+                        scope_id,
                         decision.namespace,
+                        decision.item_key,
                         decision.kind,
-                        decision.decision,
-                        reasons_json,
-                        created_at,
-                    ),
-                )
-            self._enforce_selection_trace_cap(connection, run_id=run_id, plan_id=plan_id)
-            connection.commit()
+                    )
+                    created_at = (base_time + timedelta(microseconds=offset)).isoformat()
+                    reasons_json = _serialize_selection_reasons(decision.reasons)
+                    cursor.execute(
+                        """
+                        INSERT INTO memory_selection_traces (
+                            trace_id,
+                            run_id,
+                            plan_id,
+                            item_key,
+                            namespace,
+                            kind,
+                            decision,
+                            reasons,
+                            created_at
+                        )
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ON CONFLICT(trace_id)
+                        DO UPDATE SET
+                            run_id = excluded.run_id,
+                            plan_id = excluded.plan_id,
+                            item_key = excluded.item_key,
+                            namespace = excluded.namespace,
+                            kind = excluded.kind,
+                            decision = excluded.decision,
+                            reasons = excluded.reasons,
+                            created_at = memory_selection_traces.created_at
+                        """,
+                        (
+                            trace_id,
+                            run_id,
+                            plan_id,
+                            decision.item_key,
+                            decision.namespace,
+                            decision.kind,
+                            decision.decision,
+                            reasons_json,
+                            created_at,
+                        ),
+                    )
+                self._enforce_selection_trace_cap(connection, run_id=run_id, plan_id=plan_id)
+                connection.commit()
 
     def _enforce_selection_trace_cap(
         self,
@@ -1411,28 +1428,28 @@ class MemoryStore:
         scope_clause, scope_value = _selection_trace_scope_clause(run_id=run_id, plan_id=plan_id)
         if scope_clause is None:
             return
-        cursor = connection.cursor()
-        row = cursor.execute(
-            f"SELECT COUNT(*) AS count FROM memory_selection_traces WHERE {scope_clause}",
-            (scope_value,),
-        ).fetchone()
-        total = int(row["count"]) if row else 0
-        if total <= MEMORY_SELECTION_TRACE_CAP:
-            return
-        excess = total - MEMORY_SELECTION_TRACE_CAP
-        cursor.execute(
-            f"""
-            DELETE FROM memory_selection_traces
-            WHERE trace_id IN (
-                SELECT trace_id
-                FROM memory_selection_traces
-                WHERE {scope_clause}
-                ORDER BY created_at ASC, trace_id ASC
-                LIMIT ?
+        with self._cursor(connection) as cursor:
+            row = cursor.execute(
+                f"SELECT COUNT(*) AS count FROM memory_selection_traces WHERE {scope_clause}",
+                (scope_value,),
+            ).fetchone()
+            total = int(row["count"]) if row else 0
+            if total <= MEMORY_SELECTION_TRACE_CAP:
+                return
+            excess = total - MEMORY_SELECTION_TRACE_CAP
+            cursor.execute(
+                f"""
+                DELETE FROM memory_selection_traces
+                WHERE trace_id IN (
+                    SELECT trace_id
+                    FROM memory_selection_traces
+                    WHERE {scope_clause}
+                    ORDER BY created_at ASC, trace_id ASC
+                    LIMIT ?
+                )
+                """,
+                (scope_value, excess),
             )
-            """,
-            (scope_value, excess),
-        )
 
     def _prompt_selection_decisions(
         self,
@@ -1633,7 +1650,7 @@ class MemoryStore:
             "LIMIT ?"
         )
         with self._connection() as connection:
-            rows = connection.cursor().execute(sql, (limit,)).fetchall()
+            rows = connection.execute(sql, (limit,)).fetchall()
             return [_row_to_item(row) for row in rows]
 
     def tombstone_item(
@@ -1649,15 +1666,15 @@ class MemoryStore:
     ) -> MemoryItem | None:
         updated_at = _utc_now().isoformat()
         with self._connection() as connection:
-            cursor = connection.cursor()
-            cursor.execute(
-                """
-                UPDATE memory_items
-                SET is_tombstoned = 1, updated_at = ?
-                WHERE namespace = ? AND key = ?
-                """,
-                (updated_at, namespace, key),
-            )
+            with self._cursor(connection) as cursor:
+                cursor.execute(
+                    """
+                    UPDATE memory_items
+                    SET is_tombstoned = 1, updated_at = ?
+                    WHERE namespace = ? AND key = ?
+                    """,
+                    (updated_at, namespace, key),
+                )
             connection.commit()
             item = self._fetch_item(
                 connection,
@@ -1701,11 +1718,11 @@ class MemoryStore:
         params: list[Any] = [namespace, key]
         if not include_tombstoned:
             sql += " AND is_tombstoned = 0"
-        cursor = connection.cursor()
-        row = cursor.execute(sql, params).fetchone()
-        if not row:
-            return None
-        return _row_to_item(row)
+        with self._cursor(connection) as cursor:
+            row = cursor.execute(sql, params).fetchone()
+            if not row:
+                return None
+            return _row_to_item(row)
 
     def fetch_item_raw(self, *, namespace: str, key: str) -> MemoryItem | None:
         with self._connection() as connection:
@@ -1739,9 +1756,9 @@ class MemoryStore:
             "ORDER BY namespace ASC, key ASC"
         )
         with self._connection() as connection:
-            cursor = connection.cursor()
-            rows = cursor.execute(sql, params).fetchall()
-            return [_row_to_item(row) for row in rows]
+            with self._cursor(connection) as cursor:
+                rows = cursor.execute(sql, params).fetchall()
+                return [_row_to_item(row) for row in rows]
 
     def upsert_item_with_timestamps(
         self,
@@ -1770,51 +1787,51 @@ class MemoryStore:
         new_id = str(uuid4())
         update_created_clause = ", created_at = excluded.created_at" if update_created_at else ""
         with self._connection() as connection:
-            cursor = connection.cursor()
-            cursor.execute(
-                f"""
-                INSERT INTO memory_items (
-                    id,
-                    namespace,
-                    key,
-                    kind,
-                    value_json,
-                    tags_json,
-                    confidence,
-                    source,
-                    ttl_seconds,
-                    is_tombstoned,
-                    created_at,
-                    updated_at
+            with self._cursor(connection) as cursor:
+                cursor.execute(
+                    f"""
+                    INSERT INTO memory_items (
+                        id,
+                        namespace,
+                        key,
+                        kind,
+                        value_json,
+                        tags_json,
+                        confidence,
+                        source,
+                        ttl_seconds,
+                        is_tombstoned,
+                        created_at,
+                        updated_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(namespace, key)
+                    DO UPDATE SET
+                        kind = excluded.kind,
+                        value_json = excluded.value_json,
+                        tags_json = excluded.tags_json,
+                        confidence = excluded.confidence,
+                        source = excluded.source,
+                        ttl_seconds = excluded.ttl_seconds,
+                        is_tombstoned = excluded.is_tombstoned,
+                        updated_at = excluded.updated_at
+                        {update_created_clause}
+                    """,
+                    (
+                        new_id,
+                        namespace,
+                        key,
+                        kind,
+                        value_json,
+                        tags_json,
+                        confidence,
+                        source,
+                        ttl_seconds,
+                        int(is_tombstoned),
+                        created_at,
+                        updated_at,
+                    ),
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(namespace, key)
-                DO UPDATE SET
-                    kind = excluded.kind,
-                    value_json = excluded.value_json,
-                    tags_json = excluded.tags_json,
-                    confidence = excluded.confidence,
-                    source = excluded.source,
-                    ttl_seconds = excluded.ttl_seconds,
-                    is_tombstoned = excluded.is_tombstoned,
-                    updated_at = excluded.updated_at
-                    {update_created_clause}
-                """,
-                (
-                    new_id,
-                    namespace,
-                    key,
-                    kind,
-                    value_json,
-                    tags_json,
-                    confidence,
-                    source,
-                    ttl_seconds,
-                    int(is_tombstoned),
-                    created_at,
-                    updated_at,
-                ),
-            )
             connection.commit()
             item = self._fetch_item(
                 connection,
@@ -1875,21 +1892,22 @@ def put_item(
     related_run_id: Optional[str] = None,
     related_ask_event_id: Optional[str] = None,
 ) -> MemoryItem:
-    return MemoryStore(db_path).put_item(
-        namespace=namespace,
-        key=key,
-        kind=kind,
-        value=value,
-        tags=tags,
-        confidence=confidence,
-        source=source,
-        ttl_seconds=ttl_seconds,
-        actor=actor,
-        policy_hash=policy_hash,
-        result_meta_extra=result_meta_extra,
-        related_run_id=related_run_id,
-        related_ask_event_id=related_ask_event_id,
-    )
+    with MemoryStore(db_path) as store:
+        return store.put_item(
+            namespace=namespace,
+            key=key,
+            kind=kind,
+            value=value,
+            tags=tags,
+            confidence=confidence,
+            source=source,
+            ttl_seconds=ttl_seconds,
+            actor=actor,
+            policy_hash=policy_hash,
+            result_meta_extra=result_meta_extra,
+            related_run_id=related_run_id,
+            related_ask_event_id=related_ask_event_id,
+        )
 
 
 def get_item(
@@ -1903,15 +1921,16 @@ def get_item(
     related_run_id: Optional[str] = None,
     related_ask_event_id: Optional[str] = None,
 ) -> MemoryItem | None:
-    return MemoryStore(db_path).get_item(
-        namespace,
-        key,
-        include_tombstoned=include_tombstoned,
-        actor=actor,
-        policy_hash=policy_hash,
-        related_run_id=related_run_id,
-        related_ask_event_id=related_ask_event_id,
-    )
+    with MemoryStore(db_path) as store:
+        return store.get_item(
+            namespace,
+            key,
+            include_tombstoned=include_tombstoned,
+            actor=actor,
+            policy_hash=policy_hash,
+            related_run_id=related_run_id,
+            related_ask_event_id=related_ask_event_id,
+        )
 
 
 def search_items(
@@ -1930,20 +1949,21 @@ def search_items(
     related_run_id: Optional[str] = None,
     related_ask_event_id: Optional[str] = None,
     ) -> list[MemoryItem]:
-    return MemoryStore(db_path).search_items(
-        query,
-        namespace=namespace,
-        kind=kind,
-        tag=tag,
-        source=source,
-        confidence_min=confidence_min,
-        include_tombstoned=include_tombstoned,
-        limit=limit,
-        actor=actor,
-        policy_hash=policy_hash,
-        related_run_id=related_run_id,
-        related_ask_event_id=related_ask_event_id,
-    )
+    with MemoryStore(db_path) as store:
+        return store.search_items(
+            query,
+            namespace=namespace,
+            kind=kind,
+            tag=tag,
+            source=source,
+            confidence_min=confidence_min,
+            include_tombstoned=include_tombstoned,
+            limit=limit,
+            actor=actor,
+            policy_hash=policy_hash,
+            related_run_id=related_run_id,
+            related_ask_event_id=related_ask_event_id,
+        )
 
 
 def list_items_for_snapshot(
@@ -1952,14 +1972,16 @@ def list_items_for_snapshot(
     namespace: Optional[str],
     namespace_prefix: Optional[str],
 ) -> list[MemoryItem]:
-    return MemoryStore(db_path).list_items_for_snapshot(
-        namespace=namespace,
-        namespace_prefix=namespace_prefix,
-    )
+    with MemoryStore(db_path) as store:
+        return store.list_items_for_snapshot(
+            namespace=namespace,
+            namespace_prefix=namespace_prefix,
+        )
 
 
 def fetch_item_raw(db_path: str, *, namespace: str, key: str) -> MemoryItem | None:
-    return MemoryStore(db_path).fetch_item_raw(namespace=namespace, key=key)
+    with MemoryStore(db_path) as store:
+        return store.fetch_item_raw(namespace=namespace, key=key)
 
 
 def upsert_item_with_timestamps(
@@ -1984,26 +2006,27 @@ def upsert_item_with_timestamps(
     related_run_id: Optional[str] = None,
     related_ask_event_id: Optional[str] = None,
 ) -> MemoryItem:
-    return MemoryStore(db_path).upsert_item_with_timestamps(
-        namespace=namespace,
-        key=key,
-        kind=kind,
-        value=value,
-        tags=tags,
-        confidence=confidence,
-        source=source,
-        ttl_seconds=ttl_seconds,
-        is_tombstoned=is_tombstoned,
-        created_at=created_at,
-        updated_at=updated_at,
-        update_created_at=update_created_at,
-        actor=actor,
-        policy_hash=policy_hash,
-        operation=operation,
-        result_meta_extra=result_meta_extra,
-        related_run_id=related_run_id,
-        related_ask_event_id=related_ask_event_id,
-    )
+    with MemoryStore(db_path) as store:
+        return store.upsert_item_with_timestamps(
+            namespace=namespace,
+            key=key,
+            kind=kind,
+            value=value,
+            tags=tags,
+            confidence=confidence,
+            source=source,
+            ttl_seconds=ttl_seconds,
+            is_tombstoned=is_tombstoned,
+            created_at=created_at,
+            updated_at=updated_at,
+            update_created_at=update_created_at,
+            actor=actor,
+            policy_hash=policy_hash,
+            operation=operation,
+            result_meta_extra=result_meta_extra,
+            related_run_id=related_run_id,
+            related_ask_event_id=related_ask_event_id,
+        )
 
 
 def list_prompt_items(
@@ -2011,7 +2034,8 @@ def list_prompt_items(
     *,
     limit: int = 20,
 ) -> list[MemoryItem]:
-    return MemoryStore(db_path).list_prompt_items(limit=limit)
+    with MemoryStore(db_path) as store:
+        return store.list_prompt_items(limit=limit)
 
 
 def list_selection_traces(
@@ -2021,11 +2045,12 @@ def list_selection_traces(
     plan_id: str | None,
     limit: int = 200,
 ) -> list[MemorySelectionTrace]:
-    return MemoryStore(db_path).list_selection_traces(
-        run_id=run_id,
-        plan_id=plan_id,
-        limit=limit,
-    )
+    with MemoryStore(db_path) as store:
+        return store.list_selection_traces(
+            run_id=run_id,
+            plan_id=plan_id,
+            limit=limit,
+        )
 
 
 def record_prompt_selection_trace(
@@ -2036,12 +2061,13 @@ def record_prompt_selection_trace(
     plan_id: str | None,
     trace_limit: int = MEMORY_SELECTION_TRACE_CAP,
 ) -> None:
-    MemoryStore(db_path).record_prompt_selection_trace(
-        selected_items=selected_items,
-        run_id=run_id,
-        plan_id=plan_id,
-        trace_limit=trace_limit,
-    )
+    with MemoryStore(db_path) as store:
+        store.record_prompt_selection_trace(
+            selected_items=selected_items,
+            run_id=run_id,
+            plan_id=plan_id,
+            trace_limit=trace_limit,
+        )
 
 
 def record_profile_selection_trace(
@@ -2053,13 +2079,14 @@ def record_profile_selection_trace(
     plan_id: str | None,
     trace_limit: int = MEMORY_SELECTION_TRACE_CAP,
 ) -> None:
-    MemoryStore(db_path).record_profile_selection_trace(
-        profile=profile,
-        selected_items=selected_items,
-        run_id=run_id,
-        plan_id=plan_id,
-        trace_limit=trace_limit,
-    )
+    with MemoryStore(db_path) as store:
+        store.record_profile_selection_trace(
+            profile=profile,
+            selected_items=selected_items,
+            run_id=run_id,
+            plan_id=plan_id,
+            trace_limit=trace_limit,
+        )
 
 
 def update_selection_trace_decision(
@@ -2073,15 +2100,16 @@ def update_selection_trace_decision(
     decision: str,
     reasons: list[MemorySelectionReason],
 ) -> None:
-    MemoryStore(db_path).update_selection_trace_decision(
-        run_id=run_id,
-        plan_id=plan_id,
-        namespace=namespace,
-        key=key,
-        kind=kind,
-        decision=decision,
-        reasons=reasons,
-    )
+    with MemoryStore(db_path) as store:
+        store.update_selection_trace_decision(
+            run_id=run_id,
+            plan_id=plan_id,
+            namespace=namespace,
+            key=key,
+            kind=kind,
+            decision=decision,
+            reasons=reasons,
+        )
 
 
 def link_selection_traces_to_run(
@@ -2090,11 +2118,13 @@ def link_selection_traces_to_run(
     plan_id: str,
     run_id: str,
 ) -> None:
-    MemoryStore(db_path).link_selection_traces_to_run(plan_id=plan_id, run_id=run_id)
+    with MemoryStore(db_path) as store:
+        store.link_selection_traces_to_run(plan_id=plan_id, run_id=run_id)
 
 
 def list_profiles(db_path: str) -> list[MemoryProfile]:
-    return MemoryStore(db_path).list_profiles()
+    with MemoryStore(db_path) as store:
+        return store.list_profiles()
 
 
 def get_profile(
@@ -2103,11 +2133,13 @@ def get_profile(
     profile_id: str | None = None,
     name: str | None = None,
 ) -> MemoryProfile | None:
-    return MemoryStore(db_path).get_profile(profile_id=profile_id, name=name)
+    with MemoryStore(db_path) as store:
+        return store.get_profile(profile_id=profile_id, name=name)
 
 
 def get_profile_by_selector(db_path: str, selector: str) -> MemoryProfile | None:
-    return MemoryStore(db_path).get_profile_by_selector(selector)
+    with MemoryStore(db_path) as store:
+        return store.get_profile_by_selector(selector)
 
 
 def create_profile(
@@ -2122,16 +2154,17 @@ def create_profile(
     max_items: Optional[int],
     created_at: Optional[str] = None,
 ) -> MemoryProfile:
-    return MemoryStore(db_path).create_profile(
-        name=name,
-        description=description,
-        include_namespaces=include_namespaces,
-        exclude_namespaces=exclude_namespaces,
-        include_kinds=include_kinds,
-        exclude_kinds=exclude_kinds,
-        max_items=max_items,
-        created_at=created_at,
-    )
+    with MemoryStore(db_path) as store:
+        return store.create_profile(
+            name=name,
+            description=description,
+            include_namespaces=include_namespaces,
+            exclude_namespaces=exclude_namespaces,
+            include_kinds=include_kinds,
+            exclude_kinds=exclude_kinds,
+            max_items=max_items,
+            created_at=created_at,
+        )
 
 
 def retire_profile(
@@ -2140,11 +2173,13 @@ def retire_profile(
     profile_id: str,
     retired_at: Optional[str] = None,
 ) -> tuple[MemoryProfile, bool]:
-    return MemoryStore(db_path).retire_profile(profile_id=profile_id, retired_at=retired_at)
+    with MemoryStore(db_path) as store:
+        return store.retire_profile(profile_id=profile_id, retired_at=retired_at)
 
 
 def list_retired_namespaces(db_path: str) -> list[str]:
-    return MemoryStore(db_path).list_retired_namespaces()
+    with MemoryStore(db_path) as store:
+        return store.list_retired_namespaces()
 
 
 def list_profile_items(
@@ -2153,27 +2188,33 @@ def list_profile_items(
     profile: MemoryProfile,
     limit: int | None = None,
 ) -> list[MemoryItem]:
-    return MemoryStore(db_path).list_profile_items(profile=profile, limit=limit)
+    with MemoryStore(db_path) as store:
+        return store.list_profile_items(profile=profile, limit=limit)
 
 
 def list_namespaces(db_path: str) -> list[MemoryNamespaceSummary]:
-    return MemoryStore(db_path).list_namespaces()
+    with MemoryStore(db_path) as store:
+        return store.list_namespaces()
 
 
 def get_namespace(db_path: str, *, namespace: str) -> MemoryNamespaceDetail | None:
-    return MemoryStore(db_path).get_namespace(namespace=namespace)
+    with MemoryStore(db_path) as store:
+        return store.get_namespace(namespace=namespace)
 
 
 def list_retention_rules(db_path: str) -> list[MemoryRetentionDetail]:
-    return MemoryStore(db_path).list_retention_rules()
+    with MemoryStore(db_path) as store:
+        return store.list_retention_rules()
 
 
 def get_retention_rule(db_path: str, *, namespace: str) -> MemoryRetentionRule | None:
-    return MemoryStore(db_path).get_retention_rule(namespace=namespace)
+    with MemoryStore(db_path) as store:
+        return store.get_retention_rule(namespace=namespace)
 
 
 def get_retention_detail(db_path: str, *, namespace: str) -> MemoryRetentionDetail | None:
-    return MemoryStore(db_path).get_retention_detail(namespace=namespace)
+    with MemoryStore(db_path) as store:
+        return store.get_retention_detail(namespace=namespace)
 
 
 def set_retention_rule(
@@ -2185,17 +2226,19 @@ def set_retention_rule(
     policy_source: str,
     updated_at: Optional[str] = None,
 ) -> tuple[MemoryRetentionRule, bool]:
-    return MemoryStore(db_path).set_retention_rule(
-        namespace=namespace,
-        max_items=max_items,
-        ttl_seconds=ttl_seconds,
-        policy_source=policy_source,
-        updated_at=updated_at,
-    )
+    with MemoryStore(db_path) as store:
+        return store.set_retention_rule(
+            namespace=namespace,
+            max_items=max_items,
+            ttl_seconds=ttl_seconds,
+            policy_source=policy_source,
+            updated_at=updated_at,
+        )
 
 
 def clear_retention_rule(db_path: str, *, namespace: str) -> bool:
-    return MemoryStore(db_path).clear_retention_rule(namespace=namespace)
+    with MemoryStore(db_path) as store:
+        return store.clear_retention_rule(namespace=namespace)
 
 
 def plan_retention_for_write(
@@ -2205,11 +2248,12 @@ def plan_retention_for_write(
     key: str,
     now: Optional[datetime] = None,
 ) -> MemoryRetentionPlan | None:
-    return MemoryStore(db_path).plan_retention_for_write(
-        namespace=namespace,
-        key=key,
-        now=now,
-    )
+    with MemoryStore(db_path) as store:
+        return store.plan_retention_for_write(
+            namespace=namespace,
+            key=key,
+            now=now,
+        )
 
 
 def record_retention_decision(
@@ -2224,16 +2268,17 @@ def record_retention_decision(
     related_run_id: Optional[str] = None,
     related_ask_event_id: Optional[str] = None,
 ) -> str:
-    return MemoryStore(db_path).record_retention_decision(
-        plan=plan,
-        namespace=namespace,
-        key=key,
-        actor=actor,
-        policy_hash=policy_hash,
-        policy_meta=policy_meta,
-        related_run_id=related_run_id,
-        related_ask_event_id=related_ask_event_id,
-    )
+    with MemoryStore(db_path) as store:
+        return store.record_retention_decision(
+            plan=plan,
+            namespace=namespace,
+            key=key,
+            actor=actor,
+            policy_hash=policy_hash,
+            policy_meta=policy_meta,
+            related_run_id=related_run_id,
+            related_ask_event_id=related_ask_event_id,
+        )
 
 
 def apply_retention_evictions(
@@ -2246,14 +2291,15 @@ def apply_retention_evictions(
     related_run_id: Optional[str] = None,
     related_ask_event_id: Optional[str] = None,
 ) -> list[MemoryItem]:
-    return MemoryStore(db_path).apply_retention_evictions(
-        plan=plan,
-        actor=actor,
-        policy_hash=policy_hash,
-        retention_event_id=retention_event_id,
-        related_run_id=related_run_id,
-        related_ask_event_id=related_ask_event_id,
-    )
+    with MemoryStore(db_path) as store:
+        return store.apply_retention_evictions(
+            plan=plan,
+            actor=actor,
+            policy_hash=policy_hash,
+            retention_event_id=retention_event_id,
+            related_run_id=related_run_id,
+            related_ask_event_id=related_ask_event_id,
+        )
 
 
 def retire_namespace(
@@ -2263,11 +2309,12 @@ def retire_namespace(
     reason: str,
     retired_at: Optional[str] = None,
 ) -> tuple[MemoryNamespaceDetail, bool]:
-    return MemoryStore(db_path).retire_namespace(
-        namespace=namespace,
-        reason=reason,
-        retired_at=retired_at,
-    )
+    with MemoryStore(db_path) as store:
+        return store.retire_namespace(
+            namespace=namespace,
+            reason=reason,
+            retired_at=retired_at,
+        )
 
 
 def tombstone_item(
@@ -2281,15 +2328,16 @@ def tombstone_item(
     related_run_id: Optional[str] = None,
     related_ask_event_id: Optional[str] = None,
 ) -> MemoryItem | None:
-    return MemoryStore(db_path).tombstone_item(
-        namespace,
-        key,
-        actor=actor,
-        policy_hash=policy_hash,
-        result_meta_extra=result_meta_extra,
-        related_run_id=related_run_id,
-        related_ask_event_id=related_ask_event_id,
-    )
+    with MemoryStore(db_path) as store:
+        return store.tombstone_item(
+            namespace,
+            key,
+            actor=actor,
+            policy_hash=policy_hash,
+            result_meta_extra=result_meta_extra,
+            related_run_id=related_run_id,
+            related_ask_event_id=related_ask_event_id,
+        )
 
 
 def record_event(
@@ -2304,21 +2352,21 @@ def record_event(
     related_run_id: Optional[str] = None,
     related_ask_event_id: Optional[str] = None,
 ) -> str:
-    store = MemoryStore(db_path)
-    with store._connection() as connection:
-        event_id = append_event(
-            connection,
-            event_id=event_id,
-            operation=operation,
-            actor=actor,
-            policy_hash=policy_hash,
-            request=request,
-            result_meta=result_meta,
-            related_run_id=related_run_id,
-            related_ask_event_id=related_ask_event_id,
-        )
-        connection.commit()
-        return event_id
+    with MemoryStore(db_path) as store:
+        with store._connection() as connection:
+            event_id = append_event(
+                connection,
+                event_id=event_id,
+                operation=operation,
+                actor=actor,
+                policy_hash=policy_hash,
+                request=request,
+                result_meta=result_meta,
+                related_run_id=related_run_id,
+                related_ask_event_id=related_ask_event_id,
+            )
+            connection.commit()
+            return event_id
 
 
 def append_event(
@@ -2337,34 +2385,34 @@ def append_event(
     event_id = event_id or str(uuid4())
     request_json = _serialize_bounded_json(request)
     result_meta_json = _serialize_bounded_json(result_meta)
-    cursor = connection.cursor()
-    cursor.execute(
-        """
-        INSERT INTO memory_events (
-            id,
-            timestamp,
-            operation,
-            actor,
-            policy_hash,
-            request_json,
-            result_meta_json,
-            related_run_id,
-            related_ask_event_id
+    with closing(connection.cursor()) as cursor:
+        cursor.execute(
+            """
+            INSERT INTO memory_events (
+                id,
+                timestamp,
+                operation,
+                actor,
+                policy_hash,
+                request_json,
+                result_meta_json,
+                related_run_id,
+                related_ask_event_id
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                event_id,
+                timestamp,
+                operation,
+                actor,
+                policy_hash,
+                request_json,
+                result_meta_json,
+                related_run_id,
+                related_ask_event_id,
+            ),
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            event_id,
-            timestamp,
-            operation,
-            actor,
-            policy_hash,
-            request_json,
-            result_meta_json,
-            related_run_id,
-            related_ask_event_id,
-        ),
-    )
     return event_id
 
 

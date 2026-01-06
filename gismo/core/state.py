@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -87,6 +87,18 @@ class StateStore:
         self._open_connections: set[sqlite3.Connection] = set()
         self._init_db()
 
+    def __enter__(self) -> "StateStore":
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        traceback: object | None,
+    ) -> bool:
+        self.close()
+        return False
+
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.db_path)
         connection.row_factory = sqlite3.Row
@@ -112,6 +124,11 @@ class StateStore:
         finally:
             self._close_connection(connection)
 
+    @contextmanager
+    def _cursor(self, connection: sqlite3.Connection) -> Iterable[sqlite3.Cursor]:
+        with closing(connection.cursor()) as cursor:
+            yield cursor
+
     def _close_connection(self, connection: sqlite3.Connection) -> None:
         try:
             connection.close()
@@ -125,299 +142,299 @@ class StateStore:
     def _init_db(self) -> None:
         Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
         with self._connection() as connection:
-            cursor = connection.cursor()
-            cursor.execute(
-                """
-                CREATE TABLE IF NOT EXISTS runs (
-                    id TEXT PRIMARY KEY,
-                    created_at TEXT NOT NULL,
-                    label TEXT NOT NULL,
-                    metadata_json TEXT NOT NULL
+            with self._cursor(connection) as cursor:
+                cursor.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS runs (
+                        id TEXT PRIMARY KEY,
+                        created_at TEXT NOT NULL,
+                        label TEXT NOT NULL,
+                        metadata_json TEXT NOT NULL
+                    )
+                    """
                 )
-                """
-            )
-            cursor.execute(
-                """
-                CREATE TABLE IF NOT EXISTS agent_roles (
-                    role_id TEXT PRIMARY KEY,
-                    name TEXT NOT NULL UNIQUE,
-                    description TEXT NULL,
-                    memory_profile_id TEXT NULL,
-                    created_at TEXT NOT NULL,
-                    retired_at TEXT NULL
+                cursor.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS agent_roles (
+                        role_id TEXT PRIMARY KEY,
+                        name TEXT NOT NULL UNIQUE,
+                        description TEXT NULL,
+                        memory_profile_id TEXT NULL,
+                        created_at TEXT NOT NULL,
+                        retired_at TEXT NULL
+                    )
+                    """
                 )
-                """
-            )
-            cursor.execute(
-                """
-                CREATE TABLE IF NOT EXISTS agent_sessions (
-                    session_id TEXT PRIMARY KEY,
-                    role_id TEXT NULL,
-                    role_name TEXT NULL,
-                    profile_id TEXT NULL,
-                    profile_name TEXT NULL,
-                    goal TEXT NOT NULL,
-                    status TEXT NOT NULL,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL,
-                    last_plan_event_id TEXT NULL,
-                    last_run_id TEXT NULL,
-                    step_count INTEGER NOT NULL DEFAULT 0,
-                    max_steps INTEGER NOT NULL DEFAULT 12,
-                    notes TEXT NULL
+                cursor.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS agent_sessions (
+                        session_id TEXT PRIMARY KEY,
+                        role_id TEXT NULL,
+                        role_name TEXT NULL,
+                        profile_id TEXT NULL,
+                        profile_name TEXT NULL,
+                        goal TEXT NOT NULL,
+                        status TEXT NOT NULL,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        last_plan_event_id TEXT NULL,
+                        last_run_id TEXT NULL,
+                        step_count INTEGER NOT NULL DEFAULT 0,
+                        max_steps INTEGER NOT NULL DEFAULT 12,
+                        notes TEXT NULL
+                    )
+                    """
                 )
-                """
-            )
-            cursor.execute(
-                """
-                CREATE TABLE IF NOT EXISTS tasks (
-                    id TEXT PRIMARY KEY,
-                    run_id TEXT NOT NULL,
-                    title TEXT NOT NULL,
-                    description TEXT NOT NULL,
-                    status TEXT NOT NULL,
-                    depends_on_json TEXT NOT NULL DEFAULT '[]',
-                    idempotency_key TEXT NOT NULL DEFAULT '',
-                    input_hash TEXT NOT NULL DEFAULT '',
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL,
-                    input_json TEXT NOT NULL,
-                    output_json TEXT,
-                    error TEXT,
-                    failure_type TEXT,
-                    status_reason TEXT,
-                    FOREIGN KEY (run_id) REFERENCES runs(id)
+                cursor.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS tasks (
+                        id TEXT PRIMARY KEY,
+                        run_id TEXT NOT NULL,
+                        title TEXT NOT NULL,
+                        description TEXT NOT NULL,
+                        status TEXT NOT NULL,
+                        depends_on_json TEXT NOT NULL DEFAULT '[]',
+                        idempotency_key TEXT NOT NULL DEFAULT '',
+                        input_hash TEXT NOT NULL DEFAULT '',
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        input_json TEXT NOT NULL,
+                        output_json TEXT,
+                        error TEXT,
+                        failure_type TEXT,
+                        status_reason TEXT,
+                        FOREIGN KEY (run_id) REFERENCES runs(id)
+                    )
+                    """
                 )
-                """
-            )
-            cursor.execute(
-                """
-                CREATE TABLE IF NOT EXISTS tool_calls (
-                    id TEXT PRIMARY KEY,
-                    run_id TEXT NOT NULL,
-                    task_id TEXT NOT NULL,
-                    tool_name TEXT NOT NULL,
-                    started_at TEXT NOT NULL,
-                    finished_at TEXT,
-                    input_json TEXT NOT NULL,
-                    output_json TEXT,
-                    status TEXT NOT NULL,
-                    error TEXT,
-                    attempt_number INTEGER NOT NULL DEFAULT 1,
-                    failure_type TEXT,
-                    FOREIGN KEY (run_id) REFERENCES runs(id),
-                    FOREIGN KEY (task_id) REFERENCES tasks(id)
+                cursor.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS tool_calls (
+                        id TEXT PRIMARY KEY,
+                        run_id TEXT NOT NULL,
+                        task_id TEXT NOT NULL,
+                        tool_name TEXT NOT NULL,
+                        started_at TEXT NOT NULL,
+                        finished_at TEXT,
+                        input_json TEXT NOT NULL,
+                        output_json TEXT,
+                        status TEXT NOT NULL,
+                        error TEXT,
+                        attempt_number INTEGER NOT NULL DEFAULT 1,
+                        failure_type TEXT,
+                        FOREIGN KEY (run_id) REFERENCES runs(id),
+                        FOREIGN KEY (task_id) REFERENCES tasks(id)
+                    )
+                    """
                 )
-                """
-            )
-            cursor.execute(
-                """
-                CREATE TABLE IF NOT EXISTS tool_receipts (
-                    id TEXT PRIMARY KEY,
-                    run_id TEXT NOT NULL,
-                    session_id TEXT NULL,
-                    role_id TEXT NULL,
-                    role_name TEXT NULL,
-                    plan_event_id TEXT NULL,
-                    tool_name TEXT NOT NULL,
-                    tool_kind TEXT NOT NULL,
-                    request_payload_json TEXT NOT NULL,
-                    response_payload_json TEXT NOT NULL,
-                    status TEXT NOT NULL,
-                    started_at TEXT NOT NULL,
-                    finished_at TEXT NOT NULL,
-                    duration_ms INTEGER NOT NULL,
-                    request_sha256 TEXT NOT NULL,
-                    response_sha256 TEXT NOT NULL,
-                    error_type TEXT NULL,
-                    error_message TEXT NULL,
-                    policy_decision_id TEXT NULL,
-                    policy_snapshot_json TEXT NULL,
-                    FOREIGN KEY (run_id) REFERENCES runs(id)
+                cursor.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS tool_receipts (
+                        id TEXT PRIMARY KEY,
+                        run_id TEXT NOT NULL,
+                        session_id TEXT NULL,
+                        role_id TEXT NULL,
+                        role_name TEXT NULL,
+                        plan_event_id TEXT NULL,
+                        tool_name TEXT NOT NULL,
+                        tool_kind TEXT NOT NULL,
+                        request_payload_json TEXT NOT NULL,
+                        response_payload_json TEXT NOT NULL,
+                        status TEXT NOT NULL,
+                        started_at TEXT NOT NULL,
+                        finished_at TEXT NOT NULL,
+                        duration_ms INTEGER NOT NULL,
+                        request_sha256 TEXT NOT NULL,
+                        response_sha256 TEXT NOT NULL,
+                        error_type TEXT NULL,
+                        error_message TEXT NULL,
+                        policy_decision_id TEXT NULL,
+                        policy_snapshot_json TEXT NULL,
+                        FOREIGN KEY (run_id) REFERENCES runs(id)
+                    )
+                    """
                 )
-                """
-            )
-            cursor.execute(
-                """
-                CREATE TABLE IF NOT EXISTS queue_items (
-                    id TEXT PRIMARY KEY,
-                    run_id TEXT,
-                    command_text TEXT NOT NULL,
-                    status TEXT NOT NULL,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL,
-                    started_at TEXT,
-                    finished_at TEXT,
-                    attempt_count INTEGER NOT NULL DEFAULT 0,
-                    max_attempts INTEGER NOT NULL DEFAULT 3,
-                    max_retries INTEGER NOT NULL DEFAULT 3,
-                    next_attempt_at TEXT,
-                    timeout_seconds INTEGER NOT NULL DEFAULT 300,
-                    cancel_requested INTEGER NOT NULL DEFAULT 0,
-                    last_error TEXT
+                cursor.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS queue_items (
+                        id TEXT PRIMARY KEY,
+                        run_id TEXT,
+                        command_text TEXT NOT NULL,
+                        status TEXT NOT NULL,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        started_at TEXT,
+                        finished_at TEXT,
+                        attempt_count INTEGER NOT NULL DEFAULT 0,
+                        max_attempts INTEGER NOT NULL DEFAULT 3,
+                        max_retries INTEGER NOT NULL DEFAULT 3,
+                        next_attempt_at TEXT,
+                        timeout_seconds INTEGER NOT NULL DEFAULT 300,
+                        cancel_requested INTEGER NOT NULL DEFAULT 0,
+                        last_error TEXT
+                    )
+                    """
                 )
-                """
-            )
-            cursor.execute(
-                """
-                CREATE TABLE IF NOT EXISTS daemon_control (
-                    id INTEGER PRIMARY KEY CHECK (id = 1),
-                    paused INTEGER NOT NULL DEFAULT 0,
-                    updated_at TEXT NOT NULL
+                cursor.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS daemon_control (
+                        id INTEGER PRIMARY KEY CHECK (id = 1),
+                        paused INTEGER NOT NULL DEFAULT 0,
+                        updated_at TEXT NOT NULL
+                    )
+                    """
                 )
-                """
-            )
-            cursor.execute(
-                """
-                CREATE TABLE IF NOT EXISTS daemon_heartbeat (
-                    id INTEGER PRIMARY KEY CHECK (id = 1),
-                    pid INTEGER NOT NULL,
-                    started_at TEXT NOT NULL,
-                    last_seen TEXT NOT NULL,
-                    version TEXT
+                cursor.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS daemon_heartbeat (
+                        id INTEGER PRIMARY KEY CHECK (id = 1),
+                        pid INTEGER NOT NULL,
+                        started_at TEXT NOT NULL,
+                        last_seen TEXT NOT NULL,
+                        version TEXT
+                    )
+                    """
                 )
-                """
-            )
-            cursor.execute(
-                """
-                CREATE TABLE IF NOT EXISTS events (
-                    id TEXT PRIMARY KEY,
-                    ts TEXT NOT NULL,
-                    actor TEXT NOT NULL,
-                    event_type TEXT NOT NULL,
-                    message TEXT NOT NULL,
-                    json_payload TEXT
+                cursor.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS events (
+                        id TEXT PRIMARY KEY,
+                        ts TEXT NOT NULL,
+                        actor TEXT NOT NULL,
+                        event_type TEXT NOT NULL,
+                        message TEXT NOT NULL,
+                        json_payload TEXT
+                    )
+                    """
                 )
-                """
-            )
-            cursor.execute(
-                """
-                CREATE TABLE IF NOT EXISTS memory_items (
-                    id TEXT PRIMARY KEY,
-                    namespace TEXT NOT NULL,
-                    key TEXT NOT NULL,
-                    kind TEXT NOT NULL,
-                    value_json TEXT NOT NULL,
-                    tags_json TEXT NULL,
-                    confidence TEXT NOT NULL,
-                    source TEXT NOT NULL,
-                    ttl_seconds INTEGER NULL,
-                    is_tombstoned INTEGER NOT NULL DEFAULT 0,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
+                cursor.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS memory_items (
+                        id TEXT PRIMARY KEY,
+                        namespace TEXT NOT NULL,
+                        key TEXT NOT NULL,
+                        kind TEXT NOT NULL,
+                        value_json TEXT NOT NULL,
+                        tags_json TEXT NULL,
+                        confidence TEXT NOT NULL,
+                        source TEXT NOT NULL,
+                        ttl_seconds INTEGER NULL,
+                        is_tombstoned INTEGER NOT NULL DEFAULT 0,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL
+                    )
+                    """
                 )
-                """
-            )
-            cursor.execute(
-                """
-                CREATE TABLE IF NOT EXISTS memory_events (
-                    id TEXT PRIMARY KEY,
-                    timestamp TEXT NOT NULL,
-                    operation TEXT NOT NULL,
-                    actor TEXT NOT NULL,
-                    policy_hash TEXT NOT NULL,
-                    request_json TEXT NOT NULL,
-                    result_meta_json TEXT NOT NULL,
-                    related_run_id TEXT NULL,
-                    related_ask_event_id TEXT NULL
+                cursor.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS memory_events (
+                        id TEXT PRIMARY KEY,
+                        timestamp TEXT NOT NULL,
+                        operation TEXT NOT NULL,
+                        actor TEXT NOT NULL,
+                        policy_hash TEXT NOT NULL,
+                        request_json TEXT NOT NULL,
+                        result_meta_json TEXT NOT NULL,
+                        related_run_id TEXT NULL,
+                        related_ask_event_id TEXT NULL
+                    )
+                    """
                 )
-                """
-            )
-            cursor.execute(
-                """
-                CREATE TABLE IF NOT EXISTS memory_selection_traces (
-                    trace_id TEXT PRIMARY KEY,
-                    run_id TEXT NULL,
-                    plan_id TEXT NULL,
-                    item_key TEXT NOT NULL,
-                    namespace TEXT NOT NULL,
-                    kind TEXT NOT NULL,
-                    decision TEXT NOT NULL,
-                    reasons TEXT NOT NULL,
-                    created_at TEXT NOT NULL
+                cursor.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS memory_selection_traces (
+                        trace_id TEXT PRIMARY KEY,
+                        run_id TEXT NULL,
+                        plan_id TEXT NULL,
+                        item_key TEXT NOT NULL,
+                        namespace TEXT NOT NULL,
+                        kind TEXT NOT NULL,
+                        decision TEXT NOT NULL,
+                        reasons TEXT NOT NULL,
+                        created_at TEXT NOT NULL
+                    )
+                    """
                 )
-                """
-            )
-            cursor.execute(
-                """
-                CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_items_namespace_key
-                ON memory_items (namespace, key)
-                """
-            )
-            cursor.execute(
-                """
-                CREATE INDEX IF NOT EXISTS idx_memory_items_namespace
-                ON memory_items (namespace)
-                """
-            )
-            cursor.execute(
-                """
-                CREATE INDEX IF NOT EXISTS idx_memory_items_kind
-                ON memory_items (kind)
-                """
-            )
-            cursor.execute(
-                """
-                CREATE INDEX IF NOT EXISTS idx_memory_items_tombstoned
-                ON memory_items (is_tombstoned)
-                """
-            )
-            cursor.execute(
-                """
-                CREATE INDEX IF NOT EXISTS idx_memory_events_timestamp
-                ON memory_events (timestamp)
-                """
-            )
-            cursor.execute(
-                """
-                CREATE INDEX IF NOT EXISTS idx_memory_events_operation
-                ON memory_events (operation)
-                """
-            )
-            cursor.execute(
-                """
-                CREATE INDEX IF NOT EXISTS idx_memory_events_actor
-                ON memory_events (actor)
-                """
-            )
-            cursor.execute(
-                """
-                CREATE INDEX IF NOT EXISTS idx_memory_events_related_run
-                ON memory_events (related_run_id)
-                """
-            )
-            cursor.execute(
-                """
-                CREATE INDEX IF NOT EXISTS idx_memory_selection_traces_run
-                ON memory_selection_traces (run_id)
-                """
-            )
-            cursor.execute(
-                """
-                CREATE INDEX IF NOT EXISTS idx_memory_selection_traces_plan
-                ON memory_selection_traces (plan_id)
-                """
-            )
-            cursor.execute(
-                """
-                CREATE INDEX IF NOT EXISTS idx_tool_receipts_run
-                ON tool_receipts (run_id)
-                """
-            )
-            cursor.execute(
-                """
-                CREATE INDEX IF NOT EXISTS idx_tool_receipts_started_at
-                ON tool_receipts (started_at)
-                """
-            )
-            self._ensure_columns(connection)
-            cursor.execute(
-                """
-                INSERT OR IGNORE INTO daemon_control (id, paused, updated_at)
-                VALUES (1, 0, ?)
-                """,
-                (_utc_now().isoformat(),),
-            )
+                cursor.execute(
+                    """
+                    CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_items_namespace_key
+                    ON memory_items (namespace, key)
+                    """
+                )
+                cursor.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_memory_items_namespace
+                    ON memory_items (namespace)
+                    """
+                )
+                cursor.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_memory_items_kind
+                    ON memory_items (kind)
+                    """
+                )
+                cursor.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_memory_items_tombstoned
+                    ON memory_items (is_tombstoned)
+                    """
+                )
+                cursor.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_memory_events_timestamp
+                    ON memory_events (timestamp)
+                    """
+                )
+                cursor.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_memory_events_operation
+                    ON memory_events (operation)
+                    """
+                )
+                cursor.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_memory_events_actor
+                    ON memory_events (actor)
+                    """
+                )
+                cursor.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_memory_events_related_run
+                    ON memory_events (related_run_id)
+                    """
+                )
+                cursor.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_memory_selection_traces_run
+                    ON memory_selection_traces (run_id)
+                    """
+                )
+                cursor.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_memory_selection_traces_plan
+                    ON memory_selection_traces (plan_id)
+                    """
+                )
+                cursor.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_tool_receipts_run
+                    ON tool_receipts (run_id)
+                    """
+                )
+                cursor.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_tool_receipts_started_at
+                    ON tool_receipts (started_at)
+                    """
+                )
+                self._ensure_columns(connection)
+                cursor.execute(
+                    """
+                    INSERT OR IGNORE INTO daemon_control (id, paused, updated_at)
+                    VALUES (1, 0, ?)
+                    """,
+                    (_utc_now().isoformat(),),
+                )
             connection.commit()
 
     def _ensure_columns(self, connection: sqlite3.Connection) -> None:

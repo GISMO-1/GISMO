@@ -175,10 +175,12 @@ Status:
 - Added tool receipts (canonical payloads + hashes) for every tool call with JSONL export support.
 - Added CLI tooling to list/show receipts and replay exports in dry-run validation mode.
 - Run/show now summarizes tool receipt counts and timestamps alongside session/role context.
+- Closed SQLite connections deterministically and expanded DB-handle guardrail coverage for memory doctor, retention, snapshot import dry-run, tool receipts, and agent session show/list.
 
 Next steps:
 - Consider policy-gated non-dry-run replay after operators validate audit workflows.
 - Extend session metrics (elapsed time per step) once operators validate workflow.
+- Keep exercising Windows DB cleanup checks after additional CLI surfaces land.
 
 Tests run:
 - python scripts/verify.py

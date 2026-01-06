@@ -4,6 +4,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import contextlib
 from pathlib import Path
 
 
@@ -33,7 +34,7 @@ class MemoryCliTest(unittest.TestCase):
         return path
 
     def _latest_event_meta(self, operation: str) -> dict[str, object]:
-        with sqlite3.connect(self.db_path) as connection:
+        with contextlib.closing(sqlite3.connect(self.db_path)) as connection:
             row = connection.execute(
                 "SELECT result_meta_json FROM memory_events "
                 "WHERE operation = ? "
@@ -164,7 +165,7 @@ class MemoryCliTest(unittest.TestCase):
         tombstoned_item = json.loads(get_tombstoned.stdout)
         self.assertTrue(tombstoned_item["is_tombstoned"])
 
-        with sqlite3.connect(self.db_path) as connection:
+        with contextlib.closing(sqlite3.connect(self.db_path)) as connection:
             cursor = connection.cursor()
             count = cursor.execute("SELECT COUNT(*) FROM memory_events").fetchone()[0]
         self.assertEqual(count, 6)
@@ -317,7 +318,7 @@ class MemoryCliTest(unittest.TestCase):
         self.assertNotEqual(put.returncode, 0)
         self.assertIn("Confirmation required", put.stderr)
 
-        with sqlite3.connect(self.db_path) as connection:
+        with contextlib.closing(sqlite3.connect(self.db_path)) as connection:
             item_count = connection.execute(
                 "SELECT COUNT(*) FROM memory_items"
             ).fetchone()[0]
@@ -643,7 +644,7 @@ class MemoryCliTest(unittest.TestCase):
         self.assertNotEqual(retire.returncode, 0)
         self.assertIn("Confirmation required", retire.stderr)
 
-        with sqlite3.connect(self.db_path) as connection:
+        with contextlib.closing(sqlite3.connect(self.db_path)) as connection:
             row = connection.execute(
                 "SELECT retired_at FROM memory_namespaces WHERE namespace = ?",
                 ("global",),

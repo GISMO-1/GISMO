@@ -3,6 +3,7 @@ from __future__ import annotations
 import sqlite3
 import subprocess
 import sys
+import contextlib
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -32,7 +33,7 @@ def db_path(tmp_path: Path) -> Path:
 
 
 def _event_table_exists(db_path: Path) -> bool:
-    with sqlite3.connect(str(db_path)) as connection:
+    with contextlib.closing(sqlite3.connect(str(db_path))) as connection:
         row = connection.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name='events'"
         ).fetchone()

@@ -5,6 +5,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import contextlib
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -55,8 +56,9 @@ class MemoryDoctorCliTest(unittest.TestCase):
         )
 
     def _drop_index(self, name: str) -> None:
-        with sqlite3.connect(self.db_path) as connection:
+        with contextlib.closing(sqlite3.connect(self.db_path)) as connection:
             connection.execute(f"DROP INDEX IF EXISTS {name}")
+            connection.commit()
 
     def _doctor_policy(self, require_confirmation: bool = False) -> Path:
         policy = {
@@ -193,11 +195,12 @@ class MemoryDoctorCliTest(unittest.TestCase):
                 policy_hash=policy_hash,
             )
         cutoff = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
-        with sqlite3.connect(self.db_path) as connection:
+        with contextlib.closing(sqlite3.connect(self.db_path)) as connection:
             connection.execute(
                 "UPDATE memory_items SET updated_at = ? WHERE is_tombstoned = 1",
                 (cutoff,),
             )
+            connection.commit()
 
         policy_path = self._doctor_policy()
         repair = _run_cli(
@@ -221,7 +224,7 @@ class MemoryDoctorCliTest(unittest.TestCase):
             cwd=self.repo_root,
         )
         self.assertEqual(repair.returncode, 0, repair.stderr)
-        with sqlite3.connect(self.db_path) as connection:
+        with contextlib.closing(sqlite3.connect(self.db_path)) as connection:
             tombstones = connection.execute(
                 "SELECT COUNT(*) FROM memory_items WHERE is_tombstoned = 1"
             ).fetchone()[0]
@@ -250,7 +253,7 @@ class MemoryDoctorCliTest(unittest.TestCase):
             cwd=self.repo_root,
         )
         self.assertEqual(repair.returncode, 2, repair.stderr)
-        with sqlite3.connect(self.db_path) as connection:
+        with contextlib.closing(sqlite3.connect(self.db_path)) as connection:
             row = connection.execute(
                 "SELECT name FROM sqlite_master WHERE type = 'index' AND name = ?",
                 ("idx_memory_items_kind",),

@@ -4,6 +4,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import contextlib
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -35,7 +36,7 @@ class MemoryRetentionCliTest(unittest.TestCase):
         return path
 
     def _latest_event(self, operation: str) -> tuple[str, dict[str, object]]:
-        with sqlite3.connect(self.db_path) as connection:
+        with contextlib.closing(sqlite3.connect(self.db_path)) as connection:
             row = connection.execute(
                 "SELECT id, result_meta_json FROM memory_events "
                 "WHERE operation = ? "
@@ -226,7 +227,7 @@ class MemoryRetentionCliTest(unittest.TestCase):
         )
         self.assertEqual(put_result.returncode, 0, put_result.stderr)
 
-        with sqlite3.connect(self.db_path) as connection:
+        with contextlib.closing(sqlite3.connect(self.db_path)) as connection:
             rows = connection.execute(
                 "SELECT key, is_tombstoned FROM memory_items WHERE namespace = ?",
                 ("global",),
@@ -242,7 +243,7 @@ class MemoryRetentionCliTest(unittest.TestCase):
         self.assertEqual(evictions[0]["key"], "alpha")
         self.assertEqual(evictions[0]["reason"], "max_items")
 
-        with sqlite3.connect(self.db_path) as connection:
+        with contextlib.closing(sqlite3.connect(self.db_path)) as connection:
             row = connection.execute(
                 "SELECT result_meta_json FROM memory_events "
                 "WHERE operation = ? "
@@ -369,7 +370,7 @@ class MemoryRetentionCliTest(unittest.TestCase):
         )
         self.assertNotEqual(put_result.returncode, 0)
 
-        with sqlite3.connect(self.db_path) as connection:
+        with contextlib.closing(sqlite3.connect(self.db_path)) as connection:
             active = connection.execute(
                 "SELECT COUNT(*) FROM memory_items WHERE is_tombstoned = 0"
             ).fetchone()[0]
@@ -442,7 +443,7 @@ class MemoryRetentionCliTest(unittest.TestCase):
         self.assertTrue(confirmation["provided"])
         self.assertEqual(confirmation["mode"], "yes-flag")
 
-        with sqlite3.connect(self.db_path) as connection:
+        with contextlib.closing(sqlite3.connect(self.db_path)) as connection:
             row = connection.execute(
                 "SELECT result_meta_json FROM memory_events "
                 "WHERE operation = ? "

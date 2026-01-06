@@ -6,6 +6,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import contextlib
 from pathlib import Path
 
 from gismo.memory.snapshot import canonical_json, canonical_value_json
@@ -387,7 +388,7 @@ class MemorySnapshotCliTest(unittest.TestCase):
             cwd=self.repo_root,
         )
         self.assertNotEqual(import_result.returncode, 0)
-        with sqlite3.connect(fresh_db) as connection:
+        with contextlib.closing(sqlite3.connect(fresh_db)) as connection:
             count = connection.execute(
                 "SELECT COUNT(*) FROM memory_items"
             ).fetchone()[0]
@@ -510,7 +511,7 @@ class MemorySnapshotCliTest(unittest.TestCase):
             cwd=self.repo_root,
         )
         self.assertEqual(dry_run.returncode, 0, dry_run.stderr)
-        with sqlite3.connect(dry_run_db) as connection:
+        with contextlib.closing(sqlite3.connect(dry_run_db)) as connection:
             memory_event_count = connection.execute(
                 "SELECT COUNT(*) FROM memory_events"
             ).fetchone()[0]

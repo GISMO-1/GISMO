@@ -210,6 +210,7 @@ def run_agent_session_resume(args: argparse.Namespace, deps: AgentSessionDepende
         explain=False,
         debug=False,
         actor="agent_session",
+        non_interactive=args.non_interactive,
         memory_injection=memory_injection,
         role_context=role_context,
         policy_path=args.policy,

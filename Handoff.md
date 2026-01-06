@@ -156,14 +156,14 @@ INTENTIONAL LIMITATIONS (NOT BUGS)
 
 RECENT NOTABLE CHANGE (LATEST WORK)
 
-Memory profile policy separation:
-- Added an operator policy for memory profile lifecycle (memory.profile.create/retire).
-- Kept dev-safe/readonly policies readonly for profile governance.
-- Updated docs and tests to reflect profile lifecycle gating and preview usage.
+Ask planner inquire enforcement + risk alignment:
+- Enforced read-only normalization for intent=inquire and added safe echo fallback behavior.
+- Normalized per-action risk to align with plan-level risk flags on writes.
+- Updated prompts/docs/tests to reflect read-only inquiry defaults and failure modes.
 
 Next steps:
-- Validate operator profile workflows against real Windows operator runs.
-- Consider shipping default profile templates once governance workflows stabilize.
+- Validate inquire behavior against operator workflows and policy combinations.
+- Expand operator guidance for inquiry vs write intent if support tickets show confusion.
 
 Tests run:
 - python scripts/verify.py

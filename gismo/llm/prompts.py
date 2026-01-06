@@ -16,6 +16,7 @@ def build_system_prompt(
             "- enqueue-only (never execute directly)",
             f"- max_actions: {max_actions}",
             "- prefer readonly tools when possible",
+            "- if intent is inquire, do not propose writes; answer with echo or other read-only tools",
         ]
     )
     return (

@@ -26,14 +26,12 @@ Core ethos:
 
 CURRENT SYSTEM STATUS
 
-Overall: Stable foundation complete, local planner complete, guardrails in progress.
+Overall: Stable foundation complete, local planner complete, Phase 2 guardrails implemented.
 
 Completed:
 - Phase 0 (Foundation): DONE
 - Phase 1 (Local LLM Planner): DONE
-
-In progress:
-- Phase 2 (Control & Guardrails): ~75%
+- Phase 2 (Control & Guardrails): DONE
 
 Planned:
 - Phase 4 (Interactive GISMO)
@@ -157,14 +155,12 @@ INTENTIONAL LIMITATIONS (NOT BUGS)
 
 RECENT NOTABLE CHANGE (LATEST WORK)
 
-SQLite handle hygiene (Windows reliability):
-- Removed destructor-based cleanup from StateStore/MemoryStore in favor of explicit close semantics.
-- Updated tests to ensure sqlite3 connections are deterministically released.
-- Added a Windows-only regression test to confirm snapshot CLI releases DB handles immediately after CLI operations.
-
-Rationale:
-- On Windows, open SQLite handles can prevent file cleanup and break TemporaryDirectory-based tests.
-- We treat this as a correctness issue, not a platform quirk.
+Phase 2 close-out (risk + confirmations + explain artifacts + policy-aware prompt):
+- Added deterministic risk classification (LOW/MEDIUM/HIGH) with stable flags/rationale.
+- Centralized confirmation gating for ask/agent/agent-session plans.
+- Explain artifacts are first-class and recorded in audit events (JSON, stable ordering).
+- Planner prompt now includes policy summaries (allowed tools, shell allowlist, write permissions).
+- Updated docs and tests to reflect Windows-first, audit-only dry runs.
 
 Tests run:
 - python scripts/verify.py
@@ -202,15 +198,15 @@ OPERATING RULES (ENFORCE THESE)
 DEFINITION OF DONE (PHASE 2)
 
 Phase 2 is complete when:
-- Planner confidence scoring exists (low/medium/high) and is consistent
-- User confirmation gates exist for higher-risk plans and are audited
+- Deterministic plan risk classification exists (LOW/MEDIUM/HIGH) and is consistent
+- Centralized confirmation gates exist for higher-risk plans and are audited
 - Planner prompts are policy-aware (the LLM is explicitly told constraints)
-- Explain-before-execute mode exists (human-legible summary)
+- Explain-before-execute mode exists (human-legible summary + JSON artifact)
 - LLM runtime behavior is stable (predictable timeouts, no hangs)
 - No regressions in queue/daemon/policy
-- pytest passes on Windows reliably
+- Tests pass on Windows reliably
 
-Only after Phase 2 is “boringly reliable” do we move deeper into Phase 3 memory expansion.
+Phase 2 is complete. Proceed to Phase 3 only after operator feedback validates the guardrails.
 
 -------------------------------------------------------------------------------
 
@@ -219,23 +215,16 @@ NEXT ENGINEERING TARGET (RECOMMENDED)
 Do not add “new features” yet.
 
 Priority sequence:
-1) Stabilize planner runtime:
-   - Make timeouts predictable
-   - Cap token/context behavior
-   - Lock in a default fast model profile (phi3:mini or equivalent)
+1) Collect operator feedback on Phase 2 guardrails:
+   - Validate risk classification thresholds on real workloads
+   - Confirm confirmation prompts are clear and actionable
 
-2) Strengthen one confidence + confirmation gate path:
-   - Simple, auditable, CLI-controlled
-   - Default safe behavior
-   - Minimal flags; clear errors
+2) Harden Windows-first behavior at scale:
+   - Stress test queue/daemon with longer runs
+   - Monitor SQLite handle hygiene during heavy audit logging
 
-3) Policy-aware prompts:
-   - Planner should be told what tools/ops are allowed
-   - Reduce invalid plans upstream
-
-4) Explain-before-execute mode:
-   - Summary of plan intent and risk
-   - Operator can approve/deny
+3) Plan Phase 3 memory expansion (scoped, policy-first):
+   - Keep changes minimal and auditable
 
 -------------------------------------------------------------------------------
 

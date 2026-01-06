@@ -159,10 +159,19 @@ Planner rules:
 - Uses Ollama JSON mode with keep_alive to reduce reload latency
 - Policy is still enforced at execution time
 - Planner cannot execute directly
-- Confidence assessment and risk flags are printed with every plan
-- Higher-risk plans require confirmation before enqueueing unless --yes is used
-- Use --explain to print expanded assessment details
+- Deterministic risk assessment (LOW/MEDIUM/HIGH), flags, and rationale printed with every plan
+- MEDIUM/HIGH risk plans require confirmation before enqueueing unless --yes is used
+- Non-interactive mode fails closed if confirmation would be required
+- Dry-run prints explain output and records audit events only (no state writes beyond audit)
+- Use --explain to print expanded explain details
+- Use --json to emit a stable JSON explain artifact
+- Planner prompts are policy-aware (allowed tools, shell allowlist summary, write permissions)
 - Use --debug to print tracebacks for ask failures
+
+Risk levels:
+- LOW: read-only inspection (echo/list/show/diff/export/explain)
+- MEDIUM: more than 3 actions, memory modifications, or supervisor lifecycle commands
+- HIGH: shell usage or write/modify tools (including dangerous tool categories)
 
 Planner configuration:
 - Increase --timeout-s on CPU machines (60s baseline) if Ollama is slow.

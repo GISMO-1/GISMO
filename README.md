@@ -228,7 +228,7 @@ Session notes:
 
 Agent notes:
 - The agent loop is leashed autonomy: it plans, enqueues, and executes only through the queue/daemon.
-- Confirmation is required for high-risk plans or any shell/write actions unless --yes is provided.
+- Confirmation is required for MEDIUM/HIGH risk plans unless --yes is provided.
 - Memory context and suggestion handling mirror `ask`: suggestions are advisory unless
   --apply-memory-suggestions is set (policy/confirmation-gated; use --non-interactive to fail closed).
 - Agent roles provide sequential, operator-controlled identities; roles determine which memory profile
@@ -258,12 +258,20 @@ Planner behavior:
 - Use --apply-memory-suggestions to write memory items from validated suggestions (policy-gated).
 - Ollama is called in JSON mode and uses keep_alive to avoid repeated model reloads.
 - Full audit trail is recorded for planner outputs and execution.
-- Every plan includes a confidence assessment, risk flags, and a short explanation.
-- Higher-risk plans require confirmation before enqueueing unless --yes is used.
-- --explain prints additional assessment details.
+- Every plan includes a deterministic risk assessment (LOW/MEDIUM/HIGH) with flags and rationale.
+- Risk levels:
+  - LOW: read-only inspection (echo/list/show/diff/export/explain).
+  - MEDIUM: more than 3 actions, memory modifications, or supervisor lifecycle commands.
+  - HIGH: shell usage or write/modify tools (including dangerous tool categories).
+- MEDIUM/HIGH risk plans require confirmation before enqueueing unless --yes is used.
+- Non-interactive mode fails closed if confirmation would be required.
+- Dry-run prints the explain artifact and records audit events only (no state writes beyond audit).
+- --explain prints expanded explain details.
+- --json emits the explain artifact (stable JSON).
 - Use --debug to print tracebacks for ask failures.
 - --memory injects eligible read-only memory context into the planner prompt (bounded, audited).
 - --apply-memory-suggestions writes memory_suggestions after policy + confirmation checks. Use --yes to auto-confirm.
+- Planner prompts are policy-aware (allowed tools, shell allowlist summary, write permissions) but policy is still enforced at runtime.
 
 Planner configuration:
 - Increase --timeout-s on CPU machines (60s baseline) if prompts time out.
@@ -351,11 +359,11 @@ Phase 2 — Control & Guardrails: COMPLETE
 - Enqueue-only execution model
 - Explicit tool allowlists
 - Read-only / dev-safe policy modes
-- Planner confidence scoring (low/medium/high)
-- Risk assessment + user confirmation gates for higher-risk plans
+- Deterministic risk classification (LOW/MEDIUM/HIGH)
+- Centralized confirmation gates for MEDIUM/HIGH risk plans
 - Policy-aware planning prompts
 - Explain-before-enqueue mode
-- Full audit trail for every decision (plan, assessment, receipts, outcomes)
+- Full audit trail for every decision (plan, explain, receipts, outcomes)
 
 Phase 3 — Memory & Context: IN PROGRESS
 - Persistent memory store (SQLite) with namespaces, profiles, and retention

@@ -89,6 +89,8 @@ class AskCliTest(unittest.TestCase):
             assert payload is not None
             self.assertTrue(payload["dry_run"])
             self.assertFalse(payload["enqueue"])
+            self.assertIn("explain", payload)
+            self.assertEqual(payload["explain"]["risk_level"], "LOW")
 
     def test_ask_enqueue_enqueues_items_and_writes_event(self) -> None:
         response = json.dumps(
@@ -209,6 +211,55 @@ class AskCliTest(unittest.TestCase):
             suggestions = plan.get("memory_suggestions")
             self.assertEqual(len(suggestions), 1)
             self.assertEqual(suggestions[0]["key"], "default_model")
+
+    def test_ask_high_risk_requires_confirmation_in_non_interactive(self) -> None:
+        response = json.dumps(
+            {
+                "intent": "risky",
+                "assumptions": [],
+                "actions": [
+                    {
+                        "type": "enqueue",
+                        "command": "shell: echo risky",
+                        "timeout_seconds": 30,
+                        "retries": 0,
+                        "why": "test",
+                        "risk": "high",
+                    }
+                ],
+                "notes": [],
+            }
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = str(Path(tmpdir) / "state.db")
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "GISMO_OLLAMA_MODEL": "",
+                    "GISMO_OLLAMA_TIMEOUT_S": "",
+                    "GISMO_OLLAMA_URL": "",
+                    "GISMO_LLM_MODEL": "",
+                    "OLLAMA_HOST": "",
+                },
+                clear=False,
+            ):
+                with mock.patch.object(cli_main, "ollama_chat", return_value=response):
+                    with mock.patch.object(cli_main, "_is_interactive_tty", return_value=False):
+                        with self.assertRaises(SystemExit) as exc:
+                            cli_main.run_ask(
+                                db_path,
+                                "do risky thing",
+                                model=None,
+                                host=None,
+                                timeout_s=None,
+                                enqueue=True,
+                                dry_run=False,
+                                max_actions=10,
+                                yes=False,
+                                explain=False,
+                                non_interactive=True,
+                            )
+            self.assertEqual(exc.exception.code, 2)
 
     def test_ask_uses_memory_profile_filters_and_records_audit(self) -> None:
         response = json.dumps(

@@ -1,20 +1,40 @@
 import unittest
 
-from gismo.core.plan_assess import assess_plan
+from gismo.core.risk import classify_plan_risk
 
 
-class PlanAssessTest(unittest.TestCase):
-    def test_shell_action_sets_flag_and_lowers_confidence(self) -> None:
+class PlanRiskTest(unittest.TestCase):
+    def test_shell_action_sets_high_risk(self) -> None:
         actions = [{"type": "enqueue", "command": "shell: dir"}]
-        assessment = assess_plan(actions)
-        self.assertIn("shell", assessment.risk_flags)
-        self.assertNotEqual(assessment.confidence, "high")
+        risk = classify_plan_risk(actions)
+        self.assertEqual(risk.risk_level, "HIGH")
+        self.assertIn("shell", risk.risk_flags)
 
-    def test_destructive_token_requires_confirmation(self) -> None:
-        actions = [{"type": "enqueue", "command": "shell: rm -rf /"}]
-        assessment = assess_plan(actions)
-        self.assertEqual(assessment.confidence, "low")
-        self.assertTrue(assessment.requires_confirmation)
+    def test_write_action_sets_high_risk(self) -> None:
+        actions = [{"type": "enqueue", "command": "note: record"}]
+        risk = classify_plan_risk(actions)
+        self.assertEqual(risk.risk_level, "HIGH")
+        self.assertIn("writes", risk.risk_flags)
+
+    def test_many_actions_is_medium(self) -> None:
+        actions = [
+            {"type": "enqueue", "command": "echo: one"},
+            {"type": "enqueue", "command": "echo: two"},
+            {"type": "enqueue", "command": "echo: three"},
+            {"type": "enqueue", "command": "echo: four"},
+        ]
+        risk = classify_plan_risk(actions)
+        self.assertEqual(risk.risk_level, "MEDIUM")
+        self.assertIn("many_actions", risk.risk_flags)
+
+    def test_memory_modify_is_medium(self) -> None:
+        actions = [
+            {"type": "enqueue", "command": "gismo memory put --namespace global --key k"}
+        ]
+        risk = classify_plan_risk(actions)
+        self.assertEqual(risk.risk_level, "MEDIUM")
+        self.assertIn("memory_modify", risk.risk_flags)
+        self.assertNotIn("writes", risk.risk_flags)
 
 
 if __name__ == "__main__":

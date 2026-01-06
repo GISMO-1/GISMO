@@ -73,6 +73,7 @@ def test_run_show_outputs_summary(repo_root: Path, db_path: Path) -> None:
     assert "=== GISMO Run Summary ===" in stdout
     assert f"Run ID:     {run.id}" in stdout
     assert "Status:     failed" in stdout
+    assert "Tool Calls: 0" in stdout
     assert task_ok.id in stdout
     assert task_fail.id in stdout
     assert "tool=echo" in stdout

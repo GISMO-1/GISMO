@@ -44,6 +44,7 @@ from gismo.core.permissions import PermissionPolicy, load_policy
 from gismo.core.plan_assess import PlanAssessment, assess_plan, expanded_explanation
 from gismo.core.state import StateStore
 from gismo.core.tools import EchoTool, ToolRegistry, WriteNoteTool
+from gismo.core.tool_receipts import ToolReceiptReplayReport, replay_tool_receipts
 from gismo.core.toolpacks.fs_tools import FileSystemConfig, ListDirTool, ReadFileTool, WriteFileTool
 from gismo.core.toolpacks.shell_tool import ShellConfig, ShellTool
 from gismo.llm.ollama import OllamaError, ollama_chat, resolve_ollama_config
@@ -749,6 +750,38 @@ def _task_status_counts(tasks: list) -> dict[str, int]:
     return counts
 
 
+def _tool_receipt_summary(receipts: list) -> dict[str, object]:
+    counts = {"total": len(receipts), "success": 0, "error": 0}
+    if not receipts:
+        return {
+            "counts": counts,
+            "first_started_at": None,
+            "last_finished_at": None,
+            "top_tools": [],
+        }
+    tool_counts: dict[str, int] = {}
+    started_times = []
+    finished_times = []
+    for receipt in receipts:
+        if receipt.status.value == "success":
+            counts["success"] += 1
+        else:
+            counts["error"] += 1
+        tool_counts[receipt.tool_name] = tool_counts.get(receipt.tool_name, 0) + 1
+        started_times.append(receipt.started_at)
+        finished_times.append(receipt.finished_at)
+    top_tools = sorted(
+        tool_counts.items(),
+        key=lambda item: (-item[1], item[0]),
+    )[:3]
+    return {
+        "counts": counts,
+        "first_started_at": min(started_times).isoformat() if started_times else None,
+        "last_finished_at": max(finished_times).isoformat() if finished_times else None,
+        "top_tools": [{"tool_name": name, "count": count} for name, count in top_tools],
+    }
+
+
 def _run_last_error(tasks: list, tool_calls: list) -> str | None:
     entries: list[tuple[datetime, str]] = []
     min_dt = datetime.min.replace(tzinfo=timezone.utc)
@@ -985,6 +1018,7 @@ def _serialize_run_show_payload(
     counts: dict[str, int],
     tasks: list,
     tool_calls: list,
+    tool_receipts: list,
     memory_provenance: object,
 ) -> dict[str, object]:
     task_payloads = []
@@ -1023,6 +1057,7 @@ def _serialize_run_show_payload(
     if isinstance(run.metadata_json, dict):
         agent_role = run.metadata_json.get("agent_role")
         agent_session = run.metadata_json.get("agent_session")
+    tool_receipt_summary = _tool_receipt_summary(tool_receipts)
     return {
         "run": {
             "id": run.id,
@@ -1035,6 +1070,7 @@ def _serialize_run_show_payload(
         "task_counts": counts,
         "tasks": task_payloads,
         "tool_calls": call_payloads,
+        "tool_receipts_summary": tool_receipt_summary,
         "agent_role": agent_role,
         "agent_session": agent_session,
         "memory_provenance": memory_payload,
@@ -1133,9 +1169,11 @@ def run_show(db_path: str, run_id: str, *, json_output: bool = False) -> None:
 
         tasks = list(state_store.list_tasks(run.id))
         tool_calls = list(state_store.list_tool_calls(run.id))
+        tool_receipts = list(state_store.list_tool_receipts(run.id))
         status = _run_status(tasks)
         start_time, end_time = _run_time_bounds(run, tasks, tool_calls)
         counts = _task_status_counts(tasks)
+        receipt_summary = _tool_receipt_summary(tool_receipts)
         memory_provenance = state_store.get_memory_provenance(run.id)
 
         if json_output:
@@ -1147,6 +1185,7 @@ def run_show(db_path: str, run_id: str, *, json_output: bool = False) -> None:
                 counts=counts,
                 tasks=tasks,
                 tool_calls=tool_calls,
+                tool_receipts=tool_receipts,
                 memory_provenance=memory_provenance,
             )
             print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
@@ -1163,6 +1202,20 @@ def run_show(db_path: str, run_id: str, *, json_output: bool = False) -> None:
             f"(pending={counts['pending']} running={counts['running']} "
             f"succeeded={counts['succeeded']} failed={counts['failed']})"
         )
+        receipt_counts = receipt_summary["counts"]
+        top_tools = receipt_summary["top_tools"]
+        top_tools_label = ", ".join(
+            f"{entry['tool_name']}({entry['count']})" for entry in top_tools
+        )
+        print(
+            "Tool Calls: "
+            f"{receipt_counts['total']} "
+            f"(success={receipt_counts['success']} error={receipt_counts['error']}) "
+            f"first={receipt_summary['first_started_at'] or '-'} "
+            f"last={receipt_summary['last_finished_at'] or '-'}"
+        )
+        if top_tools_label:
+            print(f"Top Tools:  {top_tools_label}")
         agent_role = None
         agent_session = None
         if isinstance(run.metadata_json, dict):
@@ -1254,6 +1307,162 @@ def run_list(db_path: str, limit: int, newest_first: bool) -> None:
     finally:
         state_store.close()
 
+
+def _serialize_tool_receipt(receipt) -> dict[str, object]:
+    return {
+        "id": receipt.id,
+        "run_id": receipt.run_id,
+        "session_id": receipt.session_id,
+        "role_id": receipt.role_id,
+        "role_name": receipt.role_name,
+        "plan_event_id": receipt.plan_event_id,
+        "tool_name": receipt.tool_name,
+        "tool_kind": receipt.tool_kind,
+        "request_payload_json": receipt.request_payload_json,
+        "response_payload_json": receipt.response_payload_json,
+        "status": receipt.status.value,
+        "started_at": receipt.started_at.isoformat(),
+        "finished_at": receipt.finished_at.isoformat(),
+        "duration_ms": receipt.duration_ms,
+        "request_sha256": receipt.request_sha256,
+        "response_sha256": receipt.response_sha256,
+        "error_type": receipt.error_type,
+        "error_message": receipt.error_message,
+        "policy_decision_id": receipt.policy_decision_id,
+        "policy_snapshot": receipt.policy_snapshot,
+    }
+
+
+def _serialize_replay_report(report: ToolReceiptReplayReport) -> dict[str, object]:
+    return {
+        "run_id": report.run_id,
+        "export_count": report.export_count,
+        "db_count": report.db_count,
+        "missing_in_export": report.missing_in_export,
+        "missing_in_db": report.missing_in_db,
+        "hash_mismatches": report.hash_mismatches,
+        "ordering_matches": report.ordering_matches,
+    }
+
+
+def run_tools_receipts_list(db_path: str, run_id: str, *, json_output: bool) -> None:
+    state_store = StateStore(db_path)
+    try:
+        receipts = list(state_store.list_tool_receipts(run_id))
+        if json_output:
+            payload = [_serialize_tool_receipt(receipt) for receipt in receipts]
+            print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+            return
+        print(f"Run: {run_id}")
+        print(f"Tool receipts: {len(receipts)}")
+        if not receipts:
+            return
+        header = (
+            f"{'RECEIPT ID':8}  {'TOOL':16}  {'STATUS':7}  {'STARTED':20}  "
+            f"{'DURATION_MS':11}  {'ERROR':40}"
+        )
+        print(header)
+        print("-" * len(header))
+        for receipt in receipts:
+            error_summary = _summarize_value(receipt.error_message, 40)
+            print(
+                f"{receipt.id[:8]:8}  {receipt.tool_name:16}  {receipt.status.value:7}  "
+                f"{_fmt_dt(receipt.started_at):20}  {receipt.duration_ms:11}  {error_summary:40}"
+            )
+    finally:
+        state_store.close()
+
+
+def run_tools_receipts_show(db_path: str, receipt_id: str, *, json_output: bool) -> None:
+    state_store = StateStore(db_path)
+    try:
+        receipt = state_store.get_tool_receipt(receipt_id)
+        if receipt is None:
+            print(f"Tool receipt not found: {receipt_id}")
+            raise SystemExit(2)
+        if json_output:
+            payload = _serialize_tool_receipt(receipt)
+            print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+            return
+        print("=== GISMO Tool Receipt ===")
+        print(f"Receipt ID: {receipt.id}")
+        print(f"Run ID:     {receipt.run_id}")
+        print(f"Tool:       {receipt.tool_name} ({receipt.tool_kind})")
+        print(f"Status:     {receipt.status.value}")
+        print(f"Started:    {_fmt_dt(receipt.started_at)}")
+        print(f"Finished:   {_fmt_dt(receipt.finished_at)}")
+        print(f"Duration:   {receipt.duration_ms}ms")
+        if receipt.session_id:
+            print(f"Session:    {receipt.session_id}")
+        if receipt.role_name or receipt.role_id:
+            print(f"Role:       {receipt.role_name or '-'} ({receipt.role_id or '-'})")
+        if receipt.plan_event_id:
+            print(f"Plan Event: {receipt.plan_event_id}")
+        print(f"Request:    {_summarize_value(receipt.request_payload_json, 200)}")
+        print(f"Response:   {_summarize_value(receipt.response_payload_json, 200)}")
+        print(f"Req Hash:   {receipt.request_sha256}")
+        print(f"Resp Hash:  {receipt.response_sha256}")
+        if receipt.error_type or receipt.error_message:
+            print(f"Error Type: {receipt.error_type or '-'}")
+            print(f"Error Msg:  {_summarize_value(receipt.error_message, 200)}")
+        if receipt.policy_snapshot:
+            print(f"Policy:     {_summarize_value(receipt.policy_snapshot, 200)}")
+    finally:
+        state_store.close()
+
+
+def run_tools_replay(
+    db_path: str,
+    *,
+    run_id: str,
+    export_path: str,
+    json_output: bool,
+) -> None:
+    state_store = StateStore(db_path)
+    try:
+        report = replay_tool_receipts(state_store, run_id=run_id, export_path=export_path)
+    except ValueError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        raise SystemExit(3)
+    finally:
+        state_store.close()
+
+    exit_code = 0
+    if report.missing_in_export or report.missing_in_db or report.hash_mismatches:
+        exit_code = 2
+    if not report.ordering_matches and report.export_count and report.db_count:
+        exit_code = 2
+
+    if json_output:
+        payload = _serialize_replay_report(report)
+        payload["exit_code"] = exit_code
+        print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+        raise SystemExit(exit_code)
+
+    print("=== GISMO Tool Receipt Replay ===")
+    print(f"Run ID:             {report.run_id}")
+    print(f"Receipts (export):  {report.export_count}")
+    print(f"Receipts (db):      {report.db_count}")
+    print(f"Ordering matches:   {report.ordering_matches}")
+    print(f"Missing in export:  {len(report.missing_in_export)}")
+    if report.missing_in_export:
+        for receipt_id in report.missing_in_export[:5]:
+            print(f"  - {receipt_id}")
+        if len(report.missing_in_export) > 5:
+            print(f"  +{len(report.missing_in_export) - 5} more")
+    print(f"Missing in db:      {len(report.missing_in_db)}")
+    if report.missing_in_db:
+        for receipt_id in report.missing_in_db[:5]:
+            print(f"  - {receipt_id}")
+        if len(report.missing_in_db) > 5:
+            print(f"  +{len(report.missing_in_db) - 5} more")
+    print(f"Hash mismatches:    {len(report.hash_mismatches)}")
+    if report.hash_mismatches:
+        for mismatch in report.hash_mismatches[:5]:
+            print(f"  - {mismatch['id']} field={mismatch['field']}")
+        if len(report.hash_mismatches) > 5:
+            print(f"  +{len(report.hash_mismatches) - 5} more")
+    raise SystemExit(exit_code)
 
 @dataclass
 class MemoryDecision:
@@ -3990,6 +4199,23 @@ def _handle_runs_show(args: argparse.Namespace) -> None:
     run_show(args.db_path, args.run_id, json_output=args.json)
 
 
+def _handle_tools_receipts_list(args: argparse.Namespace) -> None:
+    run_tools_receipts_list(args.db_path, args.run_id, json_output=args.json)
+
+
+def _handle_tools_receipts_show(args: argparse.Namespace) -> None:
+    run_tools_receipts_show(args.db_path, args.receipt_id, json_output=args.json)
+
+
+def _handle_tools_replay(args: argparse.Namespace) -> None:
+    run_tools_replay(
+        args.db_path,
+        run_id=args.run_id,
+        export_path=args.from_export,
+        json_output=args.json,
+    )
+
+
 def _handle_memory_put(args: argparse.Namespace) -> None:
     run_memory_put(args)
 
@@ -4904,6 +5130,85 @@ def build_parser() -> argparse.ArgumentParser:
         help="Redact file contents, shell output, and large tool outputs",
     )
     export_parser.set_defaults(handler=_handle_export)
+
+    tools_parser = subparsers.add_parser(
+        "tools",
+        help="Inspect tool receipts or replay exports",
+        parents=[db_parent_optional],
+    )
+    tools_subparsers = tools_parser.add_subparsers(dest="tools_command", required=True)
+
+    tools_receipts_parser = tools_subparsers.add_parser(
+        "receipts",
+        help="Inspect tool receipts",
+        parents=[db_parent_optional],
+    )
+    tools_receipts_subparsers = tools_receipts_parser.add_subparsers(
+        dest="tools_receipts_command",
+        required=True,
+    )
+    tools_receipts_list_parser = tools_receipts_subparsers.add_parser(
+        "list",
+        help="List tool receipts for a run",
+        parents=[db_parent_optional],
+    )
+    tools_receipts_list_parser.add_argument(
+        "--run",
+        dest="run_id",
+        required=True,
+        help="Run ID to list receipts for",
+    )
+    tools_receipts_list_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit JSON output",
+    )
+    tools_receipts_list_parser.set_defaults(handler=_handle_tools_receipts_list)
+
+    tools_receipts_show_parser = tools_receipts_subparsers.add_parser(
+        "show",
+        help="Show a single tool receipt",
+        parents=[db_parent_optional],
+    )
+    tools_receipts_show_parser.add_argument(
+        "receipt_id",
+        help="Tool receipt ID",
+    )
+    tools_receipts_show_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit JSON output",
+    )
+    tools_receipts_show_parser.set_defaults(handler=_handle_tools_receipts_show)
+
+    tools_replay_parser = tools_subparsers.add_parser(
+        "replay",
+        help="Validate tool receipts against a JSONL export",
+        parents=[db_parent_optional],
+    )
+    tools_replay_parser.add_argument(
+        "--run",
+        dest="run_id",
+        required=True,
+        help="Run ID to validate",
+    )
+    tools_replay_parser.add_argument(
+        "--from-export",
+        dest="from_export",
+        required=True,
+        help="JSONL export path containing tool_receipt records",
+    )
+    tools_replay_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Validate without executing tool calls (default)",
+    )
+    tools_replay_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit JSON output",
+    )
+    tools_replay_parser.set_defaults(handler=_handle_tools_replay)
 
     memory_parser = subparsers.add_parser(
         "memory",

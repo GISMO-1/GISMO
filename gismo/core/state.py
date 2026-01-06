@@ -11,6 +11,8 @@ from typing import Any, Dict, Iterable, Optional
 from uuid import uuid4
 
 from gismo.core.models import (
+    AgentSession,
+    AgentSessionStatus,
     AgentRole,
     DaemonHeartbeat,
     Event,
@@ -141,6 +143,26 @@ class StateStore:
                     memory_profile_id TEXT NULL,
                     created_at TEXT NOT NULL,
                     retired_at TEXT NULL
+                )
+                """
+            )
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS agent_sessions (
+                    session_id TEXT PRIMARY KEY,
+                    role_id TEXT NULL,
+                    role_name TEXT NULL,
+                    profile_id TEXT NULL,
+                    profile_name TEXT NULL,
+                    goal TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    last_plan_event_id TEXT NULL,
+                    last_run_id TEXT NULL,
+                    step_count INTEGER NOT NULL DEFAULT 0,
+                    max_steps INTEGER NOT NULL DEFAULT 12,
+                    notes TEXT NULL
                 )
                 """
             )
@@ -483,6 +505,16 @@ class StateStore:
             ).fetchall()
         return [self._row_to_event(row) for row in rows]
 
+    def list_events_by_type(self, event_type: str) -> list[Event]:
+        if not event_type:
+            return []
+        with self._connection() as connection:
+            rows = connection.execute(
+                "SELECT * FROM events WHERE event_type = ? ORDER BY ts ASC, id ASC",
+                (event_type,),
+            ).fetchall()
+        return [self._row_to_event(row) for row in rows]
+
     def get_event(self, event_id: str) -> Optional[Event]:
         with self._connection() as connection:
             row = connection.execute(
@@ -626,6 +658,59 @@ class StateStore:
             raise ValueError(f"Agent role already exists: {name}") from exc
         return role
 
+    def create_agent_session(
+        self,
+        *,
+        goal: str,
+        role_id: Optional[str],
+        role_name: Optional[str],
+        profile_id: Optional[str],
+        profile_name: Optional[str],
+        max_steps: int = 12,
+        notes: Optional[str] = None,
+    ) -> AgentSession:
+        if not goal or not goal.strip():
+            raise ValueError("Session goal must be a non-empty string")
+        if max_steps <= 0:
+            raise ValueError("max_steps must be > 0")
+        session = AgentSession(
+            goal=goal.strip(),
+            role_id=role_id,
+            role_name=role_name,
+            profile_id=profile_id,
+            profile_name=profile_name,
+            max_steps=max_steps,
+            notes=notes,
+        )
+        with self._connection() as connection:
+            connection.execute(
+                """
+                INSERT INTO agent_sessions (
+                    session_id, role_id, role_name, profile_id, profile_name,
+                    goal, status, created_at, updated_at,
+                    last_plan_event_id, last_run_id, step_count, max_steps, notes
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    session.session_id,
+                    session.role_id,
+                    session.role_name,
+                    session.profile_id,
+                    session.profile_name,
+                    session.goal,
+                    session.status.value,
+                    session.created_at.isoformat(),
+                    session.updated_at.isoformat(),
+                    session.last_plan_event_id,
+                    session.last_run_id,
+                    session.step_count,
+                    session.max_steps,
+                    session.notes,
+                ),
+            )
+            connection.commit()
+        return session
+
     def list_agent_roles(self, *, include_retired: bool = True) -> list[AgentRole]:
         sql = "SELECT * FROM agent_roles"
         params: tuple[object, ...] = ()
@@ -635,6 +720,13 @@ class StateStore:
         with self._connection() as connection:
             rows = connection.execute(sql, params).fetchall()
         return [self._row_to_agent_role(row) for row in rows]
+
+    def list_agent_sessions(self) -> list[AgentSession]:
+        with self._connection() as connection:
+            rows = connection.execute(
+                "SELECT * FROM agent_sessions ORDER BY created_at ASC, session_id ASC"
+            ).fetchall()
+        return [self._row_to_agent_session(row) for row in rows]
 
     def get_agent_role_by_selector(self, selector: str) -> Optional[AgentRole]:
         if not selector:
@@ -647,6 +739,65 @@ class StateStore:
         if row is None:
             return None
         return self._row_to_agent_role(row)
+
+    def get_agent_session(self, session_id: str) -> Optional[AgentSession]:
+        if not session_id:
+            return None
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM agent_sessions WHERE session_id = ?",
+                (session_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return self._row_to_agent_session(row)
+
+    def update_agent_session(self, session: AgentSession) -> AgentSession:
+        updated = AgentSession(
+            session_id=session.session_id,
+            goal=session.goal,
+            role_id=session.role_id,
+            role_name=session.role_name,
+            profile_id=session.profile_id,
+            profile_name=session.profile_name,
+            status=session.status,
+            created_at=session.created_at,
+            updated_at=_utc_now(),
+            last_plan_event_id=session.last_plan_event_id,
+            last_run_id=session.last_run_id,
+            step_count=session.step_count,
+            max_steps=session.max_steps,
+            notes=session.notes,
+        )
+        with self._connection() as connection:
+            connection.execute(
+                """
+                UPDATE agent_sessions
+                SET role_id = ?, role_name = ?, profile_id = ?, profile_name = ?,
+                    goal = ?, status = ?, created_at = ?, updated_at = ?,
+                    last_plan_event_id = ?, last_run_id = ?, step_count = ?,
+                    max_steps = ?, notes = ?
+                WHERE session_id = ?
+                """,
+                (
+                    updated.role_id,
+                    updated.role_name,
+                    updated.profile_id,
+                    updated.profile_name,
+                    updated.goal,
+                    updated.status.value,
+                    updated.created_at.isoformat(),
+                    updated.updated_at.isoformat(),
+                    updated.last_plan_event_id,
+                    updated.last_run_id,
+                    updated.step_count,
+                    updated.max_steps,
+                    updated.notes,
+                    updated.session_id,
+                ),
+            )
+            connection.commit()
+        return updated
 
     def retire_agent_role(self, *, role_id: str) -> tuple[AgentRole, bool]:
         if not role_id:
@@ -1516,6 +1667,24 @@ class StateStore:
             memory_profile_id=row["memory_profile_id"],
             created_at=_parse_dt(row["created_at"]),
             retired_at=_parse_dt(row["retired_at"]) if row["retired_at"] else None,
+        )
+
+    def _row_to_agent_session(self, row: sqlite3.Row) -> AgentSession:
+        return AgentSession(
+            session_id=row["session_id"],
+            role_id=row["role_id"],
+            role_name=row["role_name"],
+            profile_id=row["profile_id"],
+            profile_name=row["profile_name"],
+            goal=row["goal"],
+            status=AgentSessionStatus(row["status"]),
+            created_at=_parse_dt(row["created_at"]),
+            updated_at=_parse_dt(row["updated_at"]),
+            last_plan_event_id=row["last_plan_event_id"],
+            last_run_id=row["last_run_id"],
+            step_count=int(row["step_count"]),
+            max_steps=int(row["max_steps"]),
+            notes=row["notes"],
         )
 
     def _row_to_run(self, row: sqlite3.Row) -> Run:

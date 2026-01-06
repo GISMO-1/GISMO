@@ -190,6 +190,23 @@ class DbHandleGuardrailsTest(unittest.TestCase):
                 gc.collect()
                 self._assert_db_deletable(db_path)
 
+    def test_agent_session_list_releases_db_handle(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "state.db"
+            with warnings.catch_warnings():
+                warnings.simplefilter("error", ResourceWarning)
+                self._run_cli(
+                    [
+                        "agent",
+                        "session",
+                        "list",
+                        "--db",
+                        str(db_path),
+                    ]
+                )
+                gc.collect()
+                self._assert_db_deletable(db_path)
+
     def test_ask_apply_memory_suggestions_releases_db_handle(self) -> None:
         response = json.dumps(
             {

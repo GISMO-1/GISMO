@@ -95,6 +95,39 @@ class ExportTest(unittest.TestCase):
             metadata = run_record["metadata"].get("agent_role", {})
             self.assertEqual(metadata.get("role_id"), "role-123")
 
+    def test_export_includes_agent_session_record(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = str(Path(tmpdir) / "state.db")
+            state_store = StateStore(db_path)
+            session = state_store.create_agent_session(
+                goal="export session",
+                role_id=None,
+                role_name=None,
+                profile_id=None,
+                profile_name=None,
+                max_steps=5,
+                notes=None,
+            )
+            run = state_store.create_run(
+                label="session-export",
+                metadata={
+                    "agent_session": {
+                        "session_id": session.session_id,
+                        "step_count": 1,
+                        "max_steps": 5,
+                    }
+                },
+            )
+            output_path = export_run_jsonl(state_store, run.id, base_dir=Path(tmpdir))
+            records = [
+                json.loads(line)
+                for line in output_path.read_text(encoding="utf-8").strip().splitlines()
+            ]
+            session_record = next(
+                record for record in records if record["record_type"] == "agent_session"
+            )
+            self.assertEqual(session_record["session_id"], session.session_id)
+
     def test_export_redact_fields(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = str(Path(tmpdir) / "state.db")

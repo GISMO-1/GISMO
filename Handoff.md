@@ -172,12 +172,12 @@ Plan assessment gate:
 LATEST UPDATE (OPERATOR NOTES)
 
 Status:
-- Added agent roles with policy/confirmation-gated lifecycle and role-based memory profile selection.
-- Run/show/export/memory explain now surface role context for audit.
+- Added supervised agent sessions for checkpoint/resume workflows with strict safety gates.
+- Run/show/export/memory explain now surface session linkage alongside role context.
 
 Next steps:
-- Decide whether to ship default policy entries for agent role create/retire actions.
-- Gather operator feedback on role-based memory visibility workflows (planner vs executor).
+- Extend session metrics (elapsed time per step) once operators validate workflow.
+- Review default policies for session resume use in readonly contexts.
 
 Tests run:
 - python scripts/verify.py

@@ -106,6 +106,41 @@ def test_run_show_includes_agent_role_context(repo_root: Path, db_path: Path) ->
     assert payload["agent_role"]["role_id"] == "role-123"
 
 
+def test_run_show_includes_agent_session_context(repo_root: Path, db_path: Path) -> None:
+    state_store = StateStore(str(db_path))
+    session = state_store.create_agent_session(
+        goal="session goal",
+        role_id=None,
+        role_name=None,
+        profile_id=None,
+        profile_name=None,
+        max_steps=4,
+        notes=None,
+    )
+    run = state_store.create_run(
+        label="session-run",
+        metadata={
+            "agent_session": {
+                "session_id": session.session_id,
+                "step_count": 1,
+                "max_steps": 4,
+            }
+        },
+    )
+    state_store.close()
+
+    proc = _run_cli(["run", "--db", str(db_path), "show", run.id], cwd=repo_root)
+    assert proc.returncode == 0, proc.stderr
+    stdout = proc.stdout
+    assert "Session:" in stdout
+    assert session.session_id in stdout
+
+    proc_json = _run_cli(["runs", "--db", str(db_path), "show", "--json", run.id], cwd=repo_root)
+    assert proc_json.returncode == 0, proc_json.stderr
+    payload = json.loads(proc_json.stdout)
+    assert payload["agent_session"]["session_id"] == session.session_id
+
+
 def test_run_show_includes_memory_provenance(repo_root: Path, db_path: Path) -> None:
     state_store = StateStore(str(db_path))
     plan_event_id = str(uuid4())

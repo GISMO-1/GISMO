@@ -42,6 +42,14 @@ class QueueStatus(str, Enum):
     CANCELLED = "CANCELLED"
 
 
+class AgentSessionStatus(str, Enum):
+    ACTIVE = "ACTIVE"
+    PAUSED = "PAUSED"
+    COMPLETED = "COMPLETED"
+    FAILED = "FAILED"
+    CANCELED = "CANCELED"
+
+
 EVENT_TYPE_LLM_PLAN = "llm_plan"
 EVENT_TYPE_ASK_FAILED = "ask_failed"
 
@@ -62,6 +70,24 @@ class AgentRole:
     role_id: str = field(default_factory=lambda: str(uuid4()))
     created_at: datetime = field(default_factory=_utc_now)
     retired_at: Optional[datetime] = None
+
+
+@dataclass
+class AgentSession:
+    goal: str
+    session_id: str = field(default_factory=lambda: str(uuid4()))
+    role_id: Optional[str] = None
+    role_name: Optional[str] = None
+    profile_id: Optional[str] = None
+    profile_name: Optional[str] = None
+    status: AgentSessionStatus = AgentSessionStatus.ACTIVE
+    created_at: datetime = field(default_factory=_utc_now)
+    updated_at: datetime = field(default_factory=_utc_now)
+    last_plan_event_id: Optional[str] = None
+    last_run_id: Optional[str] = None
+    step_count: int = 0
+    max_steps: int = 12
+    notes: Optional[str] = None
 
 
 @dataclass

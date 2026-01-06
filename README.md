@@ -201,6 +201,20 @@ Agent loop (leashed autonomy):
     --policy policy/dev-safe.json --yes
   gismo agent role retire planner --policy policy/dev-safe.json --yes
 
+Agent sessions (operator-controlled checkpointing, no background autonomy):
+
+  gismo agent session start --goal "Prepare incident summary" --role planner
+  gismo agent session list
+  gismo agent session show SESSION_ID --json
+  gismo agent session resume SESSION_ID --yes
+  gismo agent session pause SESSION_ID --yes
+  gismo agent session resume SESSION_ID --dry-run
+  gismo agent session cancel SESSION_ID --yes
+
+Session notes:
+- Each resume runs a single bounded iteration (no daemons, no timers, no parallelism).
+- Confirmation gates and policy checks still apply; non-interactive mode fails closed.
+
 Agent notes:
 - The agent loop is leashed autonomy: it plans, enqueues, and executes only through the queue/daemon.
 - Confirmation is required for high-risk plans or any shell/write actions unless --yes is provided.

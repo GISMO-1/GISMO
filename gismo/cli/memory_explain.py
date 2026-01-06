@@ -25,6 +25,7 @@ def run_memory_explain(args: argparse.Namespace) -> None:
         raise SystemExit(2)
     state_store = StateStore(args.db_path)
     role_context = None
+    session_context = None
     try:
         if run_id:
             run = state_store.get_run(run_id)
@@ -33,6 +34,7 @@ def run_memory_explain(args: argparse.Namespace) -> None:
                 raise SystemExit(2)
             if isinstance(run.metadata_json, dict):
                 role_context = _extract_role_context(run.metadata_json)
+                session_context = _extract_session_context(run.metadata_json)
         if plan_id:
             event = state_store.get_event(plan_id)
             if event is None:
@@ -40,6 +42,7 @@ def run_memory_explain(args: argparse.Namespace) -> None:
                 raise SystemExit(2)
             if isinstance(event.json_payload, dict):
                 role_context = _extract_role_context(event.json_payload)
+                session_context = _extract_session_context(event.json_payload)
     finally:
         state_store.close()
     traces = list_selection_traces(
@@ -58,6 +61,7 @@ def run_memory_explain(args: argparse.Namespace) -> None:
             included=included,
             excluded=excluded,
             role_context=role_context,
+            session_context=session_context,
         )
         print(json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2))
         return
@@ -67,6 +71,7 @@ def run_memory_explain(args: argparse.Namespace) -> None:
         included=included,
         excluded=excluded,
         role_context=role_context,
+        session_context=session_context,
     )
 
 
@@ -78,6 +83,7 @@ def _build_json_payload(
     included: list[MemorySelectionTrace],
     excluded: list[MemorySelectionTrace],
     role_context: dict[str, object] | None,
+    session_context: dict[str, object] | None,
 ) -> dict[str, object]:
     return {
         "schema_version": 1,
@@ -85,6 +91,7 @@ def _build_json_payload(
         "plan_id": plan_id,
         "limit": limit,
         "agent_role": role_context,
+        "agent_session": session_context,
         "counts": {
             "included": len(included),
             "excluded": len(excluded),
@@ -101,6 +108,7 @@ def _print_human(
     included: list[MemorySelectionTrace],
     excluded: list[MemorySelectionTrace],
     role_context: dict[str, object] | None,
+    session_context: dict[str, object] | None,
 ) -> None:
     title = "Memory selection explain"
     if run_id:
@@ -113,6 +121,12 @@ def _print_human(
         role_id = role_context.get("role_id") or "-"
         profile_id = role_context.get("memory_profile_id") or "-"
         print(f"Role: {role_name} ({role_id}) profile={profile_id}")
+    if session_context:
+        session_id = session_context.get("session_id") or "-"
+        step_count = session_context.get("step_count")
+        max_steps = session_context.get("max_steps")
+        step_label = f"{step_count}/{max_steps}" if step_count is not None else "-"
+        print(f"Session: {session_id} steps={step_label}")
     _print_trace_group("Included", included)
     _print_trace_group("Excluded", excluded)
 
@@ -130,6 +144,22 @@ def _extract_role_context(payload: dict[str, object]) -> dict[str, object] | Non
         "role_id": role_id,
         "role_name": role_name,
         "memory_profile_id": memory_profile_id,
+    }
+
+
+def _extract_session_context(payload: dict[str, object]) -> dict[str, object] | None:
+    session = payload.get("agent_session")
+    if not isinstance(session, dict):
+        return None
+    session_id = session.get("session_id")
+    step_count = session.get("step_count")
+    max_steps = session.get("max_steps")
+    if not session_id and step_count is None and max_steps is None:
+        return None
+    return {
+        "session_id": session_id,
+        "step_count": step_count,
+        "max_steps": max_steps,
     }
 
 

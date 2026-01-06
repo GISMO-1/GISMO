@@ -74,6 +74,13 @@ class CliMainParserTest(unittest.TestCase):
         self.assertIs(args.handler, cli_main._handle_agent)
         self.assertEqual(args.goal, ["do", "thing"])
 
+    def test_agent_session_subcommand_routes(self) -> None:
+        parser = cli_main.build_parser()
+        args = parser.parse_args(["agent-session", "list"])
+
+        self.assertEqual(args.command, "agent-session")
+        self.assertIs(args.handler, cli_main._handle_agent_session_list)
+
     def test_daemon_subcommand_routes_to_daemon(self) -> None:
         parser = cli_main.build_parser()
         args = parser.parse_args(["daemon", "--once"])

@@ -18,6 +18,7 @@ from gismo.cli import memory_doctor as memory_doctor_cli
 from gismo.cli import memory_explain as memory_explain_cli
 from gismo.cli import memory_profile as memory_profile_cli
 from gismo.cli import memory_snapshot as memory_snapshot_cli
+from gismo.cli import agent_role as agent_role_cli
 from gismo.cli.operator import (
     make_idempotency_key,
     normalize_command,
@@ -1016,6 +1017,9 @@ def _serialize_run_show_payload(
             }
         )
     memory_payload = memory_provenance.to_dict()
+    agent_role = None
+    if isinstance(run.metadata_json, dict):
+        agent_role = run.metadata_json.get("agent_role")
     return {
         "run": {
             "id": run.id,
@@ -1028,6 +1032,7 @@ def _serialize_run_show_payload(
         "task_counts": counts,
         "tasks": task_payloads,
         "tool_calls": call_payloads,
+        "agent_role": agent_role,
         "memory_provenance": memory_payload,
     }
 
@@ -1154,6 +1159,14 @@ def run_show(db_path: str, run_id: str, *, json_output: bool = False) -> None:
             f"(pending={counts['pending']} running={counts['running']} "
             f"succeeded={counts['succeeded']} failed={counts['failed']})"
         )
+        agent_role = None
+        if isinstance(run.metadata_json, dict):
+            agent_role = run.metadata_json.get("agent_role")
+        if isinstance(agent_role, dict):
+            role_name = agent_role.get("role_name") or "-"
+            role_id = agent_role.get("role_id") or "-"
+            profile_id = agent_role.get("memory_profile_id") or "-"
+            print(f"Role:       {role_name} ({role_id}) profile={profile_id}")
         print("Tasks:")
         if not tasks:
             print("  (no tasks)")
@@ -2822,6 +2835,13 @@ class MemoryInjection:
     profile: dict[str, object] | None = None
 
 
+@dataclass(frozen=True)
+class AgentRoleContext:
+    role_id: str
+    role_name: str
+    memory_profile_id: str | None
+
+
 MEMORY_INJECTION_ITEM_CAP = 20
 MEMORY_INJECTION_BYTE_CAP = 8192
 
@@ -2975,6 +2995,52 @@ def _apply_memory_injection_payload(
     )
 
 
+def _apply_agent_role_payload(
+    payload: dict[str, object],
+    role_context: AgentRoleContext | None,
+) -> None:
+    if role_context is None:
+        return
+    payload["agent_role"] = {
+        "role_id": role_context.role_id,
+        "role_name": role_context.role_name,
+        "memory_profile_id": role_context.memory_profile_id,
+    }
+
+
+def _resolve_agent_role(db_path: str, selector: str) -> AgentRoleContext:
+    state_store = StateStore(db_path)
+    try:
+        role = state_store.get_agent_role_by_selector(selector)
+    finally:
+        state_store.close()
+    if role is None:
+        print(f"Agent role not found: {selector}", file=sys.stderr)
+        raise SystemExit(2)
+    if role.retired_at:
+        print(f"Agent role is retired: {role.name}", file=sys.stderr)
+        raise SystemExit(2)
+    if role.memory_profile_id:
+        profile = memory_get_profile_by_selector(db_path, role.memory_profile_id)
+        if profile is None:
+            print(
+                f"Agent role references missing memory profile: {role.memory_profile_id}",
+                file=sys.stderr,
+            )
+            raise SystemExit(2)
+        if profile.retired_at:
+            print(
+                f"Agent role memory profile is retired: {profile.name}",
+                file=sys.stderr,
+            )
+            raise SystemExit(2)
+    return AgentRoleContext(
+        role_id=role.role_id,
+        role_name=role.name,
+        memory_profile_id=role.memory_profile_id,
+    )
+
+
 def _record_memory_profile_use(
     *,
     db_path: str,
@@ -3021,6 +3087,7 @@ def _request_llm_plan(
     debug: bool,
     actor: str,
     memory_injection: MemoryInjection | None = None,
+    role_context: AgentRoleContext | None = None,
     assessment_policy_path: str | None = None,
     record_event: bool = True,
 ) -> tuple[dict, PlanAssessment, StateStore, dict[str, object]]:
@@ -3055,6 +3122,7 @@ def _request_llm_plan(
                 "timestamp": datetime.now(timezone.utc).isoformat(),
             }
             _apply_memory_injection_payload(payload, memory_injection)
+            _apply_agent_role_payload(payload, role_context)
             state_store.record_event(
                 actor=actor,
                 event_type=EVENT_TYPE_ASK_FAILED,
@@ -3091,6 +3159,7 @@ def _request_llm_plan(
                     "timestamp": datetime.now(timezone.utc).isoformat(),
                 }
                 _apply_memory_injection_payload(payload, memory_injection)
+                _apply_agent_role_payload(payload, role_context)
                 state_store.record_event(
                     actor=actor,
                     event_type=EVENT_TYPE_LLM_PLAN,
@@ -3120,6 +3189,7 @@ def _request_llm_plan(
                 "timestamp": datetime.now(timezone.utc).isoformat(),
             }
             _apply_memory_injection_payload(payload, memory_injection)
+            _apply_agent_role_payload(payload, role_context)
             state_store.record_event(
                 actor=actor,
                 event_type=EVENT_TYPE_LLM_PLAN,
@@ -3150,6 +3220,7 @@ def _request_llm_plan(
                 "timestamp": datetime.now(timezone.utc).isoformat(),
             }
             _apply_memory_injection_payload(payload, memory_injection)
+            _apply_agent_role_payload(payload, role_context)
             state_store.record_event(
                 actor=actor,
                 event_type=EVENT_TYPE_LLM_PLAN,
@@ -3173,6 +3244,7 @@ def _request_llm_plan(
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
         _apply_memory_injection_payload(payload, memory_injection)
+        _apply_agent_role_payload(payload, role_context)
         if record_event:
             state_store.record_event(
                 actor=actor,
@@ -3463,23 +3535,29 @@ def run_agent(
     memory_profile: str | None = None,
     apply_memory_suggestions: bool = False,
     non_interactive: bool = False,
+    role: str | None = None,
 ) -> None:
     if not goal_text or not goal_text.strip():
         raise ValueError("agent requires a goal description.")
+    if role and (use_memory or memory_profile):
+        print("ERROR: --role cannot be combined with --memory or --memory-profile.", file=sys.stderr)
+        raise SystemExit(2)
     cycles_limit = 1 if once else max(1, max_cycles)
     run_ids: list[str] = []
     final_status = "unknown"
     final_error: str | None = None
     last_assessment: PlanAssessment | None = None
     last_actions_count = 0
+    role_context = _resolve_agent_role(db_path, role) if role else None
+    role_profile_selector = role_context.memory_profile_id if role_context else None
     for cycle in range(1, cycles_limit + 1):
         print(f"=== Agent Cycle {cycle} ===")
         plan_event_id = str(uuid4())
         memory_injection = None
-        if use_memory or memory_profile:
+        if use_memory or memory_profile or role_profile_selector:
             memory_injection = _build_memory_injection(
                 db_path,
-                profile_selector=memory_profile,
+                profile_selector=role_profile_selector or memory_profile,
                 plan_id=plan_event_id,
             )
         plan, assessment, state_store, _payload = _request_llm_plan(
@@ -3496,6 +3574,7 @@ def run_agent(
             actor="agent",
             assessment_policy_path=policy_path,
             memory_injection=memory_injection,
+            role_context=role_context,
             record_event=False,
         )
         try:
@@ -3622,14 +3701,17 @@ def run_agent(
 
             _confirm_agent_assessment(assessment, actions, yes=yes)
 
+            run_metadata = {
+                "goal": goal_text,
+                "cycle": cycle,
+                "source": "agent",
+                "plan_event_id": plan_event_id,
+            }
+            if role_context:
+                _apply_agent_role_payload(run_metadata, role_context)
             run = state_store.create_run(
                 label="agent-cycle",
-                metadata={
-                    "goal": goal_text,
-                    "cycle": cycle,
-                    "source": "agent",
-                    "plan_event_id": plan_event_id,
-                },
+                metadata=run_metadata,
             )
             run_ids.append(run.id)
             memory_link_selection_traces_to_run(
@@ -3945,6 +4027,22 @@ def _handle_memory_profile_retire(args: argparse.Namespace) -> None:
     memory_profile_cli.run_memory_profile_retire(args)
 
 
+def _handle_agent_role_list(args: argparse.Namespace) -> None:
+    agent_role_cli.run_agent_role_list(args)
+
+
+def _handle_agent_role_show(args: argparse.Namespace) -> None:
+    agent_role_cli.run_agent_role_show(args)
+
+
+def _handle_agent_role_create(args: argparse.Namespace) -> None:
+    agent_role_cli.run_agent_role_create(args)
+
+
+def _handle_agent_role_retire(args: argparse.Namespace) -> None:
+    agent_role_cli.run_agent_role_retire(args)
+
+
 def _handle_memory_explain(args: argparse.Namespace) -> None:
     memory_explain_cli.run_memory_explain(args)
 
@@ -4042,6 +4140,7 @@ def _handle_agent(args: argparse.Namespace) -> None:
         memory_profile=args.memory_profile,
         apply_memory_suggestions=args.apply_memory_suggestions,
         non_interactive=args.non_interactive,
+        role=args.role,
     )
 
 
@@ -5693,6 +5792,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Inject memory using a named profile (read-only)",
     )
     agent_parser.add_argument(
+        "--role",
+        dest="role",
+        default=None,
+        help="Agent role name or id (determines memory profile)",
+    )
+    agent_parser.add_argument(
         "--apply-memory-suggestions",
         action="store_true",
         help="Apply memory suggestions from the plan (policy-gated)",
@@ -5713,6 +5818,131 @@ def build_parser() -> argparse.ArgumentParser:
         help="Goal statement for the agent loop",
     )
     agent_parser.set_defaults(handler=_handle_agent)
+
+    agent_role_parser = subparsers.add_parser(
+        "agent-role",
+        help="Manage agent roles (deterministic role identities)",
+        parents=[db_parent_optional],
+    )
+    agent_role_subparsers = agent_role_parser.add_subparsers(
+        dest="agent_role_command",
+    )
+    agent_role_list_parser = agent_role_subparsers.add_parser(
+        "list",
+        help="List agent roles",
+        parents=[db_parent_optional],
+    )
+    agent_role_list_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit JSON output",
+    )
+    agent_role_list_parser.add_argument(
+        "--active-only",
+        action="store_true",
+        help="Show only active roles",
+    )
+    agent_role_list_parser.add_argument(
+        "--policy",
+        default=None,
+        help="Optional policy file path for audit hashing",
+    )
+    agent_role_list_parser.set_defaults(handler=_handle_agent_role_list)
+
+    agent_role_show_parser = agent_role_subparsers.add_parser(
+        "show",
+        help="Show agent role details",
+        parents=[db_parent_optional],
+    )
+    agent_role_show_parser.add_argument(
+        "selector",
+        help="Role name or id",
+    )
+    agent_role_show_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit JSON output",
+    )
+    agent_role_show_parser.add_argument(
+        "--policy",
+        default=None,
+        help="Optional policy file path for audit hashing",
+    )
+    agent_role_show_parser.set_defaults(handler=_handle_agent_role_show)
+
+    agent_role_create_parser = agent_role_subparsers.add_parser(
+        "create",
+        help="Create an agent role (requires confirmation)",
+        parents=[db_parent_optional],
+    )
+    agent_role_create_parser.add_argument(
+        "--name",
+        required=True,
+        help="Role name (unique)",
+    )
+    agent_role_create_parser.add_argument(
+        "--description",
+        default=None,
+        help="Optional role description",
+    )
+    agent_role_create_parser.add_argument(
+        "--memory-profile",
+        dest="memory_profile",
+        default=None,
+        help="Memory profile selector (name or id)",
+    )
+    agent_role_create_parser.add_argument(
+        "--policy",
+        default=None,
+        help="Path to a JSON policy file",
+    )
+    agent_role_create_parser.add_argument(
+        "--yes",
+        action="store_true",
+        help="Skip confirmation prompts for create",
+    )
+    agent_role_create_parser.add_argument(
+        "--non-interactive",
+        action="store_true",
+        help="Fail closed instead of prompting",
+    )
+    agent_role_create_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit JSON output",
+    )
+    agent_role_create_parser.set_defaults(handler=_handle_agent_role_create)
+
+    agent_role_retire_parser = agent_role_subparsers.add_parser(
+        "retire",
+        help="Retire an agent role (requires confirmation)",
+        parents=[db_parent_optional],
+    )
+    agent_role_retire_parser.add_argument(
+        "selector",
+        help="Role name or id",
+    )
+    agent_role_retire_parser.add_argument(
+        "--policy",
+        default=None,
+        help="Path to a JSON policy file",
+    )
+    agent_role_retire_parser.add_argument(
+        "--yes",
+        action="store_true",
+        help="Skip confirmation prompts for retire",
+    )
+    agent_role_retire_parser.add_argument(
+        "--non-interactive",
+        action="store_true",
+        help="Fail closed instead of prompting",
+    )
+    agent_role_retire_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit JSON output",
+    )
+    agent_role_retire_parser.set_defaults(handler=_handle_agent_role_retire)
 
     daemon_parser = subparsers.add_parser(
         "daemon",
@@ -6218,6 +6448,8 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> None:
     parser = build_parser()
     argv = sys.argv[1:]
+    if len(argv) > 1 and argv[0] == "agent" and argv[1] == "role":
+        argv = ["agent-role", *argv[2:]]
     if _has_shell_prompt_paste(argv):
         print(
             "It looks like you pasted your shell prompt. "

@@ -11,6 +11,7 @@ from typing import Any, Dict, Iterable, Optional
 from uuid import uuid4
 
 from gismo.core.models import (
+    AgentRole,
     DaemonHeartbeat,
     Event,
     FailureType,
@@ -128,6 +129,18 @@ class StateStore:
                     created_at TEXT NOT NULL,
                     label TEXT NOT NULL,
                     metadata_json TEXT NOT NULL
+                )
+                """
+            )
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS agent_roles (
+                    role_id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL UNIQUE,
+                    description TEXT NULL,
+                    memory_profile_id TEXT NULL,
+                    created_at TEXT NOT NULL,
+                    retired_at TEXT NULL
                 )
                 """
             )
@@ -576,6 +589,93 @@ class StateStore:
             )
             connection.commit()
         return run
+
+    def create_agent_role(
+        self,
+        *,
+        name: str,
+        description: Optional[str],
+        memory_profile_id: Optional[str],
+    ) -> AgentRole:
+        if not name or not name.strip():
+            raise ValueError("Role name must be a non-empty string")
+        role = AgentRole(
+            name=name.strip(),
+            description=description,
+            memory_profile_id=memory_profile_id,
+        )
+        try:
+            with self._connection() as connection:
+                connection.execute(
+                    """
+                    INSERT INTO agent_roles (
+                        role_id, name, description, memory_profile_id, created_at, retired_at
+                    ) VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        role.role_id,
+                        role.name,
+                        role.description,
+                        role.memory_profile_id,
+                        role.created_at.isoformat(),
+                        role.retired_at.isoformat() if role.retired_at else None,
+                    ),
+                )
+                connection.commit()
+        except sqlite3.IntegrityError as exc:
+            raise ValueError(f"Agent role already exists: {name}") from exc
+        return role
+
+    def list_agent_roles(self, *, include_retired: bool = True) -> list[AgentRole]:
+        sql = "SELECT * FROM agent_roles"
+        params: tuple[object, ...] = ()
+        if not include_retired:
+            sql += " WHERE retired_at IS NULL"
+        sql += " ORDER BY name ASC"
+        with self._connection() as connection:
+            rows = connection.execute(sql, params).fetchall()
+        return [self._row_to_agent_role(row) for row in rows]
+
+    def get_agent_role_by_selector(self, selector: str) -> Optional[AgentRole]:
+        if not selector:
+            return None
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM agent_roles WHERE role_id = ? OR name = ?",
+                (selector, selector),
+            ).fetchone()
+        if row is None:
+            return None
+        return self._row_to_agent_role(row)
+
+    def retire_agent_role(self, *, role_id: str) -> tuple[AgentRole, bool]:
+        if not role_id:
+            raise ValueError("Role id must be provided")
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM agent_roles WHERE role_id = ?",
+                (role_id,),
+            ).fetchone()
+            if row is None:
+                raise ValueError(f"Agent role not found: {role_id}")
+            role = self._row_to_agent_role(row)
+            if role.retired_at:
+                return role, False
+            retired_at = _utc_now()
+            connection.execute(
+                "UPDATE agent_roles SET retired_at = ? WHERE role_id = ?",
+                (retired_at.isoformat(), role.role_id),
+            )
+            connection.commit()
+            role = AgentRole(
+                role_id=role.role_id,
+                name=role.name,
+                description=role.description,
+                memory_profile_id=role.memory_profile_id,
+                created_at=role.created_at,
+                retired_at=retired_at,
+            )
+            return role, True
 
     def create_task(
         self,
@@ -1407,6 +1507,16 @@ class StateStore:
             status_reason=row["status_reason"],
         )
         return task
+
+    def _row_to_agent_role(self, row: sqlite3.Row) -> AgentRole:
+        return AgentRole(
+            role_id=row["role_id"],
+            name=row["name"],
+            description=row["description"],
+            memory_profile_id=row["memory_profile_id"],
+            created_at=_parse_dt(row["created_at"]),
+            retired_at=_parse_dt(row["retired_at"]) if row["retired_at"] else None,
+        )
 
     def _row_to_run(self, row: sqlite3.Row) -> Run:
         return Run(

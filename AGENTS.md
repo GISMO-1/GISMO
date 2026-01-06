@@ -147,4 +147,9 @@ Leashed autonomy:
 - The `agent` CLI loop must only plan → enqueue → execute via the queue/daemon and keep confirmation gates intact.
 - Agent memory context injection and suggestion application are optional, gated behaviors; defaults remain read-only unless explicitly enabled.
 
+Agent roles:
+- Agent roles provide operator-defined identities tied to memory profiles.
+- Roles are sequential and do not add parallel execution or autonomy.
+- Creating/retiring roles requires policy allowance plus explicit confirmation.
+
 If a change breaks this, it is not acceptable without explicit approval.

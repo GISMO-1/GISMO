@@ -72,6 +72,29 @@ class ExportTest(unittest.TestCase):
             self.assertIn(run_two.id, output_path.name)
             self.assertNotIn(run_one.id, output_path.name)
 
+    def test_export_includes_agent_role_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = str(Path(tmpdir) / "state.db")
+            state_store = StateStore(db_path)
+            run = state_store.create_run(
+                label="role-export",
+                metadata={
+                    "agent_role": {
+                        "role_id": "role-123",
+                        "role_name": "planner",
+                        "memory_profile_id": "profile-123",
+                    }
+                },
+            )
+            output_path = export_run_jsonl(state_store, run.id, base_dir=Path(tmpdir))
+            records = [
+                json.loads(line)
+                for line in output_path.read_text(encoding="utf-8").strip().splitlines()
+            ]
+            run_record = records[0]
+            metadata = run_record["metadata"].get("agent_role", {})
+            self.assertEqual(metadata.get("role_id"), "role-123")
+
     def test_export_redact_fields(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = str(Path(tmpdir) / "state.db")

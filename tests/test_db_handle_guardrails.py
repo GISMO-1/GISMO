@@ -128,6 +128,57 @@ class DbHandleGuardrailsTest(unittest.TestCase):
                 gc.collect()
                 self._assert_db_deletable(db_path)
 
+    @unittest.skipUnless(sys.platform == "win32", "Windows-only handle release check")
+    def test_windows_snapshot_cli_releases_db_handle(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "state.db"
+            policy_hash = policy_hash_for_path(str(self.policy_path))
+            memory_put_item(
+                str(db_path),
+                namespace="global",
+                key="snapshot",
+                kind="fact",
+                value="ok",
+                tags=None,
+                confidence="high",
+                source="operator",
+                ttl_seconds=None,
+                actor="test",
+                policy_hash=policy_hash,
+            )
+            snapshot_path = Path(tmpdir) / "snapshot.json"
+            self._run_cli(
+                [
+                    "memory",
+                    "snapshot",
+                    "export",
+                    "--db",
+                    str(db_path),
+                    "--policy",
+                    str(self.policy_path),
+                    "--namespace",
+                    "*",
+                    "--out",
+                    str(snapshot_path),
+                ]
+            )
+            self._run_cli(
+                [
+                    "memory",
+                    "snapshot",
+                    "diff",
+                    "--db",
+                    str(db_path),
+                    "--policy",
+                    str(self.policy_path),
+                    "--in",
+                    str(snapshot_path),
+                    "--json",
+                ]
+            )
+            gc.collect()
+            self._assert_db_deletable(db_path)
+
     def test_memory_put_releases_db_handle(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = Path(tmpdir) / "state.db"

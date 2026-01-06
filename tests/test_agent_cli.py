@@ -201,7 +201,7 @@ class AgentCliTest(unittest.TestCase):
             output = buffer.getvalue()
             self.assertIn("Suggested memory updates (advisory only):", output)
             self.assertIn("gismo memory put", output)
-            with sqlite3.connect(db_path) as connection:
+            with contextlib.closing(sqlite3.connect(db_path)) as connection:
                 item_count = connection.execute(
                     "SELECT COUNT(*) FROM memory_items"
                 ).fetchone()[0]
@@ -285,7 +285,7 @@ class AgentCliTest(unittest.TestCase):
             self.assertEqual(injected_keys, [{"namespace": "global", "key": "alpha"}])
             profile_payload = payload.get("memory_profile") or {}
             self.assertEqual(profile_payload.get("profile_id"), profile.profile_id)
-            with sqlite3.connect(db_path) as connection:
+            with contextlib.closing(sqlite3.connect(db_path)) as connection:
                 row = connection.execute(
                     "SELECT request_json FROM memory_events "
                     "WHERE operation = ? "
@@ -455,7 +455,7 @@ class AgentCliTest(unittest.TestCase):
                             dry_run=True,
                             apply_memory_suggestions=True,
                         )
-            with sqlite3.connect(db_path) as connection:
+            with contextlib.closing(sqlite3.connect(db_path)) as connection:
                 item_count = connection.execute(
                     "SELECT COUNT(*) FROM memory_items"
                 ).fetchone()[0]
@@ -552,7 +552,7 @@ class AgentCliTest(unittest.TestCase):
                             apply_memory_suggestions=True,
                             non_interactive=True,
                         )
-            with sqlite3.connect(db_path) as connection:
+            with contextlib.closing(sqlite3.connect(db_path)) as connection:
                 item_count = connection.execute(
                     "SELECT COUNT(*) FROM memory_items"
                 ).fetchone()[0]
@@ -603,7 +603,7 @@ class AgentCliTest(unittest.TestCase):
                         dry_run=True,
                         apply_memory_suggestions=True,
                     )
-            with sqlite3.connect(db_path) as connection:
+            with contextlib.closing(sqlite3.connect(db_path)) as connection:
                 item_count = connection.execute(
                     "SELECT COUNT(*) FROM memory_items"
                 ).fetchone()[0]

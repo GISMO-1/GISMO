@@ -172,10 +172,9 @@ Plan assessment gate:
 LATEST UPDATE (OPERATOR NOTES)
 
 Status:
-- Added tool receipts (canonical payloads + hashes) for every tool call with JSONL export support.
-- Added CLI tooling to list/show receipts and replay exports in dry-run validation mode.
-- Run/show now summarizes tool receipt counts and timestamps alongside session/role context.
-- Closed SQLite connections deterministically and expanded DB-handle guardrail coverage for memory doctor, retention, snapshot import dry-run, tool receipts, and agent session show/list.
+- Removed destructor-based cleanup in favor of explicit close paths and context managers.
+- Switched tests to use `contextlib.closing` around sqlite3 connections for deterministic release.
+- Added a Windows-only snapshot CLI regression test to confirm DB handles release immediately after CLI operations.
 
 Next steps:
 - Consider policy-gated non-dry-run replay after operators validate audit workflows.
@@ -184,7 +183,6 @@ Next steps:
 
 Tests run:
 - python scripts/verify.py
-- pytest -q
 
 Operator examples:
 - python -m gismo.cli.main --db .\tmp\dev.db runs list

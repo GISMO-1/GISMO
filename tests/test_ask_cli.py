@@ -301,7 +301,7 @@ class AskCliTest(unittest.TestCase):
             self.assertEqual(injected_keys, [{"namespace": "global", "key": "alpha"}])
             profile_payload = payload.get("memory_profile") or {}
             self.assertEqual(profile_payload.get("profile_id"), profile.profile_id)
-            with sqlite3.connect(db_path) as connection:
+            with contextlib.closing(sqlite3.connect(db_path)) as connection:
                 row = connection.execute(
                     "SELECT request_json FROM memory_events "
                     "WHERE operation = ? "
@@ -489,7 +489,7 @@ class AskCliTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = str(Path(tmpdir) / "state.db")
             StateStore(db_path)
-            with sqlite3.connect(db_path) as connection:
+            with contextlib.closing(sqlite3.connect(db_path)) as connection:
                 initial_count = connection.execute(
                     "SELECT COUNT(*) FROM memory_items"
                 ).fetchone()[0]
@@ -517,7 +517,7 @@ class AskCliTest(unittest.TestCase):
                         yes=False,
                         explain=False,
                     )
-            with sqlite3.connect(db_path) as connection:
+            with contextlib.closing(sqlite3.connect(db_path)) as connection:
                 final_count = connection.execute(
                     "SELECT COUNT(*) FROM memory_items"
                 ).fetchone()[0]
@@ -577,7 +577,7 @@ class AskCliTest(unittest.TestCase):
                         apply_memory_suggestions=True,
                         policy_path=policy_path,
                     )
-            with sqlite3.connect(db_path) as connection:
+            with contextlib.closing(sqlite3.connect(db_path)) as connection:
                 item_count = connection.execute(
                     "SELECT COUNT(*) FROM memory_items"
                 ).fetchone()[0]
@@ -663,7 +663,7 @@ class AskCliTest(unittest.TestCase):
                             apply_memory_suggestions=True,
                             policy_path=policy_path,
                         )
-            with sqlite3.connect(db_path) as connection:
+            with contextlib.closing(sqlite3.connect(db_path)) as connection:
                 item_count = connection.execute(
                     "SELECT COUNT(*) FROM memory_items"
                 ).fetchone()[0]
@@ -728,7 +728,7 @@ class AskCliTest(unittest.TestCase):
                             non_interactive=True,
                             policy_path=policy_path,
                         )
-            with sqlite3.connect(db_path) as connection:
+            with contextlib.closing(sqlite3.connect(db_path)) as connection:
                 item_count = connection.execute(
                     "SELECT COUNT(*) FROM memory_items"
                 ).fetchone()[0]
@@ -793,7 +793,7 @@ class AskCliTest(unittest.TestCase):
                         apply_memory_suggestions=True,
                         policy_path=policy_path,
                     )
-            with sqlite3.connect(db_path) as connection:
+            with contextlib.closing(sqlite3.connect(db_path)) as connection:
                 item_count = connection.execute(
                     "SELECT COUNT(*) FROM memory_items"
                 ).fetchone()[0]
@@ -1563,7 +1563,7 @@ class AskCliTest(unittest.TestCase):
                 actor="test",
                 policy_hash="test",
             )
-            with sqlite3.connect(db_path) as connection:
+            with contextlib.closing(sqlite3.connect(db_path)) as connection:
                 connection.execute(
                     "UPDATE memory_items SET updated_at = ? WHERE namespace = ? AND key = ?",
                     ("2024-01-02T00:00:00+00:00", "global", "alpha"),
@@ -1640,7 +1640,7 @@ class AskCliTest(unittest.TestCase):
                     actor="test",
                     policy_hash="test",
                 )
-            with sqlite3.connect(db_path) as connection:
+            with contextlib.closing(sqlite3.connect(db_path)) as connection:
                 connection.execute(
                     "UPDATE memory_items SET updated_at = ? WHERE namespace = ?",
                     ("2024-01-04T00:00:00+00:00", "global"),

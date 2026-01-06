@@ -24,6 +24,8 @@ from gismo.core.models import (
     TaskStatus,
     ToolCall,
     ToolCallStatus,
+    ToolReceipt,
+    ToolReceiptStatus,
 )
 
 
@@ -210,6 +212,33 @@ class StateStore:
             )
             cursor.execute(
                 """
+                CREATE TABLE IF NOT EXISTS tool_receipts (
+                    id TEXT PRIMARY KEY,
+                    run_id TEXT NOT NULL,
+                    session_id TEXT NULL,
+                    role_id TEXT NULL,
+                    role_name TEXT NULL,
+                    plan_event_id TEXT NULL,
+                    tool_name TEXT NOT NULL,
+                    tool_kind TEXT NOT NULL,
+                    request_payload_json TEXT NOT NULL,
+                    response_payload_json TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    started_at TEXT NOT NULL,
+                    finished_at TEXT NOT NULL,
+                    duration_ms INTEGER NOT NULL,
+                    request_sha256 TEXT NOT NULL,
+                    response_sha256 TEXT NOT NULL,
+                    error_type TEXT NULL,
+                    error_message TEXT NULL,
+                    policy_decision_id TEXT NULL,
+                    policy_snapshot_json TEXT NULL,
+                    FOREIGN KEY (run_id) REFERENCES runs(id)
+                )
+                """
+            )
+            cursor.execute(
+                """
                 CREATE TABLE IF NOT EXISTS queue_items (
                     id TEXT PRIMARY KEY,
                     run_id TEXT,
@@ -367,6 +396,18 @@ class StateStore:
                 """
                 CREATE INDEX IF NOT EXISTS idx_memory_selection_traces_plan
                 ON memory_selection_traces (plan_id)
+                """
+            )
+            cursor.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_tool_receipts_run
+                ON tool_receipts (run_id)
+                """
+            )
+            cursor.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_tool_receipts_started_at
+                ON tool_receipts (started_at)
                 """
             )
             self._ensure_columns(connection)
@@ -964,6 +1005,74 @@ class StateStore:
                 tool_call.id,
             ),
         )
+
+    def record_tool_receipt(
+        self,
+        receipt: ToolReceipt,
+        connection: Optional[sqlite3.Connection] = None,
+    ) -> None:
+        if connection is None:
+            with self._connection() as connection:
+                self.record_tool_receipt(receipt, connection=connection)
+                connection.commit()
+                return
+        connection.execute(
+            """
+            INSERT INTO tool_receipts (
+                id, run_id, session_id, role_id, role_name, plan_event_id,
+                tool_name, tool_kind, request_payload_json, response_payload_json,
+                status, started_at, finished_at, duration_ms, request_sha256,
+                response_sha256, error_type, error_message, policy_decision_id,
+                policy_snapshot_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                receipt.id,
+                receipt.run_id,
+                receipt.session_id,
+                receipt.role_id,
+                receipt.role_name,
+                receipt.plan_event_id,
+                receipt.tool_name,
+                receipt.tool_kind,
+                receipt.request_payload_json,
+                receipt.response_payload_json,
+                receipt.status.value,
+                receipt.started_at.isoformat(),
+                receipt.finished_at.isoformat(),
+                receipt.duration_ms,
+                receipt.request_sha256,
+                receipt.response_sha256,
+                receipt.error_type,
+                receipt.error_message,
+                receipt.policy_decision_id,
+                json.dumps(receipt.policy_snapshot)
+                if receipt.policy_snapshot is not None
+                else None,
+            ),
+        )
+
+    def list_tool_receipts(self, run_id: str) -> Iterable[ToolReceipt]:
+        with self._connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM tool_receipts
+                WHERE run_id = ?
+                ORDER BY started_at ASC, id ASC
+                """,
+                (run_id,),
+            ).fetchall()
+        return [self._row_to_tool_receipt(row) for row in rows]
+
+    def get_tool_receipt(self, receipt_id: str) -> Optional[ToolReceipt]:
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM tool_receipts WHERE id = ?",
+                (receipt_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return self._row_to_tool_receipt(row)
 
     def list_tasks(self, run_id: str) -> Iterable[Task]:
         with self._connection() as connection:
@@ -1711,6 +1820,33 @@ class StateStore:
             failure_type=FailureType(row["failure_type"]) if row["failure_type"] else FailureType.NONE,
         )
         return tool_call
+
+    def _row_to_tool_receipt(self, row: sqlite3.Row) -> ToolReceipt:
+        policy_snapshot = (
+            json.loads(row["policy_snapshot_json"]) if row["policy_snapshot_json"] else None
+        )
+        return ToolReceipt(
+            id=row["id"],
+            run_id=row["run_id"],
+            session_id=row["session_id"],
+            role_id=row["role_id"],
+            role_name=row["role_name"],
+            plan_event_id=row["plan_event_id"],
+            tool_name=row["tool_name"],
+            tool_kind=row["tool_kind"],
+            request_payload_json=row["request_payload_json"],
+            response_payload_json=row["response_payload_json"],
+            status=ToolReceiptStatus(row["status"]),
+            started_at=_parse_dt(row["started_at"]),
+            finished_at=_parse_dt(row["finished_at"]),
+            duration_ms=int(row["duration_ms"]),
+            request_sha256=row["request_sha256"],
+            response_sha256=row["response_sha256"],
+            error_type=row["error_type"],
+            error_message=row["error_message"],
+            policy_decision_id=row["policy_decision_id"],
+            policy_snapshot=policy_snapshot,
+        )
 
     def _row_to_queue_item(self, row: sqlite3.Row) -> QueueItem:
         max_retries = row["max_retries"] if "max_retries" in row.keys() else None

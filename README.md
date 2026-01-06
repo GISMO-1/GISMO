@@ -17,7 +17,7 @@ Key Features and Principles:
   All operations are gated by security policies. Policies supported include readonly and dev-safe modes. Disallowed actions (like unapproved shell: commands) are blocked by default, logged, and safely marked failed.
 
 - Auditability:
-  Every action and decision is logged. GISMO produces detailed JSONL audit logs per run, capturing tool inputs/outputs and outcomes. Nothing happens silently.
+  Every action and decision is logged. GISMO produces detailed JSONL audit logs per run, capturing tool inputs/outputs, tool receipts (canonical payloads + hashes), and outcomes. Nothing happens silently.
 
 - Cross-Platform, Windows-First:
   GISMO is built to run reliably on Windows first, as well as Linux. It avoids Unix assumptions and handles Windows-specific concerns (paths, subprocess behavior, locking) explicitly.
@@ -119,6 +119,12 @@ Export audit logs:
 
   gismo export --latest
   gismo export --run RUN_ID
+
+Tool receipt audit + replay:
+
+  gismo tools receipts list --run RUN_ID
+  gismo tools receipts show RECEIPT_ID
+  gismo tools replay --run RUN_ID --from-export /path/to/export.jsonl --dry-run
 
 Memory management (policy-gated; confirmation required for high-risk namespaces):
 

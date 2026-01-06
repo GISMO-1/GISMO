@@ -172,12 +172,13 @@ Plan assessment gate:
 LATEST UPDATE (OPERATOR NOTES)
 
 Status:
-- Added supervised agent sessions for checkpoint/resume workflows with strict safety gates.
-- Run/show/export/memory explain now surface session linkage alongside role context.
+- Added tool receipts (canonical payloads + hashes) for every tool call with JSONL export support.
+- Added CLI tooling to list/show receipts and replay exports in dry-run validation mode.
+- Run/show now summarizes tool receipt counts and timestamps alongside session/role context.
 
 Next steps:
+- Consider policy-gated non-dry-run replay after operators validate audit workflows.
 - Extend session metrics (elapsed time per step) once operators validate workflow.
-- Review default policies for session resume use in readonly contexts.
 
 Tests run:
 - python scripts/verify.py
@@ -187,6 +188,9 @@ Operator examples:
 - python -m gismo.cli.main --db .\tmp\dev.db runs list
 - python -m gismo.cli.main --db .\tmp\dev.db runs show RUN_ID
 - python -m gismo.cli.main --db .\tmp\dev.db export RUN_ID
+- python -m gismo.cli.main --db .\tmp\dev.db tools receipts list --run RUN_ID
+- python -m gismo.cli.main --db .\tmp\dev.db tools receipts show RECEIPT_ID
+- python -m gismo.cli.main --db .\tmp\dev.db tools replay --run RUN_ID --from-export .\tmp\exports\RUN_ID.jsonl --dry-run
 - python -m gismo.cli.main --db .\tmp\dev.db agent "Summarize last 10 queue failures" --dry-run
 
 -------------------------------------------------------------------------------

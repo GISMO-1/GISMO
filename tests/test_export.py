@@ -58,7 +58,9 @@ class ExportTest(unittest.TestCase):
             record_types = [record["record_type"] for record in records]
             self.assertIn("task", record_types)
             self.assertIn("tool_call", record_types)
+            self.assertIn("tool_receipt", record_types)
             self.assertGreater(record_types.index("tool_call"), record_types.index("task"))
+            self.assertGreater(record_types.index("tool_receipt"), record_types.index("tool_call"))
 
     def test_export_latest_run(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

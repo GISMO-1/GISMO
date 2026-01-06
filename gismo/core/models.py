@@ -34,6 +34,11 @@ class ToolCallStatus(str, Enum):
     SKIPPED = "SKIPPED"
 
 
+class ToolReceiptStatus(str, Enum):
+    SUCCESS = "success"
+    ERROR = "error"
+
+
 class QueueStatus(str, Enum):
     QUEUED = "QUEUED"
     IN_PROGRESS = "IN_PROGRESS"
@@ -162,6 +167,30 @@ class ToolCall:
         self.error = error
         self.failure_type = failure_type
         self.finished_at = _utc_now()
+
+
+@dataclass
+class ToolReceipt:
+    run_id: str
+    tool_name: str
+    tool_kind: str
+    request_payload_json: str
+    response_payload_json: str
+    status: ToolReceiptStatus
+    started_at: datetime
+    finished_at: datetime
+    duration_ms: int
+    request_sha256: str
+    response_sha256: str
+    id: str = field(default_factory=lambda: str(uuid4()))
+    session_id: Optional[str] = None
+    role_id: Optional[str] = None
+    role_name: Optional[str] = None
+    plan_event_id: Optional[str] = None
+    error_type: Optional[str] = None
+    error_message: Optional[str] = None
+    policy_decision_id: Optional[str] = None
+    policy_snapshot: Optional[Dict[str, Any]] = None
 
 
 @dataclass

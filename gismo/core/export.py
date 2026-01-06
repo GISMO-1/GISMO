@@ -1,4 +1,4 @@
-"""Audit export utilities for runs, tasks, and tool calls."""
+"""Audit export utilities for runs, tasks, tool calls, and tool receipts."""
 from __future__ import annotations
 
 import json
@@ -6,7 +6,7 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
-from gismo.core.models import AgentSession, Run, Task, ToolCall
+from gismo.core.models import AgentSession, Run, Task, ToolCall, ToolReceipt
 from gismo.core.paths import resolve_exports_dir
 from gismo.core.state import MemoryEventRecord, MemoryProvenance, StateStore
 
@@ -30,6 +30,7 @@ def export_run_jsonl(
     resolved_out = _resolve_output_path(run_id, out_path, exports_dir)
     tasks = list(state_store.list_tasks(run_id))
     tool_calls = list(state_store.list_tool_calls(run_id))
+    tool_receipts = list(state_store.list_tool_receipts(run_id))
     memory_provenance = state_store.get_memory_provenance(run.id)
     plan_event_id = None
     session: AgentSession | None = None
@@ -56,6 +57,7 @@ def export_run_jsonl(
         run,
         tasks,
         tool_calls,
+        tool_receipts,
         agent_session=session,
         session_events=session_events,
         memory_provenance=memory_provenance,
@@ -107,6 +109,7 @@ def _build_records(
     run: Run,
     tasks: list[Task],
     tool_calls: list[ToolCall],
+    tool_receipts: list[ToolReceipt],
     *,
     agent_session: AgentSession | None,
     session_events: list[Any],
@@ -117,6 +120,7 @@ def _build_records(
 ) -> list[dict[str, Any]]:
     sorted_tasks = sorted(tasks, key=lambda task: task.created_at)
     sorted_calls = sorted(tool_calls, key=lambda call: (call.started_at, call.attempt_number))
+    sorted_receipts = sorted(tool_receipts, key=lambda receipt: (receipt.started_at, receipt.id))
     records = [_serialize_run(run, memory_provenance)]
     if agent_session is not None:
         records.append(_serialize_agent_session(agent_session))
@@ -135,6 +139,7 @@ def _build_records(
         )
     records.extend(_serialize_task(task, redact=redact) for task in sorted_tasks)
     records.extend(_serialize_tool_call(call, redact=redact) for call in sorted_calls)
+    records.extend(_serialize_tool_receipt(receipt) for receipt in sorted_receipts)
     return records
 
 
@@ -273,6 +278,32 @@ def _serialize_tool_call(call: ToolCall, *, redact: bool) -> dict[str, Any]:
         "attempt_number": call.attempt_number,
         "started_at": call.started_at.isoformat(),
         "finished_at": call.finished_at.isoformat() if call.finished_at else None,
+    }
+
+
+def _serialize_tool_receipt(receipt: ToolReceipt) -> dict[str, Any]:
+    return {
+        "record_type": "tool_receipt",
+        "id": receipt.id,
+        "run_id": receipt.run_id,
+        "session_id": receipt.session_id,
+        "role_id": receipt.role_id,
+        "role_name": receipt.role_name,
+        "plan_event_id": receipt.plan_event_id,
+        "tool_name": receipt.tool_name,
+        "tool_kind": receipt.tool_kind,
+        "request_payload_json": receipt.request_payload_json,
+        "response_payload_json": receipt.response_payload_json,
+        "status": receipt.status.value,
+        "started_at": receipt.started_at.isoformat(),
+        "finished_at": receipt.finished_at.isoformat(),
+        "duration_ms": receipt.duration_ms,
+        "request_sha256": receipt.request_sha256,
+        "response_sha256": receipt.response_sha256,
+        "error_type": receipt.error_type,
+        "error_message": receipt.error_message,
+        "policy_decision_id": receipt.policy_decision_id,
+        "policy_snapshot": receipt.policy_snapshot,
     }
 
 

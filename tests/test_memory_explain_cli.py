@@ -173,6 +173,7 @@ class MemoryExplainCliTest(unittest.TestCase):
         self.assertIn("excluded", payload)
         self.assertIn("limit", payload)
         self.assertIn("agent_role", payload)
+        self.assertIn("agent_session", payload)
         self.assertEqual(payload["plan_id"], plan_id)
         self.assertIsNone(payload["run_id"])
         if payload["included"]:

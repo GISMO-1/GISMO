@@ -19,6 +19,7 @@ from gismo.cli import memory_explain as memory_explain_cli
 from gismo.cli import memory_profile as memory_profile_cli
 from gismo.cli import memory_snapshot as memory_snapshot_cli
 from gismo.cli import agent_role as agent_role_cli
+from gismo.cli import agent_session as agent_session_cli
 from gismo.cli.operator import (
     make_idempotency_key,
     normalize_command,
@@ -1018,8 +1019,10 @@ def _serialize_run_show_payload(
         )
     memory_payload = memory_provenance.to_dict()
     agent_role = None
+    agent_session = None
     if isinstance(run.metadata_json, dict):
         agent_role = run.metadata_json.get("agent_role")
+        agent_session = run.metadata_json.get("agent_session")
     return {
         "run": {
             "id": run.id,
@@ -1033,6 +1036,7 @@ def _serialize_run_show_payload(
         "tasks": task_payloads,
         "tool_calls": call_payloads,
         "agent_role": agent_role,
+        "agent_session": agent_session,
         "memory_provenance": memory_payload,
     }
 
@@ -1160,13 +1164,21 @@ def run_show(db_path: str, run_id: str, *, json_output: bool = False) -> None:
             f"succeeded={counts['succeeded']} failed={counts['failed']})"
         )
         agent_role = None
+        agent_session = None
         if isinstance(run.metadata_json, dict):
             agent_role = run.metadata_json.get("agent_role")
+            agent_session = run.metadata_json.get("agent_session")
         if isinstance(agent_role, dict):
             role_name = agent_role.get("role_name") or "-"
             role_id = agent_role.get("role_id") or "-"
             profile_id = agent_role.get("memory_profile_id") or "-"
             print(f"Role:       {role_name} ({role_id}) profile={profile_id}")
+        if isinstance(agent_session, dict):
+            session_id = agent_session.get("session_id") or "-"
+            step_count = agent_session.get("step_count")
+            max_steps = agent_session.get("max_steps")
+            step_label = f"{step_count}/{max_steps}" if step_count is not None else "-"
+            print(f"Session:    {session_id} steps={step_label}")
         print("Tasks:")
         if not tasks:
             print("  (no tasks)")
@@ -3938,6 +3950,21 @@ def _snapshot_dependencies() -> memory_snapshot_cli.SnapshotDependencies:
     )
 
 
+def _agent_session_dependencies() -> agent_session_cli.AgentSessionDependencies:
+    return agent_session_cli.AgentSessionDependencies(
+        request_llm_plan=_request_llm_plan,
+        build_memory_injection=_build_memory_injection,
+        record_memory_profile_use=_record_memory_profile_use,
+        confirm_agent_assessment=_confirm_agent_assessment,
+        enqueue_plan_actions=_enqueue_plan_actions,
+        drain_queue_items=_drain_queue_items,
+        queue_status_summary=_queue_status_summary,
+        apply_agent_role_payload=_apply_agent_role_payload,
+        link_selection_traces_to_run=memory_link_selection_traces_to_run,
+        memory_decision_path=_memory_decision_path,
+    )
+
+
 def _handle_demo(args: argparse.Namespace) -> None:
     run_demo(args.db_path, args.policy)
 
@@ -4041,6 +4068,30 @@ def _handle_agent_role_create(args: argparse.Namespace) -> None:
 
 def _handle_agent_role_retire(args: argparse.Namespace) -> None:
     agent_role_cli.run_agent_role_retire(args)
+
+
+def _handle_agent_session_start(args: argparse.Namespace) -> None:
+    agent_session_cli.run_agent_session_start(args)
+
+
+def _handle_agent_session_show(args: argparse.Namespace) -> None:
+    agent_session_cli.run_agent_session_show(args)
+
+
+def _handle_agent_session_list(args: argparse.Namespace) -> None:
+    agent_session_cli.run_agent_session_list(args)
+
+
+def _handle_agent_session_pause(args: argparse.Namespace) -> None:
+    agent_session_cli.run_agent_session_pause(args)
+
+
+def _handle_agent_session_resume(args: argparse.Namespace) -> None:
+    agent_session_cli.run_agent_session_resume(args, _agent_session_dependencies())
+
+
+def _handle_agent_session_cancel(args: argparse.Namespace) -> None:
+    agent_session_cli.run_agent_session_cancel(args)
 
 
 def _handle_memory_explain(args: argparse.Namespace) -> None:
@@ -5944,6 +5995,143 @@ def build_parser() -> argparse.ArgumentParser:
     )
     agent_role_retire_parser.set_defaults(handler=_handle_agent_role_retire)
 
+    agent_session_parser = subparsers.add_parser(
+        "agent-session",
+        help="Manage supervised agent sessions",
+        parents=[db_parent_optional],
+    )
+    agent_session_subparsers = agent_session_parser.add_subparsers(
+        dest="agent_session_command",
+    )
+    agent_session_start_parser = agent_session_subparsers.add_parser(
+        "start",
+        help="Start a new agent session",
+        parents=[db_parent_optional],
+    )
+    agent_session_start_parser.add_argument(
+        "--goal",
+        required=True,
+        help="Goal statement for the session",
+    )
+    agent_session_start_parser.add_argument(
+        "--role",
+        default=None,
+        help="Agent role name or id (determines memory profile)",
+    )
+    agent_session_start_parser.add_argument(
+        "--max-steps",
+        type=int,
+        default=12,
+        help="Maximum number of session steps (default: 12)",
+    )
+    agent_session_start_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit JSON output",
+    )
+    agent_session_start_parser.set_defaults(handler=_handle_agent_session_start)
+
+    agent_session_show_parser = agent_session_subparsers.add_parser(
+        "show",
+        help="Show a session",
+        parents=[db_parent_optional],
+    )
+    agent_session_show_parser.add_argument(
+        "session_id",
+        help="Session id",
+    )
+    agent_session_show_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit JSON output",
+    )
+    agent_session_show_parser.set_defaults(handler=_handle_agent_session_show)
+
+    agent_session_list_parser = agent_session_subparsers.add_parser(
+        "list",
+        help="List sessions",
+        parents=[db_parent_optional],
+    )
+    agent_session_list_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit JSON output",
+    )
+    agent_session_list_parser.set_defaults(handler=_handle_agent_session_list)
+
+    agent_session_pause_parser = agent_session_subparsers.add_parser(
+        "pause",
+        help="Pause a session",
+        parents=[db_parent_optional],
+    )
+    agent_session_pause_parser.add_argument(
+        "session_id",
+        help="Session id",
+    )
+    agent_session_pause_parser.add_argument(
+        "--yes",
+        action="store_true",
+        help="Skip confirmation prompt",
+    )
+    agent_session_pause_parser.add_argument(
+        "--non-interactive",
+        action="store_true",
+        help="Fail closed instead of prompting",
+    )
+    agent_session_pause_parser.set_defaults(handler=_handle_agent_session_pause)
+
+    agent_session_resume_parser = agent_session_subparsers.add_parser(
+        "resume",
+        help="Resume a session (one iteration)",
+        parents=[db_parent_optional],
+    )
+    agent_session_resume_parser.add_argument(
+        "session_id",
+        help="Session id",
+    )
+    agent_session_resume_parser.add_argument(
+        "--policy",
+        default=None,
+        help="Path to a JSON policy file",
+    )
+    agent_session_resume_parser.add_argument(
+        "--yes",
+        action="store_true",
+        help="Skip confirmation prompts for high-risk plans",
+    )
+    agent_session_resume_parser.add_argument(
+        "--non-interactive",
+        action="store_true",
+        help="Fail closed instead of prompting",
+    )
+    agent_session_resume_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Show the plan and assessment without enqueueing",
+    )
+    agent_session_resume_parser.set_defaults(handler=_handle_agent_session_resume)
+
+    agent_session_cancel_parser = agent_session_subparsers.add_parser(
+        "cancel",
+        help="Cancel a session",
+        parents=[db_parent_optional],
+    )
+    agent_session_cancel_parser.add_argument(
+        "session_id",
+        help="Session id",
+    )
+    agent_session_cancel_parser.add_argument(
+        "--yes",
+        action="store_true",
+        help="Skip confirmation prompt",
+    )
+    agent_session_cancel_parser.add_argument(
+        "--non-interactive",
+        action="store_true",
+        help="Fail closed instead of prompting",
+    )
+    agent_session_cancel_parser.set_defaults(handler=_handle_agent_session_cancel)
+
     daemon_parser = subparsers.add_parser(
         "daemon",
         help="Run the GISMO daemon loop",
@@ -6450,6 +6638,8 @@ def main() -> None:
     argv = sys.argv[1:]
     if len(argv) > 1 and argv[0] == "agent" and argv[1] == "role":
         argv = ["agent-role", *argv[2:]]
+    if len(argv) > 1 and argv[0] == "agent" and argv[1] == "session":
+        argv = ["agent-session", *argv[2:]]
     if _has_shell_prompt_paste(argv):
         print(
             "It looks like you pasted your shell prompt. "

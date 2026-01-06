@@ -6,7 +6,7 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
-from gismo.core.models import Run, Task, ToolCall
+from gismo.core.models import AgentSession, Run, Task, ToolCall
 from gismo.core.paths import resolve_exports_dir
 from gismo.core.state import MemoryEventRecord, MemoryProvenance, StateStore
 
@@ -32,8 +32,21 @@ def export_run_jsonl(
     tool_calls = list(state_store.list_tool_calls(run_id))
     memory_provenance = state_store.get_memory_provenance(run.id)
     plan_event_id = None
+    session: AgentSession | None = None
+    session_events: list[Any] = []
     if isinstance(run.metadata_json, dict):
         plan_event_id = run.metadata_json.get("plan_event_id")
+        session_context = run.metadata_json.get("agent_session")
+        if isinstance(session_context, dict):
+            session_id = session_context.get("session_id")
+            if session_id:
+                session = state_store.get_agent_session(session_id)
+                session_events = [
+                    event
+                    for event in state_store.list_events_by_type("agent_session")
+                    if isinstance(event.json_payload, dict)
+                    and event.json_payload.get("session_id") == session_id
+                ]
     plan_event = state_store.get_event(plan_event_id) if plan_event_id else None
     memory_events = state_store.list_memory_events(
         related_run_id=run.id,
@@ -43,6 +56,8 @@ def export_run_jsonl(
         run,
         tasks,
         tool_calls,
+        agent_session=session,
+        session_events=session_events,
         memory_provenance=memory_provenance,
         plan_event=plan_event,
         memory_events=memory_events,
@@ -93,6 +108,8 @@ def _build_records(
     tasks: list[Task],
     tool_calls: list[ToolCall],
     *,
+    agent_session: AgentSession | None,
+    session_events: list[Any],
     memory_provenance: MemoryProvenance,
     plan_event: Any | None,
     memory_events: list[MemoryEventRecord],
@@ -101,6 +118,13 @@ def _build_records(
     sorted_tasks = sorted(tasks, key=lambda task: task.created_at)
     sorted_calls = sorted(tool_calls, key=lambda call: (call.started_at, call.attempt_number))
     records = [_serialize_run(run, memory_provenance)]
+    if agent_session is not None:
+        records.append(_serialize_agent_session(agent_session))
+    if session_events:
+        records.extend(
+            _serialize_event(event, memory_provenance=memory_provenance, redact=redact)
+            for event in session_events
+        )
     if plan_event is not None:
         records.append(
             _serialize_event(plan_event, memory_provenance=memory_provenance, redact=redact)
@@ -126,6 +150,26 @@ def _serialize_run(run: Run, memory_provenance: MemoryProvenance) -> dict[str, A
         "status": "CREATED",
         "failure_type": "NONE",
         "memory_provenance": memory_provenance.to_dict(),
+    }
+
+
+def _serialize_agent_session(session: AgentSession) -> dict[str, Any]:
+    return {
+        "record_type": "agent_session",
+        "session_id": session.session_id,
+        "role_id": session.role_id,
+        "role_name": session.role_name,
+        "profile_id": session.profile_id,
+        "profile_name": session.profile_name,
+        "goal": session.goal,
+        "status": session.status.value,
+        "created_at": session.created_at.isoformat(),
+        "updated_at": session.updated_at.isoformat(),
+        "last_plan_event_id": session.last_plan_event_id,
+        "last_run_id": session.last_run_id,
+        "step_count": session.step_count,
+        "max_steps": session.max_steps,
+        "notes": session.notes,
     }
 
 

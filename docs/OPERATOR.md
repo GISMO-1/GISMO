@@ -230,11 +230,20 @@ Memory in ask/agent (read-only injection):
 Memory injection trace (bounded, deterministic):
 
   gismo memory explain --plan PLAN_EVENT_ID --json
-  gismo memory preview --memory-profile operator --json
+  gismo memory preview --memory-profile operator --policy policy/dev-operator.json --json
 
 Notes:
 - Ordering is deterministic (updated_at desc, namespace, key).
 - The trace includes eligibility counts, selected items, dropped counts, and an injection_hash.
+
+Memory profiles are governance objects:
+- Profile lifecycle (create/retire) is policy-gated and requires explicit confirmation.
+- Use an operator policy that allows memory.profile.create/retire.
+
+  gismo memory profile create --name operator --description "Operator defaults" \
+    --include-namespace global --include-kind preference --include-kind fact \
+    --max-items 20 --policy policy/dev-operator.json --yes
+  gismo memory profile retire operator --policy policy/dev-operator.json --yes
 
 Memory suggestions:
 - The LLM may emit memory_suggestions.

@@ -145,8 +145,8 @@ Memory management (policy-gated; confirmation required for high-risk namespaces)
   gismo memory profile show operator --policy policy/dev-safe.json
   gismo memory profile create --name operator --description "Operator defaults" \
     --include-namespace global --include-kind preference --include-kind fact \
-    --max-items 20 --policy /path/to/policy.json --yes
-  gismo memory profile retire operator --policy /path/to/policy.json --yes
+    --max-items 20 --policy policy/dev-operator.json --yes
+  gismo memory profile retire operator --policy policy/dev-operator.json --yes
   gismo memory retention list --policy policy/dev-safe.json
   gismo memory retention show global --policy policy/dev-safe.json
   gismo memory retention set global --max-items 500 --ttl-seconds 86400 \
@@ -162,7 +162,7 @@ Memory management (policy-gated; confirmation required for high-risk namespaces)
     --policy policy/dev-safe.json --yes --non-interactive
   gismo memory explain --plan PLAN_EVENT_ID
   gismo memory explain --run RUN_ID --json
-  gismo memory preview --memory-profile operator --json
+  gismo memory preview --memory-profile operator --policy policy/dev-operator.json --json
   gismo memory doctor check --db .gismo/state.db --policy policy/dev-safe.json
   gismo memory doctor check --db .gismo/state.db --policy policy/dev-safe.json --json
   gismo memory doctor repair --rebuild-indexes --policy /path/to/policy.json --yes
@@ -175,7 +175,7 @@ Notes:
 - Namespace retirement requires a policy that allows memory.namespace.retire for the target namespace.
 - Memory profiles control read-only visibility only; they never write memory.
 - Memory profile create/retire requires policy allowance for memory.profile.create and
-  memory.profile.retire plus explicit confirmation.
+  memory.profile.retire plus explicit confirmation (use policy/dev-operator.json).
 - Retention enforcement is policy/confirmation-gated via memory.retention.enforce and runs only on writes.
 - Memory explain is observational only; it reads selection traces captured during ask/agent runs.
 - Memory injection trace is bounded and deterministic; it appears in explain JSON and

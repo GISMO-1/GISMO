@@ -207,3 +207,72 @@ class MemoryProfileCliTest(unittest.TestCase):
         self.assertEqual(show.returncode, 0, show.stderr)
         payload = json.loads(show.stdout)
         self.assertTrue(payload["warnings"])
+
+    def test_memory_profile_create_blocked_by_dev_safe_policy(self) -> None:
+        policy_path = self.repo_root / "policy" / "dev-safe.json"
+        create = _run_cli(
+            [
+                "memory",
+                "profile",
+                "create",
+                "--db",
+                str(self.db_path),
+                "--policy",
+                str(policy_path),
+                "--name",
+                "operator",
+                "--include-namespace",
+                "global",
+                "--non-interactive",
+            ],
+            cwd=self.repo_root,
+        )
+        self.assertNotEqual(create.returncode, 0)
+        self.assertIn("blocked by policy", create.stderr)
+
+    def test_memory_profile_create_and_retire_with_operator_policy(self) -> None:
+        policy_path = self.repo_root / "policy" / "dev-operator.json"
+        create = _run_cli(
+            [
+                "memory",
+                "profile",
+                "create",
+                "--db",
+                str(self.db_path),
+                "--policy",
+                str(policy_path),
+                "--name",
+                "operator",
+                "--description",
+                "Operator profile",
+                "--include-namespace",
+                "global",
+                "--include-kind",
+                "fact",
+                "--yes",
+                "--json",
+            ],
+            cwd=self.repo_root,
+        )
+        self.assertEqual(create.returncode, 0, create.stderr)
+        created = json.loads(create.stdout)
+        self.assertEqual(created["name"], "operator")
+
+        retire = _run_cli(
+            [
+                "memory",
+                "profile",
+                "retire",
+                "operator",
+                "--db",
+                str(self.db_path),
+                "--policy",
+                str(policy_path),
+                "--yes",
+                "--json",
+            ],
+            cwd=self.repo_root,
+        )
+        self.assertEqual(retire.returncode, 0, retire.stderr)
+        retired = json.loads(retire.stdout)
+        self.assertIsNotNone(retired["retired_at"])

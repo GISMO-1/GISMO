@@ -155,15 +155,19 @@ INTENTIONAL LIMITATIONS (NOT BUGS)
 
 RECENT NOTABLE CHANGE (LATEST WORK)
 
-Phase 2 close-out (risk + confirmations + explain artifacts + policy-aware prompt):
-- Added deterministic risk classification (LOW/MEDIUM/HIGH) with stable flags/rationale.
-- Centralized confirmation gating for ask/agent/agent-session plans.
-- Explain artifacts are first-class and recorded in audit events (JSON, stable ordering).
-- Planner prompt now includes policy summaries (allowed tools, shell allowlist, write permissions).
-- Updated docs and tests to reflect Windows-first, audit-only dry runs.
+Phase 3 kickoff (memory injection trace + preview):
+- Added deterministic memory injection trace artifacts (hash + counts + ordered items) in explain JSON.
+- Added memory injection audit events with bounded trace summaries (export-friendly).
+- Added `gismo memory preview --memory-profile ...` (policy-aware, read-only).
+- Updated policies, tests, and docs to cover memory.read and trace visibility.
+
+Next steps:
+- Validate policy-denied namespace behavior on Windows with real profiles.
+- Consider extending preview to prompt-based injection if operators need parity.
 
 Tests run:
 - python scripts/verify.py
+- pytest -q
 
 -------------------------------------------------------------------------------
 

@@ -6,13 +6,15 @@
     "write_note",
     "run_shell",
     "memory.put",
-    "memory.delete"
+    "memory.delete",
+    "memory.read"
   ],
   "fs": { "base_dir": "." },
   "memory": {
     "allow": {
       "memory.put": ["run:*", "project:*", "global"],
-      "memory.delete": ["run:*", "project:*", "global"]
+      "memory.delete": ["run:*", "project:*", "global"],
+      "memory.read": ["run:*", "project:*", "global"]
     },
     "require_confirmation": {
       "memory.put": ["project:*", "global"],

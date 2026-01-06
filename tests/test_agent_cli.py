@@ -13,12 +13,14 @@ from unittest import mock
 
 from gismo.cli import main as cli_main
 from gismo.cli import memory_explain as memory_explain_cli
-from gismo.core.models import QueueStatus
+from gismo.core.export import export_run_jsonl
+from gismo.core.models import EVENT_TYPE_LLM_PLAN, QueueStatus
 from gismo.core.state import StateStore
 from gismo.memory.store import (
     create_profile as memory_create_profile,
     policy_hash_for_path as memory_policy_hash_for_path,
     retire_namespace as memory_retire_namespace,
+    put_item as memory_put_item,
     upsert_item_with_timestamps as memory_upsert_item_with_timestamps,
 )
 
@@ -131,6 +133,84 @@ class AgentCliTest(unittest.TestCase):
             items = state_store.list_queue_items(limit=10)
             self.assertEqual(len(items), 1)
             self.assertEqual(items[0].status, QueueStatus.SUCCEEDED)
+
+    def test_agent_memory_injection_trace_is_exported(self) -> None:
+        response = json.dumps(
+            {
+                "intent": "queue",
+                "assumptions": [],
+                "actions": [
+                    {
+                        "type": "enqueue",
+                        "command": "echo: queued",
+                        "timeout_seconds": 15,
+                        "retries": 0,
+                        "why": "record",
+                        "risk": "low",
+                    }
+                ],
+                "notes": [],
+            }
+        )
+
+        def _fake_run_daemon_once(db_path: str, policy_path: str | None) -> None:
+            state_store = StateStore(db_path)
+            for item in state_store.list_queue_items(limit=10):
+                if item.status == QueueStatus.QUEUED:
+                    state_store.mark_queue_item_succeeded(item.id)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = str(Path(tmpdir) / "state.db")
+            memory_put_item(
+                db_path,
+                namespace="global",
+                key="default_model",
+                kind="preference",
+                value="phi3:mini",
+                tags=None,
+                confidence="high",
+                source="operator",
+                ttl_seconds=None,
+                actor="operator",
+                policy_hash=memory_policy_hash_for_path(None),
+            )
+            with mock.patch.dict(os.environ, self._mock_env(), clear=False):
+                with mock.patch.object(cli_main, "ollama_chat", return_value=response):
+                    with mock.patch.object(cli_main, "_run_daemon_once", _fake_run_daemon_once):
+                        cli_main.run_agent(
+                            db_path,
+                            "enqueue a note",
+                            policy_path=None,
+                            once=True,
+                            max_cycles=1,
+                            yes=True,
+                            dry_run=False,
+                            use_memory=True,
+                        )
+            state_store = StateStore(db_path)
+            plan_event = next(
+                event for event in state_store.list_events() if event.event_type == EVENT_TYPE_LLM_PLAN
+            )
+            payload = plan_event.json_payload
+            assert payload is not None
+            trace = payload["explain"]["memory_injection_trace"]
+            self.assertIn("injection_hash", trace)
+            self.assertEqual(trace["eligibility"]["selected_items"], 1)
+
+            run = state_store.get_latest_run()
+            assert run is not None
+            output_path = export_run_jsonl(state_store, run.id, base_dir=Path(tmpdir))
+            records = [
+                json.loads(line)
+                for line in output_path.read_text(encoding="utf-8").strip().splitlines()
+            ]
+            memory_event = next(
+                record
+                for record in records
+                if record["record_type"] == "memory_event"
+                and record["operation"] == "memory.inject"
+            )
+            self.assertIn("injection_hash", memory_event["result_meta"])
 
     def test_agent_requires_confirmation_for_shell(self) -> None:
         response = json.dumps(

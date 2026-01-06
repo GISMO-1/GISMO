@@ -1,4 +1,9 @@
 {
-  "allowed_tools": ["echo", "read_file", "list_dir"],
-  "fs": { "base_dir": "." }
+  "allowed_tools": ["echo", "read_file", "list_dir", "memory.read"],
+  "fs": { "base_dir": "." },
+  "memory": {
+    "allow": {
+      "memory.read": ["*"]
+    }
+  }
 }

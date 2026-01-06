@@ -1193,7 +1193,7 @@ class MemoryStore:
             "AND (namespace = ? OR namespace LIKE ?) "
             f"AND kind IN ({kind_placeholders}) "
             f"AND confidence IN ({confidence_placeholders}) "
-            "ORDER BY updated_at DESC, key ASC "
+            "ORDER BY updated_at DESC, namespace ASC, key ASC, id ASC "
             "LIMIT ?"
         )
         params: list[Any] = [

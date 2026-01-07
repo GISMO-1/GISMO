@@ -314,32 +314,6 @@ def _action_tools_allowed(command_text: str, policy_summary: PolicySummary) -> b
     return all(tool in policy_summary.allowed_tools for tool in tool_names)
 
 
-def _select_inquire_action(
-    actions: list[dict[str, object]],
-    *,
-    policy_summary: PolicySummary,
-) -> dict[str, object] | None:
-    for action in actions:
-        command_text = action.get("command") or ""
-        if not command_is_readonly(command_text):
-            continue
-        if _action_tools_allowed(command_text, policy_summary):
-            return action
-    if "echo" in policy_summary.allowed_tools:
-        return {
-            "type": "enqueue",
-            "command": (
-                "echo: No action required; inquiries are read-only. "
-                "Use `gismo memory get ...` if you need to inspect stored state."
-            ),
-            "timeout_seconds": 30,
-            "retries": 0,
-            "why": "inquiry response without side effects",
-            "risk": "low",
-        }
-    return None
-
-
 def _enforce_inquire_readonly(
     plan: dict,
     *,
@@ -353,31 +327,61 @@ def _enforce_inquire_readonly(
     actions = list(plan.get("actions") or [])
     if not actions:
         return plan
-    if not any(command_implies_write(action.get("command") or "") for action in actions):
-        return plan
-    fallback = _select_inquire_action(actions, policy_summary=policy_summary)
-    if fallback is None:
-        message = (
-            "Inquire intent included write actions, but no read-only fallback is allowed by policy."
+    normalized: list[dict[str, object]] = []
+    invalid_actions: list[str] = []
+    modified = False
+    for action in actions:
+        command_text = action.get("command") or ""
+        command_str = command_text if isinstance(command_text, str) else str(command_text)
+        command_str = command_str.strip()
+        lowered = command_str.lower()
+        if lowered.startswith("enqueue:"):
+            command_str = command_str.split(":", 1)[1].strip()
+            modified = True
+        if not command_str:
+            invalid_actions.append("empty action")
+            continue
+        if not command_str.lower().startswith("echo:"):
+            invalid_actions.append(command_str)
+            continue
+        if not _action_tools_allowed(command_str, policy_summary):
+            invalid_actions.append(command_str)
+            continue
+        if action.get("type") != "echo":
+            modified = True
+        normalized.append(
+            {
+                "type": "echo",
+                "command": command_str,
+                "timeout_seconds": 0,
+                "retries": 0,
+                "why": action.get("why") or "answer inquiry without enqueue",
+                "risk": infer_action_risk(command_str).lower(),
+            }
         )
+    if invalid_actions:
+        message = "Inquire intent must be echo-only and cannot enqueue actions."
         if non_interactive:
             print(f"ERROR: {message}", file=sys.stderr)
             raise SystemExit(2)
         notes = _coerce_str_list(plan.get("notes"))
         notes.append(message)
-        plan["actions"] = []
+        plan["actions"] = normalized
         plan["notes"] = notes
         return plan
-    fallback = dict(fallback)
-    fallback["risk"] = _merge_action_risk(
-        str(fallback.get("risk") or "medium"),
-        infer_action_risk(str(fallback.get("command") or "")).lower(),
-    )
-    plan["actions"] = [fallback]
-    notes = _coerce_str_list(plan.get("notes"))
-    notes.append("Normalized inquire intent to read-only action; removed write actions.")
-    plan["notes"] = notes
+    if modified:
+        notes = _coerce_str_list(plan.get("notes"))
+        notes.append("Normalized inquire intent to non-enqueue echo actions.")
+        plan["notes"] = notes
+    plan["actions"] = normalized
     return plan
+
+
+def _is_inquire_intent(plan: dict) -> bool:
+    intent = plan.get("intent")
+    if not isinstance(intent, str):
+        return False
+    return intent.strip().lower() == "inquire"
 
 
 def _first_non_option_token(argv: list[str]) -> str | None:
@@ -543,6 +547,7 @@ def _normalize_llm_plan(plan: dict, max_actions: int) -> dict:
     notes = _coerce_str_list(plan.get("notes"))
     raw_actions = plan.get("actions")
     actions: list[dict[str, object]] = []
+    allowed_action_types = {"enqueue", "echo"}
     if isinstance(raw_actions, list):
         for action in raw_actions:
             if not isinstance(action, dict):
@@ -586,7 +591,7 @@ def _normalize_llm_plan(plan: dict, max_actions: int) -> dict:
             risk_text = risk.strip().lower() if isinstance(risk, str) else ""
             if risk_text not in {"low", "medium", "high"}:
                 risk_text = "medium"
-            if action_type_text != "enqueue":
+            if action_type_text not in allowed_action_types:
                 coerced_command = _coerce_action_type_to_command(action_type_text)
                 if coerced_command:
                     action_type_text = "enqueue"
@@ -620,7 +625,13 @@ def _normalize_llm_plan(plan: dict, max_actions: int) -> dict:
             f"Truncated actions from {original_action_count} to {max_actions} based on --max-actions."
         )
         actions = actions[:max_actions]
-    unknown_types = sorted({a["type"] for a in actions if a["type"] and a["type"] != "enqueue"})
+    unknown_types = sorted(
+        {
+            a["type"]
+            for a in actions
+            if a["type"] and a["type"] not in allowed_action_types
+        }
+    )
     if unknown_types:
         notes.append(f"Ignored unsupported action types: {', '.join(unknown_types)}.")
     memory_suggestions = _normalize_memory_suggestions(plan.get("memory_suggestions"), notes)
@@ -3856,6 +3867,15 @@ def run_ask(
                 json_payload=payload,
                 event_id=plan_event_id,
             )
+        if _is_inquire_intent(plan):
+            if json_output:
+                _print_plan_json(
+                    plan=plan,
+                    explain_payload=explain_payload,
+                    enqueue=False,
+                    dry_run=dry_run,
+                )
+            return
         if json_output and not enqueue:
             _print_plan_json(
                 plan=plan,

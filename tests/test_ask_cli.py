@@ -1182,9 +1182,157 @@ class AskCliTest(unittest.TestCase):
             assert payload is not None
             plan = payload["plan"]
             actions = plan["actions"]
+            self.assertEqual(len(actions), 0)
+            self.assertIn(
+                "Inquire intent must be echo-only and cannot enqueue actions.",
+                plan["notes"],
+            )
+
+    def test_ask_inquire_with_memory_profile_is_echo_only(self) -> None:
+        response = json.dumps(
+            {
+                "intent": "inquire",
+                "assumptions": [],
+                "actions": [
+                    {
+                        "type": "enqueue",
+                        "command": "echo: Default model is phi3:mini",
+                        "timeout_seconds": 30,
+                        "retries": 0,
+                        "why": "answer from memory",
+                        "risk": "low",
+                    }
+                ],
+                "notes": [],
+            }
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = str(Path(tmpdir) / "state.db")
+            policy_hash = memory_policy_hash_for_path(None)
+            memory_put_item(
+                db_path,
+                namespace="global",
+                key="default_model",
+                kind="preference",
+                value="phi3:mini",
+                tags=None,
+                confidence="high",
+                source="operator",
+                ttl_seconds=None,
+                actor="test",
+                policy_hash=policy_hash,
+            )
+            profile = memory_create_profile(
+                db_path,
+                name="operator",
+                description="Operator defaults",
+                include_namespaces=["global"],
+                exclude_namespaces=None,
+                include_kinds=["preference"],
+                exclude_kinds=None,
+                max_items=5,
+            )
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "GISMO_OLLAMA_MODEL": "",
+                    "GISMO_OLLAMA_TIMEOUT_S": "",
+                    "GISMO_OLLAMA_URL": "",
+                    "GISMO_LLM_MODEL": "",
+                    "OLLAMA_HOST": "",
+                },
+                clear=False,
+            ):
+                with mock.patch.object(cli_main, "ollama_chat", return_value=response):
+                    buffer = io.StringIO()
+                    with contextlib.redirect_stdout(buffer):
+                        cli_main.run_ask(
+                            db_path,
+                            "What is my default model preference?",
+                            model=None,
+                            host=None,
+                            timeout_s=None,
+                            enqueue=False,
+                            dry_run=True,
+                            max_actions=5,
+                            yes=False,
+                            explain=False,
+                            memory_profile=profile.name,
+                        )
+            output = buffer.getvalue()
+            self.assertIn("phi3:mini", output)
+            state_store = StateStore(db_path)
+            event = state_store.list_events()[0]
+            payload = event.json_payload
+            assert payload is not None
+            plan = payload["plan"]
+            self.assertEqual(plan["intent"].lower(), "inquire")
+            actions = plan["actions"]
+            self.assertTrue(all(action["type"] != "enqueue" for action in actions))
+            self.assertTrue(
+                all(
+                    not str(action["command"]).strip().lower().startswith("enqueue:")
+                    for action in actions
+                )
+            )
+            explain = payload["explain"]
+            self.assertEqual(explain["risk_level"], "LOW")
+            self.assertEqual(explain["risk_flags"], [])
+
+    def test_ask_inquire_strips_enqueue_prefix_for_echo(self) -> None:
+        response = json.dumps(
+            {
+                "intent": "inquire",
+                "assumptions": [],
+                "actions": [
+                    {
+                        "type": "enqueue",
+                        "command": "enqueue: echo: hello from GISMO",
+                        "timeout_seconds": 30,
+                        "retries": 0,
+                        "why": "answer",
+                        "risk": "low",
+                    }
+                ],
+                "notes": [],
+            }
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = str(Path(tmpdir) / "state.db")
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "GISMO_OLLAMA_MODEL": "",
+                    "GISMO_OLLAMA_TIMEOUT_S": "",
+                    "GISMO_OLLAMA_URL": "",
+                    "GISMO_LLM_MODEL": "",
+                    "OLLAMA_HOST": "",
+                },
+                clear=False,
+            ):
+                with mock.patch.object(cli_main, "ollama_chat", return_value=response):
+                    cli_main.run_ask(
+                        db_path,
+                        "What is my default model preference?",
+                        model=None,
+                        host=None,
+                        timeout_s=None,
+                        enqueue=False,
+                        dry_run=True,
+                        max_actions=5,
+                        yes=False,
+                        explain=False,
+                    )
+            state_store = StateStore(db_path)
+            event = state_store.list_events()[0]
+            payload = event.json_payload
+            assert payload is not None
+            plan = payload["plan"]
+            actions = plan["actions"]
             self.assertEqual(len(actions), 1)
+            self.assertEqual(actions[0]["type"], "echo")
             self.assertTrue(actions[0]["command"].startswith("echo:"))
-            self.assertNotIn("note:", actions[0]["command"])
+            self.assertFalse(actions[0]["command"].lower().startswith("enqueue:"))
 
     def test_ask_write_action_risk_is_high_and_matches_plan(self) -> None:
         response = json.dumps(

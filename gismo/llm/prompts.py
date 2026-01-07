@@ -13,10 +13,11 @@ def build_system_prompt(
     constraints = "\n".join(
         [
             "Planner constraints:",
-            "- enqueue-only (never execute directly)",
+            "- enqueue-only (never execute directly) unless intent is inquire",
             f"- max_actions: {max_actions}",
             "- prefer readonly tools when possible",
-            "- if intent is inquire, do not propose writes; answer with echo or other read-only tools",
+            "- if intent is inquire, do not enqueue; answer with echo actions only or no actions",
+            "- if intent is inquire, use action.type=\"echo\" with command \"echo: ...\"",
         ]
     )
     return (
@@ -57,8 +58,8 @@ def build_system_prompt(
         "    }\n"
         "  ]\n"
         "}\n"
-        "Rules: action.type MUST be exactly \"enqueue\" (string). "
-        "Do not emit any other action types. "
+        "Rules: action.type MUST be either \"enqueue\" or \"echo\" (string). "
+        "Use \"echo\" only for intent=inquire. "
         "command must be a GISMO operator command string (echo:, note:, shell:, or graph:), "
         "for example \"echo: hello\". "
         "Keep actions small and sequenced. "
@@ -68,6 +69,7 @@ def build_system_prompt(
         "that describes the batch instead of listing each item. "
         "If the user request is unsafe or unsupported, return actions as an empty array "
         "and explain why in notes. "
+        "If intent is inquire, do not include any enqueue actions; use echo actions or none. "
         "Examples:\n"
         "{\"intent\":\"greet\",\"assumptions\":[],\"actions\":[{\"type\":\"enqueue\","
         "\"command\":\"echo: hello\",\"timeout_seconds\":30,\"retries\":0,"
@@ -75,6 +77,10 @@ def build_system_prompt(
         "{\"intent\":\"record\",\"assumptions\":[\"Operator requested a note\"],"
         "\"actions\":[{\"type\":\"enqueue\",\"command\":\"note: logged\","
         "\"timeout_seconds\":30,\"retries\":0,\"why\":\"record a note\","
+        "\"risk\":\"low\"}],\"notes\":[]}\n"
+        "{\"intent\":\"inquire\",\"assumptions\":[],"
+        "\"actions\":[{\"type\":\"echo\",\"command\":\"echo: model is phi3:mini\","
+        "\"timeout_seconds\":0,\"retries\":0,\"why\":\"answer inquiry\","
         "\"risk\":\"low\"}],\"notes\":[]}\n"
         "{\"intent\":\"unsupported\",\"assumptions\":[],\"actions\":[],"
         "\"notes\":[\"Request requires unsupported tooling.\"]}"

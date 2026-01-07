@@ -156,18 +156,17 @@ INTENTIONAL LIMITATIONS (NOT BUGS)
 
 RECENT NOTABLE CHANGE (LATEST WORK)
 
-Ask planner inquire enforcement + risk alignment:
-- Enforced read-only normalization for intent=inquire and added safe echo fallback behavior.
-- Normalized per-action risk to align with plan-level risk flags on writes.
-- Updated prompts/docs/tests to reflect read-only inquiry defaults and failure modes.
+Ask planner inquire non-enqueue enforcement:
+- Tightened inquire prompt guidance to forbid enqueue actions and prefer echo-only answers.
+- Enforced inquire normalization to strip enqueue prefixes, coerce to echo-only actions, or fail closed.
+- Updated ask execution to bypass enqueue path for inquire and refreshed docs/tests for the new behavior.
 
 Next steps:
-- Validate inquire behavior against operator workflows and policy combinations.
-- Expand operator guidance for inquiry vs write intent if support tickets show confusion.
+- Validate inquire output formatting in operator workflows (dry-run + JSON).
+- Monitor for any policy combinations that suppress echo and ensure fail-closed messaging is clear.
 
 Tests run:
 - python scripts/verify.py
-- pytest -q
 
 -------------------------------------------------------------------------------
 

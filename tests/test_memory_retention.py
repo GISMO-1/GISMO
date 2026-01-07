@@ -48,24 +48,24 @@ class MemoryRetentionCliTest(unittest.TestCase):
         return row[0], json.loads(row[1])
 
     def _insert_item(self, namespace: str, key: str, created_at: str) -> None:
-        store = MemoryStore(str(self.db_path))
-        store.upsert_item_with_timestamps(
-            namespace=namespace,
-            key=key,
-            kind="note",
-            value=key,
-            tags=None,
-            confidence="low",
-            source="operator",
-            ttl_seconds=None,
-            is_tombstoned=False,
-            created_at=created_at,
-            updated_at=created_at,
-            update_created_at=True,
-            actor="operator",
-            policy_hash=policy_hash_for_path(None),
-            operation="put",
-        )
+        with MemoryStore(str(self.db_path)) as store:
+            store.upsert_item_with_timestamps(
+                namespace=namespace,
+                key=key,
+                kind="note",
+                value=key,
+                tags=None,
+                confidence="low",
+                source="operator",
+                ttl_seconds=None,
+                is_tombstoned=False,
+                created_at=created_at,
+                updated_at=created_at,
+                update_created_at=True,
+                actor="operator",
+                policy_hash=policy_hash_for_path(None),
+                operation="put",
+            )
 
     def test_retention_set_list_show_clear(self) -> None:
         policy_path = self._write_policy(
@@ -190,13 +190,13 @@ class MemoryRetentionCliTest(unittest.TestCase):
                 },
             }
         )
-        store = MemoryStore(str(self.db_path))
-        store.set_retention_rule(
-            namespace="global",
-            max_items=2,
-            ttl_seconds=None,
-            policy_source="operator",
-        )
+        with MemoryStore(str(self.db_path)) as store:
+            store.set_retention_rule(
+                namespace="global",
+                max_items=2,
+                ttl_seconds=None,
+                policy_source="operator",
+            )
         base = datetime(2024, 1, 1, tzinfo=timezone.utc)
         self._insert_item("global", "alpha", (base - timedelta(hours=2)).isoformat())
         self._insert_item("global", "beta", (base - timedelta(hours=1)).isoformat())
@@ -270,13 +270,13 @@ class MemoryRetentionCliTest(unittest.TestCase):
                 },
             }
         )
-        store = MemoryStore(str(self.db_path))
-        store.set_retention_rule(
-            namespace="global",
-            max_items=None,
-            ttl_seconds=3600,
-            policy_source="operator",
-        )
+        with MemoryStore(str(self.db_path)) as store:
+            store.set_retention_rule(
+                namespace="global",
+                max_items=None,
+                ttl_seconds=3600,
+                policy_source="operator",
+            )
         now = datetime.now(timezone.utc)
         self._insert_item("global", "oldest", (now - timedelta(hours=3)).isoformat())
         self._insert_item("global", "older", (now - timedelta(hours=2)).isoformat())
@@ -331,13 +331,13 @@ class MemoryRetentionCliTest(unittest.TestCase):
                 },
             }
         )
-        store = MemoryStore(str(self.db_path))
-        store.set_retention_rule(
-            namespace="global",
-            max_items=1,
-            ttl_seconds=None,
-            policy_source="operator",
-        )
+        with MemoryStore(str(self.db_path)) as store:
+            store.set_retention_rule(
+                namespace="global",
+                max_items=1,
+                ttl_seconds=None,
+                policy_source="operator",
+            )
         self._insert_item(
             "global",
             "seed",
@@ -398,13 +398,13 @@ class MemoryRetentionCliTest(unittest.TestCase):
                 },
             }
         )
-        store = MemoryStore(str(self.db_path))
-        store.set_retention_rule(
-            namespace="global",
-            max_items=1,
-            ttl_seconds=None,
-            policy_source="operator",
-        )
+        with MemoryStore(str(self.db_path)) as store:
+            store.set_retention_rule(
+                namespace="global",
+                max_items=1,
+                ttl_seconds=None,
+                policy_source="operator",
+            )
         self._insert_item(
             "global",
             "seed",

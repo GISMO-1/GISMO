@@ -77,13 +77,13 @@ class AgentCliTest(unittest.TestCase):
             self.assertIn("=== Agent Summary ===", output)
             self.assertIn("Final status: dry-run", output)
 
-            state_store = StateStore(db_path)
-            self.assertEqual(state_store.list_queue_items(limit=10), [])
-            event = state_store.list_events()[0]
-            payload = event.json_payload
-            assert payload is not None
-            self.assertIn("explain", payload)
-            self.assertEqual(payload["explain"]["risk_level"], "LOW")
+            with StateStore(db_path) as state_store:
+                self.assertEqual(state_store.list_queue_items(limit=10), [])
+                event = state_store.list_events()[0]
+                payload = event.json_payload
+                assert payload is not None
+                self.assertIn("explain", payload)
+                self.assertEqual(payload["explain"]["risk_level"], "LOW")
 
     def test_agent_once_enqueues_and_executes(self) -> None:
         response = json.dumps(
@@ -105,10 +105,10 @@ class AgentCliTest(unittest.TestCase):
         )
 
         def _fake_run_daemon_once(db_path: str, policy_path: str | None) -> None:
-            state_store = StateStore(db_path)
-            for item in state_store.list_queue_items(limit=10):
-                if item.status == QueueStatus.QUEUED:
-                    state_store.mark_queue_item_succeeded(item.id)
+            with StateStore(db_path) as state_store:
+                for item in state_store.list_queue_items(limit=10):
+                    if item.status == QueueStatus.QUEUED:
+                        state_store.mark_queue_item_succeeded(item.id)
 
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = str(Path(tmpdir) / "state.db")
@@ -129,10 +129,10 @@ class AgentCliTest(unittest.TestCase):
             output = buffer.getvalue()
             self.assertIn("Final status: succeeded", output)
 
-            state_store = StateStore(db_path)
-            items = state_store.list_queue_items(limit=10)
-            self.assertEqual(len(items), 1)
-            self.assertEqual(items[0].status, QueueStatus.SUCCEEDED)
+            with StateStore(db_path) as state_store:
+                items = state_store.list_queue_items(limit=10)
+                self.assertEqual(len(items), 1)
+                self.assertEqual(items[0].status, QueueStatus.SUCCEEDED)
 
     def test_agent_memory_injection_trace_is_exported(self) -> None:
         response = json.dumps(
@@ -154,10 +154,10 @@ class AgentCliTest(unittest.TestCase):
         )
 
         def _fake_run_daemon_once(db_path: str, policy_path: str | None) -> None:
-            state_store = StateStore(db_path)
-            for item in state_store.list_queue_items(limit=10):
-                if item.status == QueueStatus.QUEUED:
-                    state_store.mark_queue_item_succeeded(item.id)
+            with StateStore(db_path) as state_store:
+                for item in state_store.list_queue_items(limit=10):
+                    if item.status == QueueStatus.QUEUED:
+                        state_store.mark_queue_item_succeeded(item.id)
 
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = str(Path(tmpdir) / "state.db")
@@ -187,30 +187,32 @@ class AgentCliTest(unittest.TestCase):
                             dry_run=False,
                             use_memory=True,
                         )
-            state_store = StateStore(db_path)
-            plan_event = next(
-                event for event in state_store.list_events() if event.event_type == EVENT_TYPE_LLM_PLAN
-            )
-            payload = plan_event.json_payload
-            assert payload is not None
-            trace = payload["explain"]["memory_injection_trace"]
-            self.assertIn("injection_hash", trace)
-            self.assertEqual(trace["eligibility"]["selected_items"], 1)
+            with StateStore(db_path) as state_store:
+                plan_event = next(
+                    event
+                    for event in state_store.list_events()
+                    if event.event_type == EVENT_TYPE_LLM_PLAN
+                )
+                payload = plan_event.json_payload
+                assert payload is not None
+                trace = payload["explain"]["memory_injection_trace"]
+                self.assertIn("injection_hash", trace)
+                self.assertEqual(trace["eligibility"]["selected_items"], 1)
 
-            run = state_store.get_latest_run()
-            assert run is not None
-            output_path = export_run_jsonl(state_store, run.id, base_dir=Path(tmpdir))
-            records = [
-                json.loads(line)
-                for line in output_path.read_text(encoding="utf-8").strip().splitlines()
-            ]
-            memory_event = next(
-                record
-                for record in records
-                if record["record_type"] == "memory_event"
-                and record["operation"] == "memory.inject"
-            )
-            self.assertIn("injection_hash", memory_event["result_meta"])
+                run = state_store.get_latest_run()
+                assert run is not None
+                output_path = export_run_jsonl(state_store, run.id, base_dir=Path(tmpdir))
+                records = [
+                    json.loads(line)
+                    for line in output_path.read_text(encoding="utf-8").strip().splitlines()
+                ]
+                memory_event = next(
+                    record
+                    for record in records
+                    if record["record_type"] == "memory_event"
+                    and record["operation"] == "memory.inject"
+                )
+                self.assertIn("injection_hash", memory_event["result_meta"])
 
     def test_agent_requires_confirmation_for_shell(self) -> None:
         response = json.dumps(
@@ -246,8 +248,8 @@ class AgentCliTest(unittest.TestCase):
                                 dry_run=False,
                             )
             self.assertEqual(exc.exception.code, 2)
-            state_store = StateStore(db_path)
-            self.assertEqual(state_store.list_queue_items(limit=10), [])
+            with StateStore(db_path) as state_store:
+                self.assertEqual(state_store.list_queue_items(limit=10), [])
 
     def test_agent_memory_suggestions_are_advisory_by_default(self) -> None:
         response = json.dumps(
@@ -362,14 +364,14 @@ class AgentCliTest(unittest.TestCase):
                         dry_run=True,
                         memory_profile=profile.name,
                     )
-            state_store = StateStore(db_path)
-            event = state_store.list_events()[0]
-            payload = event.json_payload
-            assert payload is not None
-            injected_keys = payload.get("memory_injected_keys")
-            self.assertEqual(injected_keys, [{"namespace": "global", "key": "alpha"}])
-            profile_payload = payload.get("memory_profile") or {}
-            self.assertEqual(profile_payload.get("profile_id"), profile.profile_id)
+            with StateStore(db_path) as state_store:
+                event = state_store.list_events()[0]
+                payload = event.json_payload
+                assert payload is not None
+                injected_keys = payload.get("memory_injected_keys")
+                self.assertEqual(injected_keys, [{"namespace": "global", "key": "alpha"}])
+                profile_payload = payload.get("memory_profile") or {}
+                self.assertEqual(profile_payload.get("profile_id"), profile.profile_id)
             with contextlib.closing(sqlite3.connect(db_path)) as connection:
                 row = connection.execute(
                     "SELECT request_json FROM memory_events "
@@ -440,13 +442,12 @@ class AgentCliTest(unittest.TestCase):
                 exclude_kinds=None,
                 max_items=1,
             )
-            state_store = StateStore(db_path)
-            role = state_store.create_agent_role(
-                name="planner",
-                description="Planner role",
-                memory_profile_id=profile.profile_id,
-            )
-            state_store.close()
+            with StateStore(db_path) as state_store:
+                role = state_store.create_agent_role(
+                    name="planner",
+                    description="Planner role",
+                    memory_profile_id=profile.profile_id,
+                )
             with mock.patch.dict(os.environ, self._mock_env(), clear=False):
                 with mock.patch.object(cli_main, "ollama_chat", return_value=response):
                     cli_main.run_agent(
@@ -459,29 +460,29 @@ class AgentCliTest(unittest.TestCase):
                         dry_run=False,
                         role=role.name,
                     )
-            state_store = StateStore(db_path)
-            event = next(
-                (item for item in state_store.list_events() if item.json_payload),
-                None,
-            )
-            self.assertIsNotNone(event)
-            payload = event.json_payload or {}
-            injected_keys = payload.get("memory_injected_keys")
-            self.assertEqual(injected_keys, [{"namespace": "global", "key": "alpha"}])
-            role_payload = payload.get("agent_role") or {}
-            self.assertEqual(role_payload.get("role_id"), role.role_id)
-            self.assertEqual(role_payload.get("role_name"), role.name)
-            self.assertEqual(role_payload.get("memory_profile_id"), profile.profile_id)
-            runs = list(state_store.list_runs(limit=5))
-            self.assertEqual(len(runs), 1)
-            run_role = runs[0].metadata_json.get("agent_role", {})
-            self.assertEqual(run_role.get("role_id"), role.role_id)
-            state_store.close()
+            with StateStore(db_path) as state_store:
+                event = next(
+                    (item for item in state_store.list_events() if item.json_payload),
+                    None,
+                )
+                self.assertIsNotNone(event)
+                payload = event.json_payload or {}
+                injected_keys = payload.get("memory_injected_keys")
+                self.assertEqual(injected_keys, [{"namespace": "global", "key": "alpha"}])
+                role_payload = payload.get("agent_role") or {}
+                self.assertEqual(role_payload.get("role_id"), role.role_id)
+                self.assertEqual(role_payload.get("role_name"), role.name)
+                self.assertEqual(role_payload.get("memory_profile_id"), profile.profile_id)
+                runs = list(state_store.list_runs(limit=5))
+                self.assertEqual(len(runs), 1)
+                run_role = runs[0].metadata_json.get("agent_role", {})
+                self.assertEqual(run_role.get("role_id"), role.role_id)
+                event_id = event.id
 
             args = argparse.Namespace(
                 db_path=db_path,
                 run=None,
-                plan=event.id,
+                plan=event_id,
                 limit=memory_explain_cli.DEFAULT_EXPLAIN_LIMIT,
                 json=True,
             )
@@ -551,9 +552,9 @@ class AgentCliTest(unittest.TestCase):
             self.assertIsNotNone(event_row)
             related_event_id = event_row[0]
             self.assertIsNotNone(related_event_id)
-            state_store = StateStore(db_path)
-            event = state_store.list_events()[0]
-            self.assertEqual(event.id, related_event_id)
+            with StateStore(db_path) as state_store:
+                event = state_store.list_events()[0]
+                self.assertEqual(event.id, related_event_id)
 
     def test_agent_role_dry_run_releases_db_handle(self) -> None:
         response = json.dumps(
@@ -566,13 +567,12 @@ class AgentCliTest(unittest.TestCase):
         )
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = Path(tmpdir) / "state.db"
-            state_store = StateStore(str(db_path))
-            role = state_store.create_agent_role(
-                name="planner",
-                description=None,
-                memory_profile_id=None,
-            )
-            state_store.close()
+            with StateStore(str(db_path)) as state_store:
+                role = state_store.create_agent_role(
+                    name="planner",
+                    description=None,
+                    memory_profile_id=None,
+                )
             with warnings.catch_warnings():
                 warnings.simplefilter("error", ResourceWarning)
                 with mock.patch.dict(os.environ, self._mock_env(), clear=False):

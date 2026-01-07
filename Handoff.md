@@ -156,14 +156,14 @@ INTENTIONAL LIMITATIONS (NOT BUGS)
 
 RECENT NOTABLE CHANGE (LATEST WORK)
 
-Ask planner inquire non-enqueue enforcement:
-- Tightened inquire prompt guidance to forbid enqueue actions and prefer echo-only answers.
-- Enforced inquire normalization to strip enqueue prefixes, coerce to echo-only actions, or fail closed.
-- Updated ask execution to bypass enqueue path for inquire and refreshed docs/tests for the new behavior.
+SQLite handle guardrails (Windows):
+- Converted CLI tests to use context-managed StateStore/MemoryStore access where they read back state.
+- Added a Windows-only subprocess guardrail test for memory explain handle release.
+- Reinforced expectations that DB handles are closed deterministically after CLI paths.
 
 Next steps:
-- Validate inquire output formatting in operator workflows (dry-run + JSON).
-- Monitor for any policy combinations that suppress echo and ensure fail-closed messaging is clear.
+- Validate ask/agent subprocess flows on Windows for handle hygiene at higher concurrency.
+- Monitor for any new audit/export paths that retain SQLite handles across CLI exits.
 
 Tests run:
 - python scripts/verify.py

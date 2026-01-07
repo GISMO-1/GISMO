@@ -30,6 +30,23 @@ If installed in editable mode:
 
 -------------------------------------------------------------------------------
 
+OPERATOR SMOKE SCRIPTS (WINDOWS)
+
+Quick smoke checks (no Ollama required):
+
+  powershell -ExecutionPolicy Bypass -File scripts/operator_smoke.ps1
+  powershell -ExecutionPolicy Bypass -File scripts/e2e_smoke.ps1
+
+What they prove:
+- operator_smoke.ps1: basic operator run + export on a temp DB.
+- e2e_smoke.ps1: enqueue → daemon --once → export on a temp DB.
+
+Notes:
+- Scripts create temp state DBs under %TEMP% and clean them up on exit.
+- Use -EnableMemoryPreview on e2e_smoke.ps1 to record and verify a memory injection trace event.
+
+-------------------------------------------------------------------------------
+
 STATE & FILE LOCATIONS
 
 Default state database:

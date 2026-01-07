@@ -156,12 +156,13 @@ INTENTIONAL LIMITATIONS (NOT BUGS)
 
 RECENT NOTABLE CHANGE (LATEST WORK)
 
-SQLite handle guardrails (Windows):
-- Converted CLI tests to use context-managed StateStore/MemoryStore access where they read back state.
-- Added a Windows-only subprocess guardrail test for memory explain handle release.
-- Reinforced expectations that DB handles are closed deterministically after CLI paths.
+Operator smoke scripts + handle guardrail:
+- Added Windows-friendly operator smoke scripts (operator + end-to-end enqueue→daemon→export).
+- Added a CLI subprocess regression test that runs daemon --once and asserts DB handles are released.
+- Documented smoke scripts as the recommended operator regression check.
 
 Next steps:
+- Run operator_smoke.ps1 and e2e_smoke.ps1 on Windows after CLI changes.
 - Validate ask/agent subprocess flows on Windows for handle hygiene at higher concurrency.
 - Monitor for any new audit/export paths that retain SQLite handles across CLI exits.
 

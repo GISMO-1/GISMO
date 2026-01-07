@@ -59,6 +59,20 @@ Install (from repo root):
 
 -------------------------------------------------------------------------------
 
+SMOKE SCRIPTS (WINDOWS)
+
+Windows-friendly operator smoke checks (no Ollama required):
+
+  powershell -ExecutionPolicy Bypass -File scripts/operator_smoke.ps1
+  powershell -ExecutionPolicy Bypass -File scripts/e2e_smoke.ps1
+
+Notes:
+- Scripts create a temp DB under %TEMP% and clean it up afterward.
+- `e2e_smoke.ps1` validates enqueue → daemon --once → export for the core operator loop.
+- `e2e_smoke.ps1 -EnableMemoryPreview` records and checks a memory injection trace event (no Ollama).
+
+-------------------------------------------------------------------------------
+
 CANONICAL INVOCATION
 
 Prefer:

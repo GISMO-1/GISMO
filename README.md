@@ -200,8 +200,9 @@ Planner (local LLM via Ollama):
   gismo ask "Remember the default model" --apply-memory-suggestions \
     --policy policy/dev-safe.json --yes
   Notes:
-  - Inquiries are read-only by default; explicit write intent or flags
-    (for example, --enqueue or --apply-memory-suggestions) are required to log/remember.
+  - Inquire intent is echo-only and never enqueues work; ask acts as read-only answer mode.
+  - Explicit write intent or flags (for example, --enqueue or --apply-memory-suggestions)
+    are required to log/remember.
 
 Agent loop (leashed autonomy):
 

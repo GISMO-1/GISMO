@@ -3,6 +3,7 @@ import gc
 import io
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -33,6 +34,15 @@ class DbHandleGuardrailsTest(unittest.TestCase):
             with contextlib.redirect_stdout(io.StringIO()):
                 with contextlib.redirect_stderr(io.StringIO()):
                     cli_main.main()
+
+    def _run_subprocess_cli(self, args: list[str]) -> subprocess.CompletedProcess[str]:
+        cmd = [sys.executable, "-m", "gismo.cli.main", *args]
+        return subprocess.run(
+            cmd,
+            cwd=str(self.repo_root),
+            capture_output=True,
+            text=True,
+        )
 
     def _run_ask(self, db_path: Path, args: list[str], response: str) -> None:
         env = {
@@ -176,6 +186,27 @@ class DbHandleGuardrailsTest(unittest.TestCase):
                     "--json",
                 ]
             )
+            gc.collect()
+            self._assert_db_deletable(db_path)
+
+    @unittest.skipUnless(sys.platform == "win32", "Windows-only handle release check")
+    def test_windows_memory_explain_subprocess_releases_db_handle(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "state.db"
+            with StateStore(str(db_path)) as state_store:
+                run = state_store.create_run(label="guardrail", metadata={})
+            result = self._run_subprocess_cli(
+                [
+                    "--db",
+                    str(db_path),
+                    "memory",
+                    "explain",
+                    "--run",
+                    run.id,
+                    "--json",
+                ]
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
             gc.collect()
             self._assert_db_deletable(db_path)
 

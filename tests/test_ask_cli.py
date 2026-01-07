@@ -80,17 +80,17 @@ class AskCliTest(unittest.TestCase):
             self.assertIn("=== GISMO LLM Plan ===", output)
             self.assertIn("Intent: greet", output)
 
-            state_store = StateStore(db_path)
-            events = state_store.list_events()
-            self.assertTrue(events)
-            event = events[0]
-            self.assertEqual(event.event_type, EVENT_TYPE_LLM_PLAN)
-            payload = event.json_payload
-            assert payload is not None
-            self.assertTrue(payload["dry_run"])
-            self.assertFalse(payload["enqueue"])
-            self.assertIn("explain", payload)
-            self.assertEqual(payload["explain"]["risk_level"], "LOW")
+            with StateStore(db_path) as state_store:
+                events = state_store.list_events()
+                self.assertTrue(events)
+                event = events[0]
+                self.assertEqual(event.event_type, EVENT_TYPE_LLM_PLAN)
+                payload = event.json_payload
+                assert payload is not None
+                self.assertTrue(payload["dry_run"])
+                self.assertFalse(payload["enqueue"])
+                self.assertIn("explain", payload)
+                self.assertEqual(payload["explain"]["risk_level"], "LOW")
 
     def test_ask_enqueue_enqueues_items_and_writes_event(self) -> None:
         response = json.dumps(
@@ -141,16 +141,16 @@ class AskCliTest(unittest.TestCase):
             output = buffer.getvalue()
             self.assertIn("Enqueued items:", output)
 
-            state_store = StateStore(db_path)
-            items = state_store.list_queue_items(limit=10)
-            self.assertEqual(len(items), 1)
-            self.assertEqual(items[0].command_text, "echo: queued")
-            self.assertEqual(items[0].max_retries, 1)
-            self.assertEqual(items[0].timeout_seconds, 15)
+            with StateStore(db_path) as state_store:
+                items = state_store.list_queue_items(limit=10)
+                self.assertEqual(len(items), 1)
+                self.assertEqual(items[0].command_text, "echo: queued")
+                self.assertEqual(items[0].max_retries, 1)
+                self.assertEqual(items[0].timeout_seconds, 15)
 
-            events = state_store.list_events()
-            self.assertTrue(events)
-            self.assertEqual(events[0].event_type, EVENT_TYPE_LLM_PLAN)
+                events = state_store.list_events()
+                self.assertTrue(events)
+                self.assertEqual(events[0].event_type, EVENT_TYPE_LLM_PLAN)
 
     def test_ask_includes_memory_suggestions_in_plan(self) -> None:
         response = json.dumps(
@@ -203,14 +203,14 @@ class AskCliTest(unittest.TestCase):
             self.assertIn("Suggested memory updates (advisory only):", output)
             self.assertIn("gismo memory put", output)
 
-            state_store = StateStore(db_path)
-            event = state_store.list_events()[0]
-            payload = event.json_payload
-            assert payload is not None
-            plan = payload["plan"]
-            suggestions = plan.get("memory_suggestions")
-            self.assertEqual(len(suggestions), 1)
-            self.assertEqual(suggestions[0]["key"], "default_model")
+            with StateStore(db_path) as state_store:
+                event = state_store.list_events()[0]
+                payload = event.json_payload
+                assert payload is not None
+                plan = payload["plan"]
+                suggestions = plan.get("memory_suggestions")
+                self.assertEqual(len(suggestions), 1)
+                self.assertEqual(suggestions[0]["key"], "default_model")
 
     def test_ask_high_risk_requires_confirmation_in_non_interactive(self) -> None:
         response = json.dumps(
@@ -344,14 +344,14 @@ class AskCliTest(unittest.TestCase):
                         explain=False,
                         memory_profile=profile.name,
                     )
-            state_store = StateStore(db_path)
-            event = state_store.list_events()[0]
-            payload = event.json_payload
-            assert payload is not None
-            injected_keys = payload.get("memory_injected_keys")
-            self.assertEqual(injected_keys, [{"namespace": "global", "key": "alpha"}])
-            profile_payload = payload.get("memory_profile") or {}
-            self.assertEqual(profile_payload.get("profile_id"), profile.profile_id)
+            with StateStore(db_path) as state_store:
+                event = state_store.list_events()[0]
+                payload = event.json_payload
+                assert payload is not None
+                injected_keys = payload.get("memory_injected_keys")
+                self.assertEqual(injected_keys, [{"namespace": "global", "key": "alpha"}])
+                profile_payload = payload.get("memory_profile") or {}
+                self.assertEqual(profile_payload.get("profile_id"), profile.profile_id)
             with contextlib.closing(sqlite3.connect(db_path)) as connection:
                 row = connection.execute(
                     "SELECT request_json FROM memory_events "
@@ -507,16 +507,16 @@ class AskCliTest(unittest.TestCase):
                         yes=False,
                         explain=False,
                     )
-            state_store = StateStore(db_path)
-            event = state_store.list_events()[0]
-            payload = event.json_payload
-            assert payload is not None
-            plan = payload["plan"]
-            suggestions = plan.get("memory_suggestions")
-            self.assertEqual(len(suggestions), 5)
-            notes = plan["notes"]
-            self.assertIn("Ignored 1 invalid memory_suggestion(s).", notes)
-            self.assertIn("Truncated memory_suggestions to 5 item(s).", notes)
+            with StateStore(db_path) as state_store:
+                event = state_store.list_events()[0]
+                payload = event.json_payload
+                assert payload is not None
+                plan = payload["plan"]
+                suggestions = plan.get("memory_suggestions")
+                self.assertEqual(len(suggestions), 5)
+                notes = plan["notes"]
+                self.assertIn("Ignored 1 invalid memory_suggestion(s).", notes)
+                self.assertIn("Truncated memory_suggestions to 5 item(s).", notes)
 
     def test_ask_does_not_write_memory_items(self) -> None:
         response = json.dumps(
@@ -539,7 +539,8 @@ class AskCliTest(unittest.TestCase):
         )
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = str(Path(tmpdir) / "state.db")
-            StateStore(db_path)
+            with StateStore(db_path):
+                pass
             with contextlib.closing(sqlite3.connect(db_path)) as connection:
                 initial_count = connection.execute(
                     "SELECT COUNT(*) FROM memory_items"
@@ -641,17 +642,17 @@ class AskCliTest(unittest.TestCase):
             self.assertIsNotNone(related_ask_event_id)
             result_meta = json.loads(result_meta_json)
             self.assertEqual(result_meta["policy_action"], "memory.put")
-            state_store = StateStore(db_path)
-            event = state_store.list_events()[0]
-            self.assertEqual(event.id, related_ask_event_id)
-            payload = event.json_payload
-            assert payload is not None
-            self.assertTrue(payload["apply_memory_suggestions_requested"])
-            self.assertEqual(payload["apply_memory_suggestions_result"]["applied"], 1)
-            self.assertEqual(
-                payload["apply_memory_suggestions_applied"],
-                [{"namespace": "global", "key": "default_model"}],
-            )
+            with StateStore(db_path) as state_store:
+                event = state_store.list_events()[0]
+                self.assertEqual(event.id, related_ask_event_id)
+                payload = event.json_payload
+                assert payload is not None
+                self.assertTrue(payload["apply_memory_suggestions_requested"])
+                self.assertEqual(payload["apply_memory_suggestions_result"]["applied"], 1)
+                self.assertEqual(
+                    payload["apply_memory_suggestions_applied"],
+                    [{"namespace": "global", "key": "default_model"}],
+                )
 
     def test_ask_apply_memory_suggestions_requires_confirmation_interactive(self) -> None:
         response = json.dumps(
@@ -894,10 +895,10 @@ class AskCliTest(unittest.TestCase):
             self.assertIn("LLM response was not valid JSON", str(exc.exception))
             self.assertIn("Model violated JSON-only contract", str(exc.exception))
 
-            state_store = StateStore(db_path)
-            events = state_store.list_events()
-            self.assertTrue(events)
-            self.assertEqual(events[0].event_type, EVENT_TYPE_LLM_PLAN)
+            with StateStore(db_path) as state_store:
+                events = state_store.list_events()
+                self.assertTrue(events)
+                self.assertEqual(events[0].event_type, EVENT_TYPE_LLM_PLAN)
     
     def test_ask_best_effort_json_extraction_succeeds(self) -> None:
         response = (
@@ -936,13 +937,13 @@ class AskCliTest(unittest.TestCase):
                         yes=False,
                         explain=False,
                     )
-            state_store = StateStore(db_path)
-            event = state_store.list_events()[0]
-            payload = event.json_payload
-            assert payload is not None
-            plan = payload["plan"]
-            self.assertEqual(plan["intent"], "queue")
-            self.assertEqual(plan["actions"][0]["command"], "echo: hello")
+            with StateStore(db_path) as state_store:
+                event = state_store.list_events()[0]
+                payload = event.json_payload
+                assert payload is not None
+                plan = payload["plan"]
+                self.assertEqual(plan["intent"], "queue")
+                self.assertEqual(plan["actions"][0]["command"], "echo: hello")
 
     def test_ask_best_effort_json_extraction_fails_on_comments(self) -> None:
         response = (
@@ -1132,16 +1133,18 @@ class AskCliTest(unittest.TestCase):
                         yes=False,
                         explain=False,
                     )
-            state_store = StateStore(db_path)
-            event = state_store.list_events()[0]
-            payload = event.json_payload
-            assert payload is not None
-            plan = payload["plan"]
-            actions = plan["actions"]
-            self.assertEqual(actions[0]["type"], "enqueue")
-            self.assertEqual(actions[0]["command"], "echo: hello from GISMO")
-            notes = plan["notes"]
-            self.assertFalse(any("Ignored unsupported action types" in note for note in notes))
+            with StateStore(db_path) as state_store:
+                event = state_store.list_events()[0]
+                payload = event.json_payload
+                assert payload is not None
+                plan = payload["plan"]
+                actions = plan["actions"]
+                self.assertEqual(actions[0]["type"], "enqueue")
+                self.assertEqual(actions[0]["command"], "echo: hello from GISMO")
+                notes = plan["notes"]
+                self.assertFalse(
+                    any("Ignored unsupported action types" in note for note in notes)
+                )
 
     def test_ask_inquire_normalizes_write_actions_to_echo(self) -> None:
         response = json.dumps(
@@ -1176,17 +1179,17 @@ class AskCliTest(unittest.TestCase):
                     yes=False,
                     explain=False,
                 )
-            state_store = StateStore(db_path)
-            event = state_store.list_events()[0]
-            payload = event.json_payload
-            assert payload is not None
-            plan = payload["plan"]
-            actions = plan["actions"]
-            self.assertEqual(len(actions), 0)
-            self.assertIn(
-                "Inquire intent must be echo-only and cannot enqueue actions.",
-                plan["notes"],
-            )
+            with StateStore(db_path) as state_store:
+                event = state_store.list_events()[0]
+                payload = event.json_payload
+                assert payload is not None
+                plan = payload["plan"]
+                actions = plan["actions"]
+                self.assertEqual(len(actions), 0)
+                self.assertIn(
+                    "Inquire intent must be echo-only and cannot enqueue actions.",
+                    plan["notes"],
+                )
 
     def test_ask_inquire_with_memory_profile_is_echo_only(self) -> None:
         response = json.dumps(
@@ -1261,23 +1264,23 @@ class AskCliTest(unittest.TestCase):
                         )
             output = buffer.getvalue()
             self.assertIn("phi3:mini", output)
-            state_store = StateStore(db_path)
-            event = state_store.list_events()[0]
-            payload = event.json_payload
-            assert payload is not None
-            plan = payload["plan"]
-            self.assertEqual(plan["intent"].lower(), "inquire")
-            actions = plan["actions"]
-            self.assertTrue(all(action["type"] != "enqueue" for action in actions))
-            self.assertTrue(
-                all(
-                    not str(action["command"]).strip().lower().startswith("enqueue:")
-                    for action in actions
+            with StateStore(db_path) as state_store:
+                event = state_store.list_events()[0]
+                payload = event.json_payload
+                assert payload is not None
+                plan = payload["plan"]
+                self.assertEqual(plan["intent"].lower(), "inquire")
+                actions = plan["actions"]
+                self.assertTrue(all(action["type"] != "enqueue" for action in actions))
+                self.assertTrue(
+                    all(
+                        not str(action["command"]).strip().lower().startswith("enqueue:")
+                        for action in actions
+                    )
                 )
-            )
-            explain = payload["explain"]
-            self.assertEqual(explain["risk_level"], "LOW")
-            self.assertEqual(explain["risk_flags"], [])
+                explain = payload["explain"]
+                self.assertEqual(explain["risk_level"], "LOW")
+                self.assertEqual(explain["risk_flags"], [])
 
     def test_ask_inquire_strips_enqueue_prefix_for_echo(self) -> None:
         response = json.dumps(
@@ -1323,16 +1326,16 @@ class AskCliTest(unittest.TestCase):
                         yes=False,
                         explain=False,
                     )
-            state_store = StateStore(db_path)
-            event = state_store.list_events()[0]
-            payload = event.json_payload
-            assert payload is not None
-            plan = payload["plan"]
-            actions = plan["actions"]
-            self.assertEqual(len(actions), 1)
-            self.assertEqual(actions[0]["type"], "echo")
-            self.assertTrue(actions[0]["command"].startswith("echo:"))
-            self.assertFalse(actions[0]["command"].lower().startswith("enqueue:"))
+            with StateStore(db_path) as state_store:
+                event = state_store.list_events()[0]
+                payload = event.json_payload
+                assert payload is not None
+                plan = payload["plan"]
+                actions = plan["actions"]
+                self.assertEqual(len(actions), 1)
+                self.assertEqual(actions[0]["type"], "echo")
+                self.assertTrue(actions[0]["command"].startswith("echo:"))
+                self.assertFalse(actions[0]["command"].lower().startswith("enqueue:"))
 
     def test_ask_write_action_risk_is_high_and_matches_plan(self) -> None:
         response = json.dumps(
@@ -1367,15 +1370,15 @@ class AskCliTest(unittest.TestCase):
                     yes=False,
                     explain=False,
                 )
-            state_store = StateStore(db_path)
-            event = state_store.list_events()[0]
-            payload = event.json_payload
-            assert payload is not None
-            plan = payload["plan"]
-            actions = plan["actions"]
-            self.assertEqual(actions[0]["risk"], "high")
-            explain = payload["explain"]
-            self.assertEqual(explain["risk_level"], "HIGH")
+            with StateStore(db_path) as state_store:
+                event = state_store.list_events()[0]
+                payload = event.json_payload
+                assert payload is not None
+                plan = payload["plan"]
+                actions = plan["actions"]
+                self.assertEqual(actions[0]["risk"], "high")
+                explain = payload["explain"]
+                self.assertEqual(explain["risk_level"], "HIGH")
 
     def test_ask_inquire_non_interactive_fails_without_readonly_tool(self) -> None:
         response = json.dumps(
@@ -1463,15 +1466,15 @@ class AskCliTest(unittest.TestCase):
                         yes=False,
                         explain=False,
                     )
-            state_store = StateStore(db_path)
-            event = state_store.list_events()[0]
-            payload = event.json_payload
-            assert payload is not None
-            plan = payload["plan"]
-            self.assertIn(
-                "Ignored unsupported action types: delete_files.",
-                plan["notes"],
-            )
+            with StateStore(db_path) as state_store:
+                event = state_store.list_events()[0]
+                payload = event.json_payload
+                assert payload is not None
+                plan = payload["plan"]
+                self.assertIn(
+                    "Ignored unsupported action types: delete_files.",
+                    plan["notes"],
+                )
 
     def test_ask_failure_writes_failed_event(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1519,10 +1522,10 @@ class AskCliTest(unittest.TestCase):
                     self.assertIn("ERROR: Ollama request failed", stderr_output)
                     self.assertNotIn("Traceback", stderr_output)
                     self.assertNotIn("Traceback", stdout_buffer.getvalue())
-            state_store = StateStore(db_path)
-            events = state_store.list_events()
-            self.assertTrue(events)
-            self.assertEqual(events[0].event_type, EVENT_TYPE_ASK_FAILED)
+            with StateStore(db_path) as state_store:
+                events = state_store.list_events()
+                self.assertTrue(events)
+                self.assertEqual(events[0].event_type, EVENT_TYPE_ASK_FAILED)
 
     def test_normalize_plan_drops_ungrounded_assumptions(self) -> None:
         plan = {
@@ -1613,9 +1616,9 @@ class AskCliTest(unittest.TestCase):
                                 explain=False,
                             )
                         self.assertEqual(exc.exception.code, 2)
-            state_store = StateStore(db_path)
-            items = state_store.list_queue_items(limit=20)
-            self.assertEqual(len(items), 0)
+            with StateStore(db_path) as state_store:
+                items = state_store.list_queue_items(limit=20)
+                self.assertEqual(len(items), 0)
 
     def test_ask_enqueue_requires_confirmation_interactive_accept(self) -> None:
         actions = [
@@ -1661,9 +1664,9 @@ class AskCliTest(unittest.TestCase):
                             yes=False,
                             explain=False,
                         )
-            state_store = StateStore(db_path)
-            items = state_store.list_queue_items(limit=20)
-            self.assertEqual(len(items), 13)
+            with StateStore(db_path) as state_store:
+                items = state_store.list_queue_items(limit=20)
+                self.assertEqual(len(items), 13)
 
     def test_ask_enqueue_requires_confirmation_non_interactive(self) -> None:
         actions = [
@@ -1714,9 +1717,9 @@ class AskCliTest(unittest.TestCase):
                                 )
                             self.assertEqual(exc.exception.code, 2)
                     self.assertIn("--yes", buffer.getvalue())
-            state_store = StateStore(db_path)
-            items = state_store.list_queue_items(limit=20)
-            self.assertEqual(len(items), 0)
+            with StateStore(db_path) as state_store:
+                items = state_store.list_queue_items(limit=20)
+                self.assertEqual(len(items), 0)
 
     def test_ask_enqueue_requires_confirmation_yes_override(self) -> None:
         actions = [
@@ -1762,9 +1765,9 @@ class AskCliTest(unittest.TestCase):
                             yes=True,
                             explain=False,
                         )
-            state_store = StateStore(db_path)
-            items = state_store.list_queue_items(limit=20)
-            self.assertEqual(len(items), 13)
+            with StateStore(db_path) as state_store:
+                items = state_store.list_queue_items(limit=20)
+                self.assertEqual(len(items), 13)
 
     def test_ask_without_memory_has_no_audit_metadata(self) -> None:
         response = json.dumps({"intent": "noop", "assumptions": [], "actions": [], "notes": []})
@@ -1794,12 +1797,12 @@ class AskCliTest(unittest.TestCase):
                         yes=False,
                         explain=False,
                     )
-            state_store = StateStore(db_path)
-            event = state_store.list_events()[0]
-            payload = event.json_payload
-            assert payload is not None
-            self.assertNotIn("memory_injection_enabled", payload)
-            self.assertNotIn("memory_injected_count", payload)
+            with StateStore(db_path) as state_store:
+                event = state_store.list_events()[0]
+                payload = event.json_payload
+                assert payload is not None
+                self.assertNotIn("memory_injection_enabled", payload)
+                self.assertNotIn("memory_injected_count", payload)
 
     def test_ask_memory_injection_filters_and_orders(self) -> None:
         response = json.dumps({"intent": "noop", "assumptions": [], "actions": [], "notes": []})
@@ -1936,17 +1939,20 @@ class AskCliTest(unittest.TestCase):
             self.assertEqual([entry["key"] for entry in entries], ["beta", "alpha"])
             self.assertEqual(entries[0]["namespace"], "project:alpha")
             self.assertEqual(entries[1]["namespace"], "global")
-            state_store = StateStore(db_path)
-            event = state_store.list_events()[0]
-            payload = event.json_payload
-            assert payload is not None
-            self.assertTrue(payload["memory_injection_enabled"])
-            self.assertEqual(payload["memory_injected_count"], 2)
-            self.assertEqual(
-                payload["memory_injected_keys"],
-                [{"namespace": "project:alpha", "key": "beta"}, {"namespace": "global", "key": "alpha"}],
-            )
-            self.assertLessEqual(payload["memory_injected_bytes"], 8192)
+            with StateStore(db_path) as state_store:
+                event = state_store.list_events()[0]
+                payload = event.json_payload
+                assert payload is not None
+                self.assertTrue(payload["memory_injection_enabled"])
+                self.assertEqual(payload["memory_injected_count"], 2)
+                self.assertEqual(
+                    payload["memory_injected_keys"],
+                    [
+                        {"namespace": "project:alpha", "key": "beta"},
+                        {"namespace": "global", "key": "alpha"},
+                    ],
+                )
+                self.assertLessEqual(payload["memory_injected_bytes"], 8192)
             os.remove(db_path)
 
     def test_ask_memory_enforces_item_and_byte_caps(self) -> None:
@@ -2009,11 +2015,11 @@ class AskCliTest(unittest.TestCase):
             keys = [entry["key"] for entry in entries]
             self.assertLessEqual(len(entries), 20)
             self.assertEqual(keys, sorted(keys))
-            state_store = StateStore(db_path)
-            payload = state_store.list_events()[0].json_payload
-            assert payload is not None
-            self.assertLessEqual(payload["memory_injected_bytes"], 8192)
-            self.assertEqual(payload["memory_injected_count"], len(entries))
+            with StateStore(db_path) as state_store:
+                payload = state_store.list_events()[0].json_payload
+                assert payload is not None
+                self.assertLessEqual(payload["memory_injected_bytes"], 8192)
+                self.assertEqual(payload["memory_injected_count"], len(entries))
 
 
 if __name__ == "__main__":

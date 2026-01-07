@@ -1,0 +1,37 @@
+{
+  "allowed_tools": [
+    "echo",
+    "read_file",
+    "list_dir",
+    "write_note",
+    "run_shell",
+    "memory.put",
+    "memory.delete",
+    "memory.read",
+    "memory.profile.create",
+    "memory.profile.retire"
+  ],
+  "fs": { "base_dir": "." },
+  "memory": {
+    "allow": {
+      "memory.put": ["run:*", "project:*", "global"],
+      "memory.delete": ["run:*", "project:*", "global"],
+      "memory.read": ["run:*", "project:*", "global"]
+    },
+    "require_confirmation": {
+      "memory.put": ["project:*", "global"],
+      "memory.delete": ["project:*", "global"],
+      "memory.profile.create": ["*"],
+      "memory.profile.retire": ["*"]
+    }
+  },
+  "shell": {
+    "base_dir": ".",
+    "allowlist": [
+      ["git", "status"],
+      ["python", "-m", "unittest"],
+      ["make", "test"],
+      ["echo", "hello"]
+    ]
+  }
+}

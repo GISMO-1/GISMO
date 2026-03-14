@@ -415,4 +415,4 @@ DOCUMENTATION
 
 LICENSE
 
-TBD (project currently in active development; choose an OSS license before first formal release tag).
+MIT

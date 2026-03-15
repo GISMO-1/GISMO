@@ -386,17 +386,13 @@ Phase 2 — Control & Guardrails: COMPLETE
 - Explain-before-enqueue mode
 - Full audit trail for every decision (plan, explain, receipts, outcomes)
 
-Phase 3 — Memory & Context: IN PROGRESS
+Phase 3 — Memory & Context: COMPLETE
 - Persistent memory store (SQLite) with namespaces, profiles, and retention
 - Read-only memory context injection into ask/agent prompts (bounded, audited)
 - Advisory memory suggestions with explicit apply (policy + confirmation gated)
 - Memory snapshots (export/diff/import) with dry-run and tamper detection
 - Memory explain and doctor tooling for observability and operator-controlled maintenance
-
-Next:
-- Optional summarization workflows (promote run outcomes into memory under policy)
-- More refined default memory profiles (operator/project/minimal) and documentation
-- Expanded selection traces (why a memory item was included/excluded)
+- Summarization workflows: promote completed run outcomes into persistent memory under policy
 
 Phase 4 — Interactive GISMO: END GAME
 - CLI/TUI/Local UI interactions

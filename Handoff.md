@@ -26,15 +26,14 @@ Core ethos:
 
 CURRENT SYSTEM STATUS
 
-Overall: Stable foundation complete, local planner complete, Phase 2 guardrails implemented.
+Overall: Foundation, planner, guardrails, and memory complete. Phase 4 interactive features substantially done.
 
 Completed:
 - Phase 0 (Foundation): DONE
 - Phase 1 (Local LLM Planner): DONE
 - Phase 2 (Control & Guardrails): DONE
-
-Planned:
-- Phase 4 (Interactive GISMO)
+- Phase 3 (Memory & Context): DONE
+- Phase 4 (Interactive GISMO): IN PROGRESS — TUI, web UI, TTS, and plan approval complete
 
 -------------------------------------------------------------------------------
 
@@ -92,6 +91,8 @@ REPO LAYOUT (INTENT)
 gismo/
   cli/
     main.py              CLI entrypoint and argparse wiring
+    plan.py              plan approval CLI (list/show/approve/reject/edit)
+    tts_cli.py           TTS CLI (voices list/set/download, speak)
     ...                  command groups (queue, export, supervise, ipc, etc.)
   core/
     state.py             SQLite StateStore + schema and persistence
@@ -99,11 +100,21 @@ gismo/
     daemon.py            durable execution loop
     export.py            export helpers and defaults
     paths.py             canonical path resolution, DB-anchored helpers
+    plan_store.py        shared enqueue_plan_actions() helper
+    models.py            dataclasses + enums incl. PendingPlan/PlanStatus
     ...
   tools/
     ...                  tool implementations (echo/note/shell/etc.)
   llm/
     ...                  local planner integration (Ollama client, prompts, normalization)
+  tts/
+    voices.py            voice registry, model cache (~/.cache/gismo/tts/)
+    engine.py            synthesis (piper-tts), preprocessing, playback
+    prefs.py             memory-backed voice preference (gismo:settings/tts.voice)
+  web/
+    api.py               pure data layer (no HTTP); all JSON-serialisable functions
+    server.py            stdlib HTTP router (zero external deps)
+    templates.py         single-file embedded HTML/CSS/JS dashboard
 
 policy/
   dev-safe.json
@@ -154,20 +165,54 @@ INTENTIONAL LIMITATIONS (NOT BUGS)
 
 -------------------------------------------------------------------------------
 
-RECENT NOTABLE CHANGE (LATEST WORK)
+RECENT NOTABLE CHANGES (PHASE 4)
 
-Operator smoke scripts + handle guardrail:
-- Added Windows-friendly operator smoke scripts (operator + end-to-end enqueue→daemon→export).
-- Added a CLI subprocess regression test that runs daemon --once and asserts DB handles are released.
-- Documented smoke scripts as the recommended operator regression check.
+Phase 4 delivered four major capabilities, all behind the standard CLI and web surfaces:
+
+1. Terminal dashboard (TUI)
+   - `gismo tui`: live curses dashboard with queue, runs, daemon status; 3s auto-refresh.
+   - Pure stdlib, no external TUI library.
+
+2. Local web dashboard
+   - `gismo web [--port N] [--no-browser]`: opens browser to 127.0.0.1:7800.
+   - Tabs: Queue (cancel/purge), Runs (task/tool detail), Memory (namespaces + items), Plans, Settings (TTS).
+   - Daemon sidebar: live status, pause/resume controls.
+   - Zero external HTTP dependencies: stdlib http.server only.
+   - Single-file embedded HTML/JS/CSS in gismo/web/templates.py.
+   - REST endpoints: GET/POST/PATCH in gismo/web/server.py; pure data layer in gismo/web/api.py.
+
+3. TTS voice support
+   - `gismo tts voices list/set/download`, `gismo tts speak`.
+   - Backend: piper-tts; models download on first use to ~/.cache/gismo/tts/.
+   - 5 voices: en_GB-northern_english_male-medium (default), en_GB-alan-medium,
+     en_US-lessac-medium, en_US-ryan-high, en_US-amy-medium.
+   - Preprocessing: GISMO → GHIZMO (word-boundary regex) for hard-G pronunciation.
+   - Voice preference stored in memory (namespace gismo:settings, key tts.voice).
+   - Voice selection and test playback available in web Settings tab.
+
+4. Interactive plan approval
+   - `gismo ask --defer`: saves LLM plan as a PendingPlan (status=PENDING) instead of enqueueing.
+   - `gismo plan list/show/approve/reject/edit`: full CLI lifecycle.
+     - approve: enqueues plan actions via shared enqueue_plan_actions(), marks APPROVED.
+     - reject: records optional reason, marks REJECTED.
+     - edit: per-action command replacement or removal (PENDING only, 1-based index).
+   - Web UI Plans tab: table view + inline editing (editable action inputs, remove buttons).
+   - Data model: PendingPlan dataclass + PlanStatus enum in models.py; pending_plans SQLite table
+     in state.py with full CRUD + prefix resolution.
+   - Shared enqueue logic in core/plan_store.py (avoids circular imports between web and CLI).
+   - 27 tests: TestPendingPlanStateStore, TestEnqueuePlanActions, TestWebApiPlans.
+
+Operator smoke scripts + handle guardrail (pre-Phase 4):
+- Windows-friendly smoke scripts: operator_smoke.ps1 and e2e_smoke.ps1.
+- CLI subprocess regression test: daemon --once with DB handle release assertion.
 
 Next steps:
+- Always-on local service behavior (Phase 4 remainder).
 - Run operator_smoke.ps1 and e2e_smoke.ps1 on Windows after CLI changes.
 - Validate ask/agent subprocess flows on Windows for handle hygiene at higher concurrency.
-- Monitor for any new audit/export paths that retain SQLite handles across CLI exits.
 
 Tests run:
-- python scripts/verify.py
+- python -m pytest (330 passed, 9 pre-existing Windows tempfile teardown failures unrelated to Phase 4)
 
 -------------------------------------------------------------------------------
 
@@ -199,36 +244,32 @@ OPERATING RULES (ENFORCE THESE)
 
 -------------------------------------------------------------------------------
 
-DEFINITION OF DONE (PHASE 2)
+DEFINITION OF DONE (PHASE 4)
 
-Phase 2 is complete when:
-- Deterministic plan risk classification exists (LOW/MEDIUM/HIGH) and is consistent
-- Centralized confirmation gates exist for higher-risk plans and are audited
-- Planner prompts are policy-aware (the LLM is explicitly told constraints)
-- Explain-before-execute mode exists (human-legible summary + JSON artifact)
-- LLM runtime behavior is stable (predictable timeouts, no hangs)
-- No regressions in queue/daemon/policy
+Phase 4 is complete when:
+- Terminal dashboard (TUI) is stable and reflects live state
+- Web dashboard covers queue/runs/memory/plans with action controls
+- TTS synthesis and voice selection work end-to-end without cloud deps
+- Interactive plan approval covers full CLI + web UI lifecycle
+- Always-on local service behavior is documented and testable
+- No regressions in queue/daemon/policy/memory
 - Tests pass on Windows reliably
 
-Phase 2 is complete. Proceed to Phase 3 only after operator feedback validates the guardrails.
+Currently done: TUI, web UI, TTS, plan approval.
+Remaining: always-on service hardening.
 
 -------------------------------------------------------------------------------
 
 NEXT ENGINEERING TARGET (RECOMMENDED)
 
-Do not add “new features” yet.
+Phase 4 remainder:
+- Always-on local service behavior: auto-start on login, service-style lifecycle.
+- Windows Task Scheduler / launchd integration.
 
-Priority sequence:
-1) Collect operator feedback on Phase 2 guardrails:
-   - Validate risk classification thresholds on real workloads
-   - Confirm confirmation prompts are clear and actionable
-
-2) Harden Windows-first behavior at scale:
-   - Stress test queue/daemon with longer runs
-   - Monitor SQLite handle hygiene during heavy audit logging
-
-3) Plan Phase 3 memory expansion (scoped, policy-first):
-   - Keep changes minimal and auditable
+After Phase 4:
+- Evaluate operator feedback on plan approval UX (approval rate, edit patterns).
+- Harden Windows handle hygiene at higher concurrency (agent loops + web server + daemon).
+- Consider notification hooks (e.g. desktop toast on plan ready for approval).
 
 -------------------------------------------------------------------------------
 

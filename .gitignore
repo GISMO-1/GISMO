@@ -29,6 +29,9 @@ gismo_state.db
 .vscode/
 .idea/
 
+# Claude Code
+.claude/
+
 # Local run exports
 exports/
 

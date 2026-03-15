@@ -220,3 +220,45 @@ def get_memory(db_path: str) -> dict[str, Any]:
         for ns in namespaces
     ]
     return {"namespaces": ns_list, "items": items_by_ns}
+
+
+# ── TTS ────────────────────────────────────────────────────────────────────
+
+
+def get_voices(db_path: str) -> dict[str, Any]:
+    """Return available voices with download status and current preference."""
+    from gismo.tts.voices import VOICES, DEFAULT_VOICE, is_downloaded
+    from gismo.tts.prefs import get_voice
+
+    current = get_voice(db_path)
+    voice_list = [
+        {
+            "id": vid,
+            "name": info["name"],
+            "lang": info["lang"],
+            "quality": info["quality"],
+            "description": info["description"],
+            "downloaded": is_downloaded(vid),
+            "is_default": vid == DEFAULT_VOICE,
+            "is_selected": vid == current,
+        }
+        for vid, info in VOICES.items()
+    ]
+    return {"voices": voice_list, "current": current}
+
+
+def set_voice_preference(db_path: str, voice_id: str) -> dict[str, Any]:
+    from gismo.tts.prefs import set_voice
+
+    set_voice(db_path, voice_id)
+    return {"voice": voice_id}
+
+
+def tts_synthesize(db_path: str, text: str, voice_id: str | None = None) -> bytes:
+    """Synthesize text and return WAV bytes. Downloads model if needed."""
+    from gismo.tts.prefs import get_voice
+    from gismo.tts.engine import synthesize
+
+    if not voice_id:
+        voice_id = get_voice(db_path)
+    return synthesize(text, voice_id)

@@ -23,6 +23,7 @@ from gismo.cli import memory_summarize as memory_summarize_cli
 from gismo.cli import agent_role as agent_role_cli
 from gismo.tui import app as tui_app
 from gismo.web import server as web_server
+from gismo.cli import tts_cli
 from gismo.cli import agent_session as agent_session_cli
 from gismo.cli.operator import (
     make_idempotency_key,
@@ -5317,6 +5318,22 @@ def _handle_web(args: argparse.Namespace) -> None:
     )
 
 
+def _handle_tts_speak(args: argparse.Namespace) -> None:
+    tts_cli.handle_speak(args)
+
+
+def _handle_tts_voices_list(args: argparse.Namespace) -> None:
+    tts_cli.handle_voices_list(args)
+
+
+def _handle_tts_voices_set(args: argparse.Namespace) -> None:
+    tts_cli.handle_voices_set(args)
+
+
+def _handle_tts_voices_download(args: argparse.Namespace) -> None:
+    tts_cli.handle_voices_download(args)
+
+
 def build_parser() -> argparse.ArgumentParser:
     default_db_path = str(Path(".gismo") / "state.db")
     db_parent = argparse.ArgumentParser(add_help=False)
@@ -7125,6 +7142,55 @@ def build_parser() -> argparse.ArgumentParser:
         help="Don't open the browser automatically",
     )
     web_parser.set_defaults(handler=_handle_web)
+
+    # ── gismo tts ──────────────────────────────────────────────────────────
+    tts_parser = subparsers.add_parser(
+        "tts",
+        help="Text-to-speech via piper-tts",
+        parents=[db_parent_optional],
+    )
+    tts_subparsers = tts_parser.add_subparsers(dest="tts_command", required=True)
+
+    tts_speak_parser = tts_subparsers.add_parser(
+        "speak",
+        help="Synthesize and play text",
+        parents=[db_parent_optional],
+    )
+    tts_speak_parser.add_argument("text", help="Text to synthesize")
+    tts_speak_parser.add_argument("--voice", default=None, help="Voice ID (overrides preference)")
+    tts_speak_parser.add_argument("--out", default=None, metavar="FILE", help="Write WAV to file instead of playing")
+    tts_speak_parser.add_argument("--no-play", action="store_true", default=False, help="Write WAV to stdout instead of playing")
+    tts_speak_parser.set_defaults(handler=_handle_tts_speak)
+
+    tts_voices_parser = tts_subparsers.add_parser(
+        "voices",
+        help="Manage voices",
+        parents=[db_parent_optional],
+    )
+    tts_voices_subparsers = tts_voices_parser.add_subparsers(dest="tts_voices_command", required=True)
+
+    tts_voices_list_parser = tts_voices_subparsers.add_parser(
+        "list",
+        help="List available voices",
+        parents=[db_parent_optional],
+    )
+    tts_voices_list_parser.set_defaults(handler=_handle_tts_voices_list)
+
+    tts_voices_set_parser = tts_voices_subparsers.add_parser(
+        "set",
+        help="Set preferred voice",
+        parents=[db_parent_optional],
+    )
+    tts_voices_set_parser.add_argument("voice", help="Voice ID")
+    tts_voices_set_parser.set_defaults(handler=_handle_tts_voices_set)
+
+    tts_voices_download_parser = tts_voices_subparsers.add_parser(
+        "download",
+        help="Pre-download a voice model",
+        parents=[db_parent_optional],
+    )
+    tts_voices_download_parser.add_argument("voice", help="Voice ID")
+    tts_voices_download_parser.set_defaults(handler=_handle_tts_voices_download)
 
     queue_parser = subparsers.add_parser(
         "queue",

@@ -312,6 +312,26 @@ Local web dashboard (opens browser):
   gismo web
   gismo web --port 8080 --no-browser
 
+Text-to-speech (piper-tts, models download on first use):
+
+  gismo tts voices list
+  gismo tts voices set en_US-ryan-high
+  gismo tts voices download en_US-lessac-medium
+  gismo tts speak "Hello from GISMO"
+  gismo tts speak "Hello" --voice en_GB-alan-medium
+  gismo tts speak "Hello" --out hello.wav
+
+Available voices:
+  en_GB-northern_english_male-medium  (default)
+  en_GB-alan-medium
+  en_US-lessac-medium
+  en_US-ryan-high
+  en_US-amy-medium
+
+Voice preference is stored in GISMO memory (namespace gismo:settings, key tts.voice).
+Voice models are cached at ~/.cache/gismo/tts/.
+Voice settings are also available in the web dashboard (Settings tab).
+
 -------------------------------------------------------------------------------
 
 SUPERVISION & IPC (WINDOWS-FIRST)
@@ -406,6 +426,7 @@ Phase 3 — Memory & Context: COMPLETE
 Phase 4 — Interactive GISMO: IN PROGRESS
 - Live terminal dashboard (TUI): queue, runs, daemon status with 3s auto-refresh
 - Local web UI (browser-based dashboard): queue, runs, memory, daemon control via `gismo web`
+- TTS voice support (piper-tts): 5 voices, on-demand download, memory-backed preference, web settings panel
 - Always-on local service behavior
 - Plans, explains, executes, remembers, recovers
 - No cloud dependency and no silent actions

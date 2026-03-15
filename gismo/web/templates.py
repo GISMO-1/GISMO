@@ -58,10 +58,15 @@ HTML = r"""<!DOCTYPE html>
 
   .btn { padding: 3px 8px; border: 1px solid var(--border); border-radius: 4px; cursor: pointer; font-size: 11px; font-family: inherit; background: transparent; color: var(--text); transition: background 0.1s; }
   .btn:hover { background: var(--border); }
+  .btn:disabled { opacity: 0.4; cursor: default; }
   .btn-red { border-color: var(--red); color: var(--red); }
   .btn-red:hover { background: rgba(248,81,73,0.15); }
   .btn-yellow { border-color: var(--yellow); color: var(--yellow); }
   .btn-yellow:hover { background: rgba(210,153,34,0.15); }
+  .btn-green { border-color: var(--green); color: var(--green); }
+  .btn-green:hover { background: rgba(63,185,80,0.15); }
+  .btn-blue { border-color: var(--blue); color: var(--blue); }
+  .btn-blue:hover { background: rgba(88,166,255,0.15); }
 
   .toolbar { padding: 8px 12px; display: flex; gap: 8px; align-items: center; border-bottom: 1px solid var(--border); background: var(--panel); }
   .toolbar .spacer { flex: 1; }
@@ -83,6 +88,27 @@ HTML = r"""<!DOCTYPE html>
   .ns-retired { opacity: 0.5; }
 
   .empty-state { padding: 40px; text-align: center; color: var(--dim); }
+
+  /* Settings / TTS */
+  .settings-section { padding: 20px; max-width: 700px; }
+  .settings-section h2 { font-size: 14px; margin-bottom: 16px; color: var(--text); }
+  .settings-group { background: var(--panel); border: 1px solid var(--border); border-radius: 6px; padding: 16px; margin-bottom: 16px; }
+  .settings-group h3 { font-size: 11px; text-transform: uppercase; letter-spacing: 1px; color: var(--dim); margin-bottom: 12px; }
+  .voice-row { display: flex; align-items: center; gap: 10px; padding: 6px 0; border-bottom: 1px solid var(--border); }
+  .voice-row:last-child { border-bottom: none; }
+  .voice-name { flex: 1; font-size: 12px; }
+  .voice-meta { color: var(--dim); font-size: 11px; width: 80px; }
+  .voice-lang { color: var(--dim); font-size: 11px; width: 60px; }
+  .badge { display: inline-block; padding: 1px 5px; border-radius: 3px; font-size: 10px; font-weight: bold; margin-left: 4px; }
+  .badge-selected { background: rgba(88,166,255,0.2); color: var(--blue); border: 1px solid var(--blue); }
+  .badge-downloaded { background: rgba(63,185,80,0.1); color: var(--green); border: 1px solid var(--green); }
+  .badge-default { background: rgba(188,140,255,0.1); color: var(--purple); border: 1px solid var(--purple); }
+  .tts-test-row { display: flex; gap: 8px; margin-top: 12px; align-items: center; }
+  .tts-test-row input { flex: 1; background: var(--bg); border: 1px solid var(--border); color: var(--text); padding: 4px 8px; border-radius: 4px; font-family: inherit; font-size: 12px; }
+  .tts-test-row input:focus { outline: none; border-color: var(--blue); }
+  #tts-status { font-size: 11px; color: var(--dim); margin-top: 6px; min-height: 16px; }
+  select { background: var(--bg); border: 1px solid var(--border); color: var(--text); padding: 3px 6px; border-radius: 4px; font-family: inherit; font-size: 12px; }
+  select:focus { outline: none; border-color: var(--blue); }
 </style>
 </head>
 <body>
@@ -110,6 +136,7 @@ HTML = r"""<!DOCTYPE html>
       <div class="tab active" data-tab="queue" onclick="switchTab('queue')">Queue</div>
       <div class="tab" data-tab="runs" onclick="switchTab('runs')">Runs</div>
       <div class="tab" data-tab="memory" onclick="switchTab('memory')">Memory</div>
+      <div class="tab" data-tab="settings" onclick="switchTab('settings')">Settings</div>
     </div>
 
     <!-- Queue tab -->
@@ -150,13 +177,39 @@ HTML = r"""<!DOCTYPE html>
       </div>
       <div id="memory-body"></div>
     </div>
+
+    <!-- Settings tab -->
+    <div class="tab-content" id="tab-settings">
+      <div class="settings-section">
+        <h2>Settings</h2>
+        <div class="settings-group" id="tts-settings">
+          <h3>Voice (TTS)</h3>
+          <div id="voice-list"><span class="dim">Loading voices…</span></div>
+          <div class="tts-test-row" style="margin-top:14px;">
+            <select id="tts-voice-select" onchange="onVoiceSelectChange()"></select>
+            <button class="btn btn-blue" onclick="setVoice()">Set as Default</button>
+            <button class="btn btn-green" onclick="downloadVoice()">Download</button>
+          </div>
+          <div class="tts-test-row">
+            <input type="text" id="tts-test-text" value="Hello from GISMO." placeholder="Enter text to speak…" />
+            <button class="btn btn-blue" id="btn-speak" onclick="speakTest()">▶ Speak</button>
+          </div>
+          <div id="tts-status"></div>
+        </div>
+      </div>
+    </div>
   </div>
 </div>
 
 <script>
-const API = (path, opts) => fetch(path, opts).then(r => r.json());
+const API = (path, opts) => fetch(path, opts).then(r => {
+  if (opts && opts.raw) return r;
+  return r.json();
+});
 let _status = null;
 let _paused = false;
+let _voices = [];
+let _currentVoice = null;
 
 function ageStr(isoStr) {
   if (!isoStr) return '-';
@@ -176,6 +229,7 @@ function statusClass(s) { return 'status-' + s; }
 function switchTab(name) {
   document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === name));
   document.querySelectorAll('.tab-content').forEach(c => c.classList.toggle('active', c.id === 'tab-' + name));
+  if (name === 'settings') refreshVoices();
 }
 
 // ── Status / Sidebar ──────────────────────────────────────────────────────
@@ -374,6 +428,126 @@ async function refreshMemory() {
       </div>`;
     }).join('');
   } catch(e) { console.error('memory refresh error', e); }
+}
+
+// ── TTS / Voice Settings ──────────────────────────────────────────────────
+
+async function refreshVoices() {
+  try {
+    const data = await API('/api/tts/voices');
+    _voices = data.voices || [];
+    _currentVoice = data.current;
+
+    // Populate select
+    const sel = document.getElementById('tts-voice-select');
+    sel.innerHTML = _voices.map(v =>
+      `<option value="${v.id}" ${v.id === _currentVoice ? 'selected' : ''}>${v.name} (${v.lang}, ${v.quality})</option>`
+    ).join('');
+
+    // Render voice list table
+    const list = document.getElementById('voice-list');
+    list.innerHTML = `<table>
+      <thead><tr><th>Voice</th><th>Lang</th><th>Quality</th><th>Status</th></tr></thead>
+      <tbody>
+      ${_voices.map(v => {
+        const badges = [];
+        if (v.is_selected) badges.push('<span class="badge badge-selected">selected</span>');
+        if (v.is_default) badges.push('<span class="badge badge-default">default</span>');
+        if (v.downloaded) badges.push('<span class="badge badge-downloaded">downloaded</span>');
+        return `<tr>
+          <td><span class="voice-name">${escHtml(v.name)}${badges.join('')}</span><br><span class="dim" style="font-size:10px">${escHtml(v.id)}</span></td>
+          <td class="dim">${v.lang}</td>
+          <td class="dim">${v.quality}</td>
+          <td>${v.downloaded ? '<span style="color:var(--green)">ready</span>' : '<span class="dim">not downloaded</span>'}</td>
+        </tr>`;
+      }).join('')}
+      </tbody>
+    </table>`;
+  } catch(e) {
+    document.getElementById('voice-list').innerHTML = '<span class="error-text">Failed to load voices</span>';
+  }
+}
+
+function onVoiceSelectChange() {
+  // Nothing automatic — user presses "Set as Default" or "Download"
+}
+
+function getTtsStatus() { return document.getElementById('tts-status'); }
+
+async function setVoice() {
+  const voice = document.getElementById('tts-voice-select').value;
+  if (!voice) return;
+  try {
+    await API('/api/tts/voices/set', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({voice})
+    });
+    getTtsStatus().innerHTML = `<span style="color:var(--green)">Voice set to ${escHtml(voice)}</span>`;
+    await refreshVoices();
+  } catch(e) {
+    getTtsStatus().innerHTML = `<span class="error-text">Failed to set voice: ${e}</span>`;
+  }
+}
+
+async function downloadVoice() {
+  const voice = document.getElementById('tts-voice-select').value;
+  if (!voice) return;
+  const btn = document.querySelector('button[onclick="downloadVoice()"]');
+  btn.disabled = true;
+  getTtsStatus().innerHTML = `<span class="dim">Downloading ${escHtml(voice)}… (this may take a minute)</span>`;
+  try {
+    // Trigger download by synthesizing a silent/empty text — server will download the model
+    const resp = await fetch('/api/tts/speak', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({text: ' ', voice})
+    });
+    if (resp.ok) {
+      getTtsStatus().innerHTML = `<span style="color:var(--green)">Downloaded ${escHtml(voice)}</span>`;
+      await refreshVoices();
+    } else {
+      const err = await resp.json();
+      getTtsStatus().innerHTML = `<span class="error-text">Download failed: ${escHtml(err.error || 'unknown error')}</span>`;
+    }
+  } catch(e) {
+    getTtsStatus().innerHTML = `<span class="error-text">Download error: ${e}</span>`;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function speakTest() {
+  const text = document.getElementById('tts-test-text').value.trim();
+  const voice = document.getElementById('tts-voice-select').value;
+  if (!text) { getTtsStatus().textContent = 'Enter text first.'; return; }
+
+  const btn = document.getElementById('btn-speak');
+  btn.disabled = true;
+  getTtsStatus().innerHTML = '<span class="dim">Synthesizing…</span>';
+
+  try {
+    const resp = await fetch('/api/tts/speak', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({text, voice: voice || null})
+    });
+    if (!resp.ok) {
+      const err = await resp.json();
+      getTtsStatus().innerHTML = `<span class="error-text">${escHtml(err.error || 'Synthesis failed')}</span>`;
+      return;
+    }
+    const blob = await resp.blob();
+    const url = URL.createObjectURL(blob);
+    const audio = new Audio(url);
+    audio.play();
+    audio.onended = () => URL.revokeObjectURL(url);
+    getTtsStatus().innerHTML = `<span style="color:var(--green)">▶ Playing (${escHtml(voice)})</span>`;
+  } catch(e) {
+    getTtsStatus().innerHTML = `<span class="error-text">Error: ${e}</span>`;
+  } finally {
+    btn.disabled = false;
+  }
 }
 
 // ── Auto-refresh ──────────────────────────────────────────────────────────

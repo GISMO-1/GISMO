@@ -28,6 +28,12 @@ def _error(handler: BaseHTTPRequestHandler, msg: str, status: int) -> None:
     _json_response(handler, {"error": msg}, status)
 
 
+def _read_json_body(handler: BaseHTTPRequestHandler) -> Any:
+    length = int(handler.headers.get("Content-Length", 0))
+    raw = handler.rfile.read(length) if length else b"{}"
+    return json.loads(raw or b"{}")
+
+
 def _make_handler(db_path: str) -> type[BaseHTTPRequestHandler]:
     class _Handler(BaseHTTPRequestHandler):
         def log_message(self, fmt: str, *args: Any) -> None:  # silence default logging
@@ -59,6 +65,8 @@ def _make_handler(db_path: str) -> type[BaseHTTPRequestHandler]:
                         _error(self, str(exc), 404)
                 elif path == "/api/memory":
                     _json_response(self, web_api.get_memory(db_path))
+                elif path == "/api/tts/voices":
+                    _json_response(self, web_api.get_voices(db_path))
                 else:
                     _error(self, "Not found", 404)
             except Exception as exc:
@@ -79,6 +87,26 @@ def _make_handler(db_path: str) -> type[BaseHTTPRequestHandler]:
                     _json_response(self, web_api.set_daemon_paused(db_path, True))
                 elif path == "/api/daemon/resume":
                     _json_response(self, web_api.set_daemon_paused(db_path, False))
+                elif path == "/api/tts/voices/set":
+                    body = _read_json_body(self)
+                    voice_id = body.get("voice", "")
+                    try:
+                        _json_response(self, web_api.set_voice_preference(db_path, voice_id))
+                    except ValueError as exc:
+                        _error(self, str(exc), 400)
+                elif path == "/api/tts/speak":
+                    body = _read_json_body(self)
+                    text = body.get("text", "")
+                    voice_id = body.get("voice") or None
+                    if not text:
+                        _error(self, "text is required", 400)
+                        return
+                    wav_bytes = web_api.tts_synthesize(db_path, text, voice_id)
+                    self.send_response(200)
+                    self.send_header("Content-Type", "audio/wav")
+                    self.send_header("Content-Length", str(len(wav_bytes)))
+                    self.end_headers()
+                    self.wfile.write(wav_bytes)
                 else:
                     _error(self, "Not found", 404)
             except Exception as exc:

@@ -168,6 +168,33 @@ class TestWebApiVoices(unittest.TestCase):
                 set_voice_preference(db, "en_XX-fake-high")
 
 
+# ── Text preprocessing ─────────────────────────────────────────────────────
+
+class TestPreprocess(unittest.TestCase):
+    def _pp(self, text: str) -> str:
+        from gismo.tts.engine import _preprocess
+        return _preprocess(text)
+
+    def test_gismo_uppercase_replaced(self) -> None:
+        self.assertEqual(self._pp("Hello GISMO"), "Hello GHIZMO")
+
+    def test_gismo_lowercase_replaced(self) -> None:
+        self.assertEqual(self._pp("hello gismo"), "hello GHIZMO")
+
+    def test_gismo_mixed_case_replaced(self) -> None:
+        self.assertEqual(self._pp("Gismo is running"), "GHIZMO is running")
+
+    def test_gismo_multiple_occurrences(self) -> None:
+        self.assertEqual(self._pp("GISMO GISMO"), "GHIZMO GHIZMO")
+
+    def test_no_false_positive_substring(self) -> None:
+        # "GISMO" inside another word should not be replaced
+        self.assertEqual(self._pp("MEGISMO"), "MEGISMO")
+
+    def test_unrelated_text_unchanged(self) -> None:
+        self.assertEqual(self._pp("Hello world"), "Hello world")
+
+
 # ── Synthesis (mocked) ─────────────────────────────────────────────────────
 
 class TestSynthesisMocked(unittest.TestCase):

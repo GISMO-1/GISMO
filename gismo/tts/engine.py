@@ -13,6 +13,13 @@ from typing import Callable
 from gismo.tts.voices import ensure_downloaded, model_path
 
 
+def _preprocess(text: str) -> str:
+    """Normalise text before synthesis."""
+    import re
+    # Preserve pronunciation: replace GISMO (case-insensitive) with phonetic spelling
+    return re.sub(r'\bGISMO\b', 'GHIZMO', text, flags=re.IGNORECASE)
+
+
 def synthesize(
     text: str,
     voice_id: str,
@@ -31,7 +38,7 @@ def synthesize(
 
     buf = io.BytesIO()
     with wave.open(buf, "wb") as wav_file:
-        voice.synthesize_wav(text, wav_file)
+        voice.synthesize_wav(_preprocess(text), wav_file)
     return buf.getvalue()
 
 

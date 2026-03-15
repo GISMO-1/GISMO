@@ -19,6 +19,7 @@ from gismo.cli import memory_explain as memory_explain_cli
 from gismo.cli import memory_profile as memory_profile_cli
 from gismo.cli import memory_preview as memory_preview_cli
 from gismo.cli import memory_snapshot as memory_snapshot_cli
+from gismo.cli import memory_summarize as memory_summarize_cli
 from gismo.cli import agent_role as agent_role_cli
 from gismo.cli import agent_session as agent_session_cli
 from gismo.cli.operator import (
@@ -4562,6 +4563,10 @@ def _handle_memory_snapshot_import(args: argparse.Namespace) -> None:
     memory_snapshot_cli.run_memory_snapshot_import(args, _snapshot_dependencies())
 
 
+def _handle_memory_summarize_run(args: argparse.Namespace) -> None:
+    memory_summarize_cli.run_memory_summarize_run(args)
+
+
 def _handle_memory_namespace_list(args: argparse.Namespace) -> None:
     run_memory_namespace_list(args)
 
@@ -6307,6 +6312,69 @@ def build_parser() -> argparse.ArgumentParser:
         help="Optional policy file path for audit hashing",
     )
     memory_snapshot_import_parser.set_defaults(handler=_handle_memory_snapshot_import)
+
+    memory_summarize_parser = memory_subparsers.add_parser(
+        "summarize",
+        help="Promote run outcomes into persistent memory",
+        parents=[db_parent_optional],
+    )
+    memory_summarize_subparsers = memory_summarize_parser.add_subparsers(
+        dest="memory_summarize_command", required=True
+    )
+
+    memory_summarize_run_parser = memory_summarize_subparsers.add_parser(
+        "run",
+        help="Summarize a completed run into persistent memory",
+        parents=[db_parent_optional],
+    )
+    memory_summarize_run_parser.add_argument(
+        "run_id",
+        help="Run ID to summarize",
+    )
+    memory_summarize_run_parser.add_argument(
+        "--namespace",
+        required=True,
+        help="Target memory namespace (e.g., project:<name>, global)",
+    )
+    memory_summarize_run_parser.add_argument(
+        "--confidence",
+        default="medium",
+        choices=["high", "medium", "low"],
+        help="Confidence level for written items (default: medium)",
+    )
+    memory_summarize_run_parser.add_argument(
+        "--include-outputs",
+        action="store_true",
+        dest="include_outputs",
+        help="Include individual task outputs as additional memory items",
+    )
+    memory_summarize_run_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        dest="dry_run",
+        help="Preview what would be written without writing",
+    )
+    memory_summarize_run_parser.add_argument(
+        "--yes",
+        action="store_true",
+        help="Skip confirmation prompts",
+    )
+    memory_summarize_run_parser.add_argument(
+        "--non-interactive",
+        action="store_true",
+        help="Fail closed instead of prompting for confirmation",
+    )
+    memory_summarize_run_parser.add_argument(
+        "--policy",
+        default=None,
+        help="Optional policy file path",
+    )
+    memory_summarize_run_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Output JSON",
+    )
+    memory_summarize_run_parser.set_defaults(handler=_handle_memory_summarize_run)
 
     enqueue_parser = subparsers.add_parser(
         "enqueue",

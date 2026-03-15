@@ -303,6 +303,15 @@ Planner configuration:
   - GISMO_OLLAMA_TRANSPORT=python|curl (Windows defaults to curl when available because urllib can be slow)
 - keep_alive defaults to 10m so models stay loaded for smoother repeated calls.
 
+Terminal dashboard:
+
+  gismo tui
+
+Local web dashboard (opens browser):
+
+  gismo web
+  gismo web --port 8080 --no-browser
+
 -------------------------------------------------------------------------------
 
 SUPERVISION & IPC (WINDOWS-FIRST)
@@ -396,12 +405,12 @@ Phase 3 — Memory & Context: COMPLETE
 
 Phase 4 — Interactive GISMO: IN PROGRESS
 - Live terminal dashboard (TUI): queue, runs, daemon status with 3s auto-refresh
+- Local web UI (browser-based dashboard): queue, runs, memory, daemon control via `gismo web`
 - Always-on local service behavior
 - Plans, explains, executes, remembers, recovers
 - No cloud dependency and no silent actions
 
 Next:
-- Local web UI (browser-based dashboard for plan review, queue inspection, memory visualization)
 - Interactive plan approval (inspect and edit plans before execution)
 
 -------------------------------------------------------------------------------

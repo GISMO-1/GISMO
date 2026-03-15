@@ -22,6 +22,7 @@ from gismo.cli import memory_snapshot as memory_snapshot_cli
 from gismo.cli import memory_summarize as memory_summarize_cli
 from gismo.cli import agent_role as agent_role_cli
 from gismo.tui import app as tui_app
+from gismo.web import server as web_server
 from gismo.cli import agent_session as agent_session_cli
 from gismo.cli.operator import (
     make_idempotency_key,
@@ -5307,6 +5308,15 @@ def _handle_tui(args: argparse.Namespace) -> None:
     tui_app.run(db_path=args.db_path)
 
 
+def _handle_web(args: argparse.Namespace) -> None:
+    web_server.run(
+        db_path=args.db_path,
+        host=args.host,
+        port=args.port,
+        open_browser=not args.no_browser,
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     default_db_path = str(Path(".gismo") / "state.db")
     db_parent = argparse.ArgumentParser(add_help=False)
@@ -7091,6 +7101,30 @@ def build_parser() -> argparse.ArgumentParser:
         parents=[db_parent_optional],
     )
     tui_parser.set_defaults(handler=_handle_tui)
+
+    web_parser = subparsers.add_parser(
+        "web",
+        help="Open the local web dashboard in a browser",
+        parents=[db_parent_optional],
+    )
+    web_parser.add_argument(
+        "--port",
+        type=int,
+        default=7800,
+        help="Port to listen on (default: 7800)",
+    )
+    web_parser.add_argument(
+        "--host",
+        default="127.0.0.1",
+        help="Host to bind to (default: 127.0.0.1)",
+    )
+    web_parser.add_argument(
+        "--no-browser",
+        action="store_true",
+        default=False,
+        help="Don't open the browser automatically",
+    )
+    web_parser.set_defaults(handler=_handle_web)
 
     queue_parser = subparsers.add_parser(
         "queue",

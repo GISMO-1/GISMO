@@ -394,11 +394,15 @@ Phase 3 — Memory & Context: COMPLETE
 - Memory explain and doctor tooling for observability and operator-controlled maintenance
 - Summarization workflows: promote completed run outcomes into persistent memory under policy
 
-Phase 4 — Interactive GISMO: END GAME
-- CLI/TUI/Local UI interactions
+Phase 4 — Interactive GISMO: IN PROGRESS
+- Live terminal dashboard (TUI): queue, runs, daemon status with 3s auto-refresh
 - Always-on local service behavior
 - Plans, explains, executes, remembers, recovers
 - No cloud dependency and no silent actions
+
+Next:
+- Local web UI (browser-based dashboard for plan review, queue inspection, memory visualization)
+- Interactive plan approval (inspect and edit plans before execution)
 
 -------------------------------------------------------------------------------
 

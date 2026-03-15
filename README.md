@@ -303,6 +303,27 @@ Planner configuration:
   - GISMO_OLLAMA_TRANSPORT=python|curl (Windows defaults to curl when available because urllib can be slow)
 - keep_alive defaults to 10m so models stay loaded for smoother repeated calls.
 
+Plan approval (defer, inspect, and approve/reject plans before execution):
+
+  gismo ask "Do X" --defer                # save plan as pending instead of enqueueing
+  gismo plan list                          # list all pending plans
+  gismo plan list --status PENDING         # filter by status (PENDING/APPROVED/REJECTED)
+  gismo plan list --json
+  gismo plan show PLAN_ID                  # full plan + risk + explain
+  gismo plan show PLAN_ID --json
+  gismo plan approve PLAN_ID              # enqueue actions and mark approved
+  gismo plan approve PLAN_ID --yes        # skip confirmation prompt
+  gismo plan reject PLAN_ID               # mark rejected
+  gismo plan reject PLAN_ID --reason "too risky"
+  gismo plan edit PLAN_ID --action 1 --cmd "echo:updated"   # edit action command (1-based index)
+  gismo plan edit PLAN_ID --action 2 --remove               # remove an action
+
+Notes:
+- Short-ID prefix resolution works for PLAN_ID (same as queue items).
+- approve enqueues all actions from the plan_json and marks the plan APPROVED.
+- edit only works on PENDING plans; approved/rejected plans are immutable.
+- Plans are also manageable in the web UI Plans tab with inline editing.
+
 Terminal dashboard:
 
   gismo tui
@@ -427,12 +448,10 @@ Phase 4 — Interactive GISMO: IN PROGRESS
 - Live terminal dashboard (TUI): queue, runs, daemon status with 3s auto-refresh
 - Local web UI (browser-based dashboard): queue, runs, memory, daemon control via `gismo web`
 - TTS voice support (piper-tts): 5 voices, on-demand download, memory-backed preference, web settings panel
+- Interactive plan approval: defer plans for review; inspect, edit, approve/reject via CLI (`gismo plan`) and web UI Plans tab
 - Always-on local service behavior
 - Plans, explains, executes, remembers, recovers
 - No cloud dependency and no silent actions
-
-Next:
-- Interactive plan approval (inspect and edit plans before execution)
 
 -------------------------------------------------------------------------------
 

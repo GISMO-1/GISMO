@@ -202,10 +202,69 @@ Planner configuration:
   - GISMO_OLLAMA_TRANSPORT=python|curl (Windows defaults to curl when available because urllib can be slow)
 - keep_alive defaults to 10m so models remain loaded for repeated calls.
 
+DEFER PLAN FOR REVIEW (INTERACTIVE APPROVAL):
+
+  gismo ask "do X" --defer
+
+- Saves the LLM plan as a pending record in the DB instead of enqueueing it
+- Prints the plan ID; nothing executes until you explicitly approve
+
 Always prefer:
 - --dry-run first
 - Review plan
-- Then --enqueue
+- Then --enqueue (or --defer if you want to hold it for later)
+
+-------------------------------------------------------------------------------
+
+PLAN APPROVAL (INSPECT, EDIT, APPROVE/REJECT)
+
+If a plan was deferred with --defer, or if you want human-in-the-loop control before any execution, use the plan commands.
+
+LIST PENDING PLANS:
+
+  gismo plan list
+  gismo plan list --status PENDING
+  gismo plan list --status APPROVED
+  gismo plan list --json
+
+INSPECT A PLAN:
+
+  gismo plan show PLAN_ID
+  gismo plan show PLAN_ID --json
+
+- Prints intent, risk level, risk flags, rationale, and all actions
+- Short-ID prefix resolution supported (e.g. first 8 chars)
+
+APPROVE A PLAN:
+
+  gismo plan approve PLAN_ID
+  gismo plan approve PLAN_ID --yes
+
+- Enqueues all actions from the plan (same as manual --enqueue)
+- Marks plan APPROVED; status is immutable after approval
+- Shows a summary of enqueued IDs
+
+REJECT A PLAN:
+
+  gismo plan reject PLAN_ID
+  gismo plan reject PLAN_ID --reason "too risky"
+
+- Marks plan REJECTED with optional reason; no actions are enqueued
+
+EDIT BEFORE APPROVING:
+
+  gismo plan edit PLAN_ID --action 1 --cmd "echo:updated"
+  gismo plan edit PLAN_ID --action 2 --remove
+
+- --action N: 1-based action index
+- --cmd: replace the action's command text (validated before saving)
+- --remove: delete the action entirely
+- Only PENDING plans can be edited; approved/rejected plans are immutable
+
+Notes:
+- Use gismo plan show to review actions before editing.
+- You can also approve/reject/edit plans in the web UI Plans tab.
+- Plan IDs support short-prefix resolution (same as queue item IDs).
 
 -------------------------------------------------------------------------------
 
@@ -276,6 +335,71 @@ Memory suggestions:
 
 -------------------------------------------------------------------------------
 
+TERMINAL DASHBOARD (TUI)
+
+  gismo tui
+
+- Live curses dashboard: queue, runs, daemon status
+- Auto-refreshes every 3 seconds
+- No external dependencies
+
+-------------------------------------------------------------------------------
+
+LOCAL WEB DASHBOARD
+
+  gismo web
+  gismo web --port 8080
+  gismo web --no-browser
+
+- Opens a browser to 127.0.0.1:7800 by default
+- Tabs: Queue, Runs, Memory, Plans, Settings
+- Queue tab: view items, cancel individual items, purge all failed
+- Runs tab: run list with task/tool call detail view
+- Memory tab: namespace list + all active memory items
+- Plans tab: pending/approved/rejected plans with inline editing, approve/reject buttons
+- Settings tab: TTS voice selection and live playback test
+- Daemon sidebar: live status, pause/resume controls
+- No external HTTP libraries; stdlib only
+
+-------------------------------------------------------------------------------
+
+TEXT-TO-SPEECH (TTS)
+
+GISMO supports local TTS synthesis using piper-tts. Voice models download on first use.
+
+LIST AVAILABLE VOICES:
+
+  gismo tts voices list
+
+SET VOICE PREFERENCE:
+
+  gismo tts voices set en_US-ryan-high
+
+DOWNLOAD A VOICE MODEL IN ADVANCE:
+
+  gismo tts voices download en_US-lessac-medium
+
+SPEAK TEXT:
+
+  gismo tts speak "Hello from GISMO"
+  gismo tts speak "Hello" --voice en_GB-alan-medium
+  gismo tts speak "Hello" --out hello.wav
+
+Available voices:
+  en_GB-northern_english_male-medium  (default)
+  en_GB-alan-medium
+  en_US-lessac-medium
+  en_US-ryan-high
+  en_US-amy-medium
+
+Notes:
+- Voice models are cached at ~/.cache/gismo/tts/ and not re-downloaded once present.
+- Voice preference is stored in memory (namespace gismo:settings, key tts.voice).
+- Voice settings are also available in the web dashboard Settings tab.
+- GISMO is pronounced "GHIZMO" in synthesis (hard G applied via preprocessing).
+
+-------------------------------------------------------------------------------
+
 MAINTENANCE & RECOVERY
 
 MAINTAIN STALE TASKS (ONE SHOT):
@@ -328,13 +452,15 @@ If something only works on Linux, it is not finished.
 
 SAFE OPERATING PRACTICES
 
-- Use dry-run for planner requests.
+- Use --dry-run for planner requests.
+- Use --defer if you want to hold a plan for review before execution.
 - Inspect queue regularly.
 - Export logs for audits.
 - Stop system cleanly (gismo down).
 - Use recover if something crashes.
 - Keep policies tight.
 - If behavior surprises you, investigate logs.
+- Review pending plans before approving; use gismo plan show to inspect actions.
 
 -------------------------------------------------------------------------------
 

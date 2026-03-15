@@ -130,6 +130,17 @@ def _make_handler(db_path: str) -> type[BaseHTTPRequestHandler]:
                             _json_response(self, web_api.reject_plan(db_path, plan_id, body.get("reason")))
                     except ValueError as exc:
                         _error(self, str(exc), 400)
+                elif path == "/api/chat":
+                    body = _read_json_body(self)
+                    message = (body.get("message") or "").strip()
+                    history = body.get("history") or []
+                    if not message:
+                        _error(self, "message is required", 400)
+                        return
+                    try:
+                        _json_response(self, web_api.chat_message(db_path, message, history))
+                    except RuntimeError as exc:
+                        _error(self, str(exc), 503)
                 else:
                     _error(self, "Not found", 404)
             except Exception as exc:

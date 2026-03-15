@@ -167,6 +167,43 @@ def _resolve_curl_executable() -> str | None:
     return shutil.which("curl")
 
 
+def ollama_freeform_chat(
+    messages: list[dict[str, str]],
+    *,
+    system: str = "",
+    model: str | None = None,
+    host: str | None = None,
+    timeout_s: int | None = None,
+) -> str:
+    """Call Ollama chat API with a full message history; no JSON format constraint."""
+    config = resolve_ollama_config(url=host, model=model, timeout_s=timeout_s)
+    url = f"{config.url}/api/chat"
+    all_messages: list[dict[str, str]] = []
+    if system:
+        all_messages.append({"role": "system", "content": system})
+    all_messages.extend(messages)
+    payload = {
+        "model": config.model,
+        "stream": False,
+        "keep_alive": DEFAULT_OLLAMA_KEEP_ALIVE,
+        "options": {"temperature": 0.7},
+        "messages": all_messages,
+    }
+    payload_json = json.dumps(payload)
+    if config.transport == "curl":
+        curl_executable = _resolve_curl_executable()
+        if curl_executable:
+            try:
+                return _ollama_chat_via_curl(
+                    url, payload_json,
+                    timeout_s=config.timeout_s, config=config,
+                    curl_executable=curl_executable,
+                )
+            except OllamaError:
+                pass
+    return _ollama_chat_via_urllib(url, payload_json, timeout_s=config.timeout_s, config=config)
+
+
 def ollama_chat(
     prompt: str,
     system: str,

@@ -104,6 +104,22 @@ HTML = r"""<!DOCTYPE html>
   .action-why { color: var(--dim); font-size: 11px; padding-left: 30px; }
   .rationale-list { margin: 8px 0; padding-left: 16px; color: var(--dim); font-size: 11px; }
 
+  /* Chat */
+  #tab-chat.active { display: flex; flex-direction: column; overflow: hidden; }
+  .chat-history { flex: 1; overflow-y: auto; padding: 12px 16px; display: flex; flex-direction: column; gap: 10px; min-height: 0; }
+  .chat-msg { max-width: 75%; padding: 8px 12px; border-radius: 8px; font-size: 13px; line-height: 1.5; word-wrap: break-word; }
+  .chat-msg.user { align-self: flex-end; background: rgba(88,166,255,0.12); border: 1px solid rgba(88,166,255,0.25); }
+  .chat-msg.assistant { align-self: flex-start; background: var(--panel); border: 1px solid var(--border); }
+  .chat-msg .msg-role { font-size: 10px; color: var(--dim); margin-bottom: 4px; text-transform: uppercase; letter-spacing: 1px; }
+  .chat-msg.thinking .msg-content { color: var(--dim); font-style: italic; }
+  .chat-empty { flex: 1; display: flex; align-items: center; justify-content: center; color: var(--dim); font-size: 12px; }
+  .chat-input-bar { padding: 10px 12px; border-top: 1px solid var(--border); display: flex; gap: 8px; align-items: center; background: var(--panel); flex-shrink: 0; }
+  .chat-input-bar input { flex: 1; background: var(--bg); border: 1px solid var(--border); color: var(--text); padding: 6px 10px; border-radius: 4px; font-family: inherit; font-size: 13px; }
+  .chat-input-bar input:focus { outline: none; border-color: var(--blue); }
+  .btn-mic { font-size: 15px; padding: 4px 9px; }
+  .btn-mic.recording { border-color: var(--red); color: var(--red); background: rgba(248,81,73,0.1); animation: mic-pulse 1s ease-in-out infinite; }
+  @keyframes mic-pulse { 0%,100%{opacity:1} 50%{opacity:0.4} }
+
   /* Settings / TTS */
   .settings-section { padding: 20px; max-width: 700px; }
   .settings-section h2 { font-size: 14px; margin-bottom: 16px; color: var(--text); }
@@ -152,6 +168,7 @@ HTML = r"""<!DOCTYPE html>
       <div class="tab" data-tab="runs" onclick="switchTab('runs')">Runs</div>
       <div class="tab" data-tab="memory" onclick="switchTab('memory')">Memory</div>
       <div class="tab" data-tab="plans" onclick="switchTab('plans')">Plans</div>
+      <div class="tab" data-tab="chat" onclick="switchTab('chat')">Chat</div>
       <div class="tab" data-tab="settings" onclick="switchTab('settings')">Settings</div>
     </div>
 
@@ -217,6 +234,18 @@ HTML = r"""<!DOCTYPE html>
       <div id="plan-detail-view" style="display:none; padding:16px; overflow:auto; height:100%;"></div>
     </div>
 
+    <!-- Chat tab -->
+    <div class="tab-content" id="tab-chat">
+      <div class="chat-history" id="chat-history">
+        <div class="chat-empty" id="chat-empty">Ask GISMO anything about your queues, runs, plans, or memory.</div>
+      </div>
+      <div class="chat-input-bar">
+        <input type="text" id="chat-input" placeholder="Message GISMO…" onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendChat()}" />
+        <button class="btn btn-mic" id="btn-mic" onclick="toggleMic()" title="Click to speak">🎤</button>
+        <button class="btn btn-blue" id="btn-chat-send" onclick="sendChat()">Send</button>
+      </div>
+    </div>
+
     <!-- Settings tab -->
     <div class="tab-content" id="tab-settings">
       <div class="settings-section">
@@ -270,6 +299,7 @@ function switchTab(name) {
   document.querySelectorAll('.tab-content').forEach(c => c.classList.toggle('active', c.id === 'tab-' + name));
   if (name === 'settings') refreshVoices();
   if (name === 'plans') refreshPlans();
+  if (name === 'chat') setTimeout(() => document.getElementById('chat-input')?.focus(), 50);
 }
 
 // ── Status / Sidebar ──────────────────────────────────────────────────────
@@ -745,6 +775,125 @@ async function quickRejectPlan(planId, event) {
   });
   if (r.ok) await refreshPlans();
   else { const d = await r.json(); alert('Error: ' + (d.error||'unknown')); }
+}
+
+// ── Chat ──────────────────────────────────────────────────────────────────
+
+let _chatHistory = [];
+let _micActive = false;
+let _recognition = null;
+
+function _appendChatMsg(role, content, opts = {}) {
+  const empty = document.getElementById('chat-empty');
+  if (empty) empty.remove();
+  const hist = document.getElementById('chat-history');
+  const el = document.createElement('div');
+  el.className = 'chat-msg ' + role + (opts.thinking ? ' thinking' : '');
+  if (opts.id) el.id = opts.id;
+  el.innerHTML = `<div class="msg-role">${role === 'user' ? 'You' : 'GISMO'}</div><div class="msg-content">${escHtml(content)}</div>`;
+  hist.appendChild(el);
+  hist.scrollTop = hist.scrollHeight;
+  return el;
+}
+
+async function sendChat() {
+  const input = document.getElementById('chat-input');
+  const message = input.value.trim();
+  if (!message) return;
+  input.value = '';
+  input.disabled = true;
+  document.getElementById('btn-chat-send').disabled = true;
+
+  _appendChatMsg('user', message);
+  const historyToSend = [..._chatHistory];
+  _chatHistory.push({role: 'user', content: message});
+
+  const thinkingId = 'chat-thinking-' + Date.now();
+  _appendChatMsg('assistant', '…', {thinking: true, id: thinkingId});
+
+  try {
+    const resp = await fetch('/api/chat', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({message, history: historyToSend})
+    });
+    const data = await resp.json();
+    document.getElementById(thinkingId)?.remove();
+    if (!resp.ok) {
+      _appendChatMsg('assistant', 'Error: ' + escHtml(data.error || 'unknown error'));
+      _chatHistory.pop(); // remove the user message we added optimistically
+      return;
+    }
+    const reply = data.reply || '';
+    _appendChatMsg('assistant', reply);
+    _chatHistory.push({role: 'assistant', content: reply});
+    _speakChatReply(reply);
+  } catch(e) {
+    document.getElementById(thinkingId)?.remove();
+    _appendChatMsg('assistant', 'Error: ' + e);
+    _chatHistory.pop();
+  } finally {
+    input.disabled = false;
+    document.getElementById('btn-chat-send').disabled = false;
+    input.focus();
+  }
+}
+
+async function _speakChatReply(text) {
+  if (!text) return;
+  try {
+    const resp = await fetch('/api/tts/speak', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({text})
+    });
+    if (!resp.ok) return;
+    const blob = await resp.blob();
+    const url = URL.createObjectURL(blob);
+    const audio = new Audio(url);
+    audio.play();
+    audio.onended = () => URL.revokeObjectURL(url);
+  } catch(e) { /* TTS is best-effort */ }
+}
+
+function toggleMic() {
+  if (_micActive) { stopMic(); } else { startMic(); }
+}
+
+function startMic() {
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SR) {
+    alert('Speech recognition is not supported in this browser. Try Chrome or Edge.');
+    return;
+  }
+  _recognition = new SR();
+  _recognition.continuous = false;
+  _recognition.interimResults = false;
+  _recognition.lang = 'en-US';
+  _recognition.onstart = () => {
+    _micActive = true;
+    document.getElementById('btn-mic').classList.add('recording');
+  };
+  _recognition.onresult = (event) => {
+    document.getElementById('chat-input').value = event.results[0][0].transcript;
+  };
+  _recognition.onend = () => {
+    _micActive = false;
+    document.getElementById('btn-mic').classList.remove('recording');
+    const val = document.getElementById('chat-input').value.trim();
+    if (val) sendChat();
+  };
+  _recognition.onerror = () => {
+    _micActive = false;
+    document.getElementById('btn-mic').classList.remove('recording');
+  };
+  _recognition.start();
+}
+
+function stopMic() {
+  if (_recognition) { _recognition.stop(); _recognition = null; }
+  _micActive = false;
+  document.getElementById('btn-mic').classList.remove('recording');
 }
 
 // ── Auto-refresh ──────────────────────────────────────────────────────────

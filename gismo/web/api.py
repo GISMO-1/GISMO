@@ -361,6 +361,31 @@ def patch_plan(
     }
 
 
+# ── Chat ───────────────────────────────────────────────────────────────────
+
+_CHAT_SYSTEM = (
+    "You are GISMO, a local-first autonomous orchestration assistant. "
+    "You help operators manage tasks, queues, runs, plans, and memory. "
+    "Answer concisely and helpfully. Do not output JSON unless explicitly asked."
+)
+
+
+def chat_message(
+    db_path: str,
+    message: str,
+    history: list[dict[str, str]],
+) -> dict[str, Any]:
+    """Send a message to the local LLM and return the reply."""
+    from gismo.llm.ollama import ollama_freeform_chat, OllamaError
+
+    messages = list(history) + [{"role": "user", "content": message}]
+    try:
+        reply = ollama_freeform_chat(messages, system=_CHAT_SYSTEM)
+    except OllamaError as exc:
+        raise RuntimeError(str(exc)) from exc
+    return {"reply": reply}
+
+
 # ── TTS ────────────────────────────────────────────────────────────────────
 
 

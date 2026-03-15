@@ -9,6 +9,9 @@ description = "GISMO persistent orchestration core"
 readme = "README.md"
 requires-python = ">=3.11"
 license = {text = "UNLICENSED"}
+dependencies = [
+    "textual>=0.80",
+]
 
 [project.scripts]
 gismo = "gismo.cli.main:main"

@@ -21,6 +21,7 @@ from gismo.cli import memory_preview as memory_preview_cli
 from gismo.cli import memory_snapshot as memory_snapshot_cli
 from gismo.cli import memory_summarize as memory_summarize_cli
 from gismo.cli import agent_role as agent_role_cli
+from gismo.tui import app as tui_app
 from gismo.cli import agent_session as agent_session_cli
 from gismo.cli.operator import (
     make_idempotency_key,
@@ -5302,6 +5303,10 @@ def _handle_recover(args: argparse.Namespace) -> None:
     supervise_cli.run_supervise_recover()
 
 
+def _handle_tui(args: argparse.Namespace) -> None:
+    tui_app.run(db_path=args.db_path)
+
+
 def build_parser() -> argparse.ArgumentParser:
     default_db_path = str(Path(".gismo") / "state.db")
     db_parent = argparse.ArgumentParser(add_help=False)
@@ -7079,6 +7084,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="IPC auth token (or set GISMO_IPC_TOKEN)",
     )
     recover_parser.set_defaults(handler=_handle_recover)
+
+    tui_parser = subparsers.add_parser(
+        "tui",
+        help="Open the live terminal dashboard",
+        parents=[db_parent_optional],
+    )
+    tui_parser.set_defaults(handler=_handle_tui)
 
     queue_parser = subparsers.add_parser(
         "queue",

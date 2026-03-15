@@ -89,6 +89,21 @@ HTML = r"""<!DOCTYPE html>
 
   .empty-state { padding: 40px; text-align: center; color: var(--dim); }
 
+  /* Plan approval */
+  .risk-LOW { color: var(--green); }
+  .risk-MEDIUM { color: var(--yellow); font-weight: bold; }
+  .risk-HIGH { color: var(--red); font-weight: bold; }
+  .plan-detail { max-width: 800px; }
+  .plan-detail h2 { font-size: 14px; margin-bottom: 12px; }
+  .plan-meta { color: var(--dim); font-size: 11px; margin-bottom: 12px; }
+  .action-row { display: flex; align-items: center; gap: 8px; padding: 6px 0; border-bottom: 1px solid var(--border); }
+  .action-row:last-child { border-bottom: none; }
+  .action-idx { color: var(--dim); font-size: 11px; width: 24px; flex-shrink: 0; }
+  .action-cmd { flex: 1; background: var(--bg); border: 1px solid var(--border); color: var(--purple); padding: 3px 6px; border-radius: 4px; font-family: inherit; font-size: 12px; }
+  .action-cmd:focus { outline: none; border-color: var(--blue); }
+  .action-why { color: var(--dim); font-size: 11px; padding-left: 30px; }
+  .rationale-list { margin: 8px 0; padding-left: 16px; color: var(--dim); font-size: 11px; }
+
   /* Settings / TTS */
   .settings-section { padding: 20px; max-width: 700px; }
   .settings-section h2 { font-size: 14px; margin-bottom: 16px; color: var(--text); }
@@ -136,6 +151,7 @@ HTML = r"""<!DOCTYPE html>
       <div class="tab active" data-tab="queue" onclick="switchTab('queue')">Queue</div>
       <div class="tab" data-tab="runs" onclick="switchTab('runs')">Runs</div>
       <div class="tab" data-tab="memory" onclick="switchTab('memory')">Memory</div>
+      <div class="tab" data-tab="plans" onclick="switchTab('plans')">Plans</div>
       <div class="tab" data-tab="settings" onclick="switchTab('settings')">Settings</div>
     </div>
 
@@ -176,6 +192,29 @@ HTML = r"""<!DOCTYPE html>
         <span class="dim" id="memory-count"></span>
       </div>
       <div id="memory-body"></div>
+    </div>
+
+    <!-- Plans tab -->
+    <div class="tab-content" id="tab-plans">
+      <div class="toolbar">
+        <select id="plan-status-filter" onchange="refreshPlans()">
+          <option value="">All statuses</option>
+          <option value="PENDING" selected>Pending</option>
+          <option value="APPROVED">Approved</option>
+          <option value="REJECTED">Rejected</option>
+        </select>
+        <span class="spacer"></span>
+        <span class="dim" id="plans-count"></span>
+      </div>
+      <div id="plans-list-view">
+        <table id="plans-table">
+          <thead><tr>
+            <th>ID</th><th>Status</th><th>Risk</th><th>Intent</th><th>Actions</th><th>Age</th><th></th>
+          </tr></thead>
+          <tbody id="plans-body"></tbody>
+        </table>
+      </div>
+      <div id="plan-detail-view" style="display:none; padding:16px; overflow:auto; height:100%;"></div>
     </div>
 
     <!-- Settings tab -->
@@ -230,6 +269,7 @@ function switchTab(name) {
   document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === name));
   document.querySelectorAll('.tab-content').forEach(c => c.classList.toggle('active', c.id === 'tab-' + name));
   if (name === 'settings') refreshVoices();
+  if (name === 'plans') refreshPlans();
 }
 
 // ── Status / Sidebar ──────────────────────────────────────────────────────
@@ -548,6 +588,163 @@ async function speakTest() {
   } finally {
     btn.disabled = false;
   }
+}
+
+// ── Plans ─────────────────────────────────────────────────────────────────
+
+async function refreshPlans() {
+  try {
+    const status = document.getElementById('plan-status-filter').value;
+    const url = '/api/plans' + (status ? '?status=' + status : '');
+    const plans = await API(url);
+    document.getElementById('plans-count').textContent = plans.length + ' plan(s)';
+    const body = document.getElementById('plans-body');
+    if (!plans.length) {
+      body.innerHTML = '<tr><td colspan="7" class="empty-state">No plans</td></tr>';
+      return;
+    }
+    body.innerHTML = plans.map(p => {
+      const flags = (p.risk_flags || []).join(', ');
+      const flagStr = flags ? ` <span class="dim">[${escHtml(flags)}]</span>` : '';
+      const isPending = p.status === 'PENDING';
+      const approveBtn = isPending ? `<button class="btn btn-green" onclick="quickApprovePlan('${p.id}',event)">Approve</button>` : '';
+      const rejectBtn = isPending ? `<button class="btn btn-red" onclick="quickRejectPlan('${p.id}',event)">Reject</button>` : '';
+      return `<tr style="cursor:pointer" onclick="showPlanDetail('${p.id}')">
+        <td class="id-col">${p.id.slice(0,8)}</td>
+        <td class="${statusClass(p.status)}">${p.status.toLowerCase()}</td>
+        <td class="risk-${p.risk_level}">${p.risk_level}${flagStr}</td>
+        <td>${escHtml(trunc(p.intent, 40))}</td>
+        <td>${p.action_count}</td>
+        <td>${ageStr(p.created_at)}</td>
+        <td onclick="event.stopPropagation()" style="display:flex;gap:4px">${approveBtn}${rejectBtn}</td>
+      </tr>`;
+    }).join('');
+  } catch(e) { console.error('plans refresh error', e); }
+}
+
+async function showPlanDetail(planId) {
+  document.getElementById('plans-list-view').style.display = 'none';
+  const view = document.getElementById('plan-detail-view');
+  view.style.display = 'block';
+  view.innerHTML = '<span class="dim">Loading…</span>';
+  try {
+    const p = await API('/api/plans/' + planId);
+    const isPending = p.status === 'PENDING';
+    const actions = (p.plan || {}).actions || [];
+    const rationale = (p.risk || {}).rationale || [];
+    const riskFlags = (p.risk || {}).risk_flags || [];
+
+    const actionsHtml = actions.map((a, i) => `
+      <div class="action-row" id="action-row-${i}">
+        <span class="action-idx">[${i}]</span>
+        <input class="action-cmd" id="action-cmd-${i}" value="${escHtml(a.command||'')}" ${isPending ? '' : 'readonly'} />
+        ${isPending ? `<button class="btn btn-red" onclick="removeAction('${planId}',${i})">×</button>` : ''}
+      </div>
+      ${a.why ? `<div class="action-why">why: ${escHtml(a.why)}</div>` : ''}
+    `).join('');
+
+    const rationaleHtml = rationale.length
+      ? `<ul class="rationale-list">${rationale.map(r => `<li>${escHtml(r)}</li>`).join('')}</ul>`
+      : '';
+
+    const approveRejectHtml = isPending ? `
+      <div style="display:flex;gap:8px;margin-top:16px;">
+        <button class="btn btn-green" onclick="saveAndApprovePlan('${planId}')">✓ Save edits &amp; Approve</button>
+        <button class="btn btn-red" onclick="rejectPlanDetail('${planId}')">✗ Reject</button>
+      </div>` : '';
+
+    view.innerHTML = `
+      <div class="plan-detail">
+        <span class="back-btn" onclick="backToPlans()">← Back to Plans</span>
+        <h2>${escHtml(p.intent)}</h2>
+        <div class="plan-meta">
+          ID: ${p.id} &nbsp;|&nbsp;
+          Status: <span class="${statusClass(p.status)}">${p.status.toLowerCase()}</span> &nbsp;|&nbsp;
+          Risk: <span class="risk-${p.risk_level}">${p.risk_level}</span>
+          ${riskFlags.length ? `[${escHtml(riskFlags.join(', '))}]` : ''}
+        </div>
+        <div class="plan-meta">Prompt: <em>${escHtml(p.user_text)}</em></div>
+        ${rationaleHtml}
+        <div class="section-title">Actions (${actions.length})</div>
+        <div id="actions-list">${actionsHtml || '<div class="dim">No actions</div>'}</div>
+        ${approveRejectHtml}
+        ${p.rejection_reason ? `<div class="error-text" style="margin-top:8px">Rejected: ${escHtml(p.rejection_reason)}</div>` : ''}
+      </div>`;
+  } catch(e) {
+    view.innerHTML = '<span class="back-btn" onclick="backToPlans()">← Back</span><div class="error-text">Failed to load plan</div>';
+  }
+}
+
+function backToPlans() {
+  document.getElementById('plan-detail-view').style.display = 'none';
+  document.getElementById('plans-list-view').style.display = 'block';
+}
+
+async function removeAction(planId, idx) {
+  try {
+    await fetch('/api/plans/' + planId, {
+      method: 'PATCH',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({action_index: idx, remove_action: true})
+    });
+    await showPlanDetail(planId);
+  } catch(e) { alert('Error: ' + e); }
+}
+
+async function saveAndApprovePlan(planId) {
+  // Save any edited commands first
+  const inputs = document.querySelectorAll('[id^="action-cmd-"]');
+  for (const input of inputs) {
+    const idx = parseInt(input.id.replace('action-cmd-', ''));
+    const newCmd = input.value.trim();
+    if (newCmd) {
+      await fetch('/api/plans/' + planId, {
+        method: 'PATCH',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({action_index: idx, command: newCmd})
+      });
+    }
+  }
+  const r = await fetch('/api/plans/' + planId + '/approve', {method: 'POST'});
+  const data = await r.json();
+  if (r.ok) {
+    await showPlanDetail(planId);
+    await refreshPlans();
+  } else {
+    alert('Approve failed: ' + (data.error || 'unknown error'));
+  }
+}
+
+async function rejectPlanDetail(planId) {
+  const reason = prompt('Rejection reason (optional):') || null;
+  const r = await fetch('/api/plans/' + planId + '/reject', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({reason})
+  });
+  if (r.ok) {
+    await showPlanDetail(planId);
+    await refreshPlans();
+  } else {
+    const data = await r.json();
+    alert('Reject failed: ' + (data.error || 'unknown error'));
+  }
+}
+
+async function quickApprovePlan(planId, event) {
+  event.stopPropagation();
+  const r = await fetch('/api/plans/' + planId + '/approve', {method: 'POST'});
+  if (r.ok) await refreshPlans();
+  else { const d = await r.json(); alert('Error: ' + (d.error||'unknown')); }
+}
+
+async function quickRejectPlan(planId, event) {
+  event.stopPropagation();
+  const r = await fetch('/api/plans/' + planId + '/reject', {
+    method: 'POST', headers: {'Content-Type':'application/json'}, body: '{}'
+  });
+  if (r.ok) await refreshPlans();
+  else { const d = await r.json(); alert('Error: ' + (d.error||'unknown')); }
 }
 
 // ── Auto-refresh ──────────────────────────────────────────────────────────

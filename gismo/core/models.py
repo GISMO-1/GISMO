@@ -47,6 +47,12 @@ class QueueStatus(str, Enum):
     CANCELLED = "CANCELLED"
 
 
+class PlanStatus(str, Enum):
+    PENDING = "PENDING"
+    APPROVED = "APPROVED"
+    REJECTED = "REJECTED"
+
+
 class AgentSessionStatus(str, Enum):
     ACTIVE = "ACTIVE"
     PAUSED = "PAUSED"
@@ -227,3 +233,23 @@ class DaemonHeartbeat:
     started_at: datetime
     last_seen: datetime
     version: Optional[str] = None
+
+
+@dataclass
+class PendingPlan:
+    """A plan saved for operator review before enqueue."""
+
+    intent: str
+    plan_json: Dict[str, Any]        # mutable plan dict (actions may be edited)
+    risk_level: str                  # "LOW" | "MEDIUM" | "HIGH"
+    risk_json: Dict[str, Any]        # PlanRisk.to_dict()
+    explain_json: Dict[str, Any]     # PlanExplain.to_dict()
+    user_text: str
+    id: str = field(default_factory=lambda: str(uuid4()))
+    status: PlanStatus = PlanStatus.PENDING
+    actor: str = "ask"
+    created_at: datetime = field(default_factory=_utc_now)
+    updated_at: datetime = field(default_factory=_utc_now)
+    rejection_reason: Optional[str] = None
+    approved_at: Optional[datetime] = None
+    rejected_at: Optional[datetime] = None

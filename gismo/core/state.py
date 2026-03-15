@@ -17,6 +17,8 @@ from gismo.core.models import (
     DaemonHeartbeat,
     Event,
     FailureType,
+    PendingPlan,
+    PlanStatus,
     QueueItem,
     QueueStatus,
     Run,
@@ -425,6 +427,38 @@ class StateStore:
                     """
                     CREATE INDEX IF NOT EXISTS idx_tool_receipts_started_at
                     ON tool_receipts (started_at)
+                    """
+                )
+                cursor.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS pending_plans (
+                        id TEXT PRIMARY KEY,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        status TEXT NOT NULL DEFAULT 'PENDING',
+                        intent TEXT NOT NULL,
+                        user_text TEXT NOT NULL,
+                        actor TEXT NOT NULL DEFAULT 'ask',
+                        risk_level TEXT NOT NULL,
+                        risk_json TEXT NOT NULL,
+                        explain_json TEXT NOT NULL,
+                        plan_json TEXT NOT NULL,
+                        rejection_reason TEXT,
+                        approved_at TEXT,
+                        rejected_at TEXT
+                    )
+                    """
+                )
+                cursor.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_pending_plans_status
+                    ON pending_plans (status)
+                    """
+                )
+                cursor.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_pending_plans_created_at
+                    ON pending_plans (created_at)
                     """
                 )
                 self._ensure_columns(connection)
@@ -1912,6 +1946,165 @@ class StateStore:
             related_run_id=row["related_run_id"],
             related_ask_event_id=row["related_ask_event_id"],
         )
+
+    # ── Pending plan CRUD ─────────────────────────────────────────────────
+
+    def _row_to_pending_plan(self, row: sqlite3.Row) -> PendingPlan:
+        return PendingPlan(
+            id=row["id"],
+            created_at=_parse_dt(row["created_at"]),
+            updated_at=_parse_dt(row["updated_at"]),
+            status=PlanStatus(row["status"]),
+            intent=row["intent"],
+            user_text=row["user_text"],
+            actor=row["actor"],
+            risk_level=row["risk_level"],
+            risk_json=json.loads(row["risk_json"]),
+            explain_json=json.loads(row["explain_json"]),
+            plan_json=json.loads(row["plan_json"]),
+            rejection_reason=row["rejection_reason"],
+            approved_at=_parse_dt(row["approved_at"]) if row["approved_at"] else None,
+            rejected_at=_parse_dt(row["rejected_at"]) if row["rejected_at"] else None,
+        )
+
+    def create_pending_plan(
+        self,
+        *,
+        intent: str,
+        plan_json: Dict[str, Any],
+        risk_level: str,
+        risk_json: Dict[str, Any],
+        explain_json: Dict[str, Any],
+        user_text: str,
+        actor: str = "ask",
+    ) -> PendingPlan:
+        now = _utc_now().isoformat()
+        plan = PendingPlan(
+            intent=intent,
+            plan_json=plan_json,
+            risk_level=risk_level,
+            risk_json=risk_json,
+            explain_json=explain_json,
+            user_text=user_text,
+            actor=actor,
+        )
+        with self._connection() as connection:
+            connection.execute(
+                """
+                INSERT INTO pending_plans
+                    (id, created_at, updated_at, status, intent, user_text, actor,
+                     risk_level, risk_json, explain_json, plan_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    plan.id,
+                    now,
+                    now,
+                    PlanStatus.PENDING.value,
+                    intent,
+                    user_text,
+                    actor,
+                    risk_level,
+                    json.dumps(risk_json),
+                    json.dumps(explain_json),
+                    json.dumps(plan_json),
+                ),
+            )
+            connection.commit()
+        return plan
+
+    def get_pending_plan(self, plan_id: str) -> Optional[PendingPlan]:
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM pending_plans WHERE id = ?", (plan_id,)
+            ).fetchone()
+        return self._row_to_pending_plan(row) if row else None
+
+    def resolve_pending_plan_id(self, plan_id_or_prefix: str) -> list[str]:
+        """Resolve an id or id prefix to matching pending plan ids (0..n)."""
+        value = (plan_id_or_prefix or "").strip()
+        if not value:
+            return []
+        with self._connection() as connection:
+            exact = connection.execute(
+                "SELECT id FROM pending_plans WHERE id = ?", (value,)
+            ).fetchone()
+            if exact is not None:
+                return [exact["id"]]
+            rows = connection.execute(
+                "SELECT id FROM pending_plans WHERE id LIKE ? ORDER BY created_at DESC LIMIT 50",
+                (value + "%",),
+            ).fetchall()
+        return [row["id"] for row in rows]
+
+    def list_pending_plans(
+        self,
+        status: Optional[PlanStatus] = None,
+        limit: int = 50,
+        newest_first: bool = True,
+    ) -> list[PendingPlan]:
+        order = "DESC" if newest_first else "ASC"
+        with self._connection() as connection:
+            if status is not None:
+                rows = connection.execute(
+                    f"SELECT * FROM pending_plans WHERE status = ? ORDER BY created_at {order} LIMIT ?",
+                    (status.value, limit),
+                ).fetchall()
+            else:
+                rows = connection.execute(
+                    f"SELECT * FROM pending_plans ORDER BY created_at {order} LIMIT ?",
+                    (limit,),
+                ).fetchall()
+        return [self._row_to_pending_plan(r) for r in rows]
+
+    def approve_pending_plan(self, plan_id: str) -> Optional[PendingPlan]:
+        """Mark plan as APPROVED. Returns None if not found."""
+        now = _utc_now().isoformat()
+        with self._connection() as connection:
+            connection.execute(
+                """
+                UPDATE pending_plans
+                SET status = ?, approved_at = ?, updated_at = ?
+                WHERE id = ? AND status = 'PENDING'
+                """,
+                (PlanStatus.APPROVED.value, now, now, plan_id),
+            )
+            connection.commit()
+        return self.get_pending_plan(plan_id)
+
+    def reject_pending_plan(
+        self, plan_id: str, reason: Optional[str] = None
+    ) -> Optional[PendingPlan]:
+        """Mark plan as REJECTED. Returns None if not found."""
+        now = _utc_now().isoformat()
+        with self._connection() as connection:
+            connection.execute(
+                """
+                UPDATE pending_plans
+                SET status = ?, rejected_at = ?, updated_at = ?, rejection_reason = ?
+                WHERE id = ? AND status = 'PENDING'
+                """,
+                (PlanStatus.REJECTED.value, now, now, reason, plan_id),
+            )
+            connection.commit()
+        return self.get_pending_plan(plan_id)
+
+    def update_pending_plan_json(
+        self, plan_id: str, new_plan_json: Dict[str, Any]
+    ) -> Optional[PendingPlan]:
+        """Replace plan_json for a PENDING plan (for edits). Returns None if not PENDING/found."""
+        now = _utc_now().isoformat()
+        with self._connection() as connection:
+            connection.execute(
+                """
+                UPDATE pending_plans
+                SET plan_json = ?, updated_at = ?
+                WHERE id = ? AND status = 'PENDING'
+                """,
+                (json.dumps(new_plan_json), now, plan_id),
+            )
+            connection.commit()
+        return self.get_pending_plan(plan_id)
 
 
 MEMORY_PROVENANCE_SUGGESTION_LIMIT = 5

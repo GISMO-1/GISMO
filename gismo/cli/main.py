@@ -24,6 +24,7 @@ from gismo.cli import agent_role as agent_role_cli
 from gismo.tui import app as tui_app
 from gismo.web import server as web_server
 from gismo.cli import tts_cli
+from gismo.cli import plan as plan_cli
 from gismo.cli import agent_session as agent_session_cli
 from gismo.cli.operator import (
     make_idempotency_key,
@@ -3716,6 +3717,7 @@ def run_ask(
     non_interactive: bool = False,
     policy_path: str | None = None,
     json_output: bool = False,
+    defer: bool = False,
 ) -> None:
     plan_event_id = str(uuid4())
     memory_injection = None
@@ -3871,6 +3873,32 @@ def run_ask(
                 json_payload=payload,
                 event_id=plan_event_id,
             )
+        # ── defer: save plan for later operator approval ──────────────────
+        if defer and not _is_inquire_intent(plan):
+            pending = state_store.create_pending_plan(
+                intent=plan.get("intent", ""),
+                plan_json=plan,
+                risk_level=risk.risk_level,
+                risk_json={
+                    "risk_level": risk.risk_level,
+                    "risk_flags": list(risk.risk_flags),
+                    "rationale": list(risk.rationale),
+                },
+                explain_json=explain_payload.to_dict(),
+                user_text=user_text,
+                actor="ask",
+            )
+            if json_output:
+                print(json.dumps({"deferred": True, "plan_id": pending.id}, ensure_ascii=False))
+            else:
+                print(f"Plan saved for approval: {pending.id}")
+                print(f"  Risk: {risk.risk_level}")
+                print(f"  Intent: {plan.get('intent', '')}")
+                print(f"  Actions: {len(plan.get('actions', []))}")
+                print(f"  Review with: gismo plan show {pending.id[:8]}")
+                print(f"  Approve with: gismo plan approve {pending.id[:8]}")
+            return
+
         if _is_inquire_intent(plan):
             if json_output:
                 _print_plan_json(
@@ -4697,9 +4725,13 @@ def _handle_enqueue(args: argparse.Namespace) -> None:
 
 def _handle_ask(args: argparse.Namespace) -> None:
     user_text = " ".join(args.text).strip()
+    defer = getattr(args, "defer", False)
     dry_run = True if args.dry_run is None else args.dry_run
     if args.enqueue and args.dry_run is None:
         dry_run = False
+    if defer and args.enqueue:
+        print("--defer and --enqueue are mutually exclusive.", file=sys.stderr)
+        raise SystemExit(2)
     run_ask(
         args.db_path,
         user_text,
@@ -4718,6 +4750,7 @@ def _handle_ask(args: argparse.Namespace) -> None:
         non_interactive=args.non_interactive,
         policy_path=args.policy,
         json_output=args.json,
+        defer=defer,
     )
 
 
@@ -6541,6 +6574,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Show the plan without enqueueing (default unless --enqueue is set)",
     )
     ask_parser.add_argument(
+        "--defer",
+        action="store_true",
+        default=False,
+        help="Save the generated plan as a pending plan for later approval (see: gismo plan)",
+    )
+    ask_parser.add_argument(
         "--max-actions",
         type=int,
         default=10,
@@ -7142,6 +7181,69 @@ def build_parser() -> argparse.ArgumentParser:
         help="Don't open the browser automatically",
     )
     web_parser.set_defaults(handler=_handle_web)
+
+    # ── gismo plan ─────────────────────────────────────────────────────────
+    plan_parser = subparsers.add_parser(
+        "plan",
+        help="Manage pending plans (review, approve, reject, edit)",
+        parents=[db_parent_optional],
+    )
+    plan_subparsers = plan_parser.add_subparsers(dest="plan_command", required=True)
+
+    plan_list_parser = plan_subparsers.add_parser(
+        "list",
+        help="List plans",
+        parents=[db_parent_optional],
+    )
+    plan_list_parser.add_argument("--status", default=None, metavar="STATUS",
+                                  help="Filter by status: PENDING, APPROVED, REJECTED")
+    plan_list_parser.add_argument("--limit", type=int, default=50)
+    plan_list_parser.add_argument("--json", action="store_true", default=False)
+    plan_list_parser.set_defaults(handler=lambda a: plan_cli.handle_plan_list(a))
+
+    plan_show_parser = plan_subparsers.add_parser(
+        "show",
+        help="Show plan details",
+        parents=[db_parent_optional],
+    )
+    plan_show_parser.add_argument("id", help="Plan ID or prefix")
+    plan_show_parser.add_argument("--json", action="store_true", default=False)
+    plan_show_parser.set_defaults(handler=lambda a: plan_cli.handle_plan_show(a))
+
+    plan_approve_parser = plan_subparsers.add_parser(
+        "approve",
+        help="Approve a pending plan and enqueue its actions",
+        parents=[db_parent_optional],
+    )
+    plan_approve_parser.add_argument("id", help="Plan ID or prefix")
+    plan_approve_parser.add_argument("--yes", action="store_true", default=False,
+                                     help="Skip confirmation prompt")
+    plan_approve_parser.set_defaults(handler=lambda a: plan_cli.handle_plan_approve(a))
+
+    plan_reject_parser = plan_subparsers.add_parser(
+        "reject",
+        help="Reject a pending plan",
+        parents=[db_parent_optional],
+    )
+    plan_reject_parser.add_argument("id", help="Plan ID or prefix")
+    plan_reject_parser.add_argument("--reason", default=None, metavar="TEXT",
+                                    help="Optional rejection reason")
+    plan_reject_parser.add_argument("--yes", action="store_true", default=False)
+    plan_reject_parser.set_defaults(handler=lambda a: plan_cli.handle_plan_reject(a))
+
+    plan_edit_parser = plan_subparsers.add_parser(
+        "edit",
+        help="Edit an action in a pending plan before approval",
+        parents=[db_parent_optional],
+    )
+    plan_edit_parser.add_argument("id", help="Plan ID or prefix")
+    plan_edit_parser.add_argument("--action", type=int, required=True, metavar="N",
+                                  help="1-based action index to edit")
+    plan_edit_parser.add_argument("--cmd", default=None, metavar="COMMAND",
+                                  help="Replace action command text")
+    plan_edit_parser.add_argument("--remove", action="store_true", default=False,
+                                  help="Remove the action from the plan")
+    plan_edit_parser.set_defaults(handler=lambda a: plan_cli.handle_plan_edit(a))
 
     # ── gismo tts ──────────────────────────────────────────────────────────
     tts_parser = subparsers.add_parser(

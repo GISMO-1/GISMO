@@ -13,6 +13,8 @@ from gismo.web.templates import HTML
 
 _ITEM_ID_RE = re.compile(r"^/api/queue/([^/]+)/cancel$")
 _RUN_ID_RE = re.compile(r"^/api/runs/([^/?]+)$")
+_PLAN_ID_RE = re.compile(r"^/api/plans/([^/]+)$")
+_PLAN_ACTION_RE = re.compile(r"^/api/plans/([^/]+)/(approve|reject)$")
 
 
 def _json_response(handler: BaseHTTPRequestHandler, data: Any, status: int = 200) -> None:
@@ -67,6 +69,17 @@ def _make_handler(db_path: str) -> type[BaseHTTPRequestHandler]:
                     _json_response(self, web_api.get_memory(db_path))
                 elif path == "/api/tts/voices":
                     _json_response(self, web_api.get_voices(db_path))
+                elif path == "/api/plans":
+                    from urllib.parse import parse_qs, urlparse
+                    qs = parse_qs(urlparse(self.path).query)
+                    status_filter = qs.get("status", [None])[0]
+                    _json_response(self, web_api.get_plans(db_path, status=status_filter))
+                elif m := _PLAN_ID_RE.match(path):
+                    plan_id = m.group(1)
+                    try:
+                        _json_response(self, web_api.get_plan_detail(db_path, plan_id))
+                    except ValueError as exc:
+                        _error(self, str(exc), 404)
                 else:
                     _error(self, "Not found", 404)
             except Exception as exc:
@@ -107,6 +120,37 @@ def _make_handler(db_path: str) -> type[BaseHTTPRequestHandler]:
                     self.send_header("Content-Length", str(len(wav_bytes)))
                     self.end_headers()
                     self.wfile.write(wav_bytes)
+                elif m := _PLAN_ACTION_RE.match(path):
+                    plan_id, action = m.group(1), m.group(2)
+                    body = _read_json_body(self)
+                    try:
+                        if action == "approve":
+                            _json_response(self, web_api.approve_plan(db_path, plan_id))
+                        else:
+                            _json_response(self, web_api.reject_plan(db_path, plan_id, body.get("reason")))
+                    except ValueError as exc:
+                        _error(self, str(exc), 400)
+                else:
+                    _error(self, "Not found", 404)
+            except Exception as exc:
+                _error(self, str(exc), 500)
+
+        def do_PATCH(self) -> None:
+            path = self.path.split("?")[0]
+            try:
+                if m := _PLAN_ID_RE.match(path):
+                    plan_id = m.group(1)
+                    body = _read_json_body(self)
+                    try:
+                        result = web_api.patch_plan(
+                            db_path, plan_id,
+                            action_index=body.get("action_index"),
+                            new_command=body.get("command"),
+                            remove_action=bool(body.get("remove_action", False)),
+                        )
+                        _json_response(self, result)
+                    except ValueError as exc:
+                        _error(self, str(exc), 400)
                 else:
                     _error(self, "Not found", 404)
             except Exception as exc:

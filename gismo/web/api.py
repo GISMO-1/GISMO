@@ -222,6 +222,145 @@ def get_memory(db_path: str) -> dict[str, Any]:
     return {"namespaces": ns_list, "items": items_by_ns}
 
 
+# ── Plan approval ─────────────────────────────────────────────────────────
+
+
+def get_plans(
+    db_path: str,
+    status: str | None = None,
+    limit: int = 100,
+) -> list[dict[str, Any]]:
+    from gismo.core.models import PlanStatus
+
+    status_filter = None
+    if status:
+        try:
+            status_filter = PlanStatus(status.upper())
+        except ValueError:
+            pass
+
+    with StateStore(db_path) as store:
+        plans = store.list_pending_plans(status=status_filter, limit=limit)
+
+    return [
+        {
+            "id": p.id,
+            "status": p.status.value,
+            "risk_level": p.risk_level,
+            "risk_flags": p.risk_json.get("risk_flags", []),
+            "intent": p.intent,
+            "user_text": p.user_text,
+            "actor": p.actor,
+            "created_at": _dt(p.created_at),
+            "updated_at": _dt(p.updated_at),
+            "action_count": len(p.plan_json.get("actions", [])),
+            "rejection_reason": p.rejection_reason,
+            "approved_at": _dt(p.approved_at),
+            "rejected_at": _dt(p.rejected_at),
+        }
+        for p in plans
+    ]
+
+
+def get_plan_detail(db_path: str, plan_id: str) -> dict[str, Any]:
+    with StateStore(db_path) as store:
+        plan = store.get_pending_plan(plan_id)
+    if plan is None:
+        raise ValueError(f"Plan not found: {plan_id}")
+    return {
+        "id": plan.id,
+        "status": plan.status.value,
+        "risk_level": plan.risk_level,
+        "risk": plan.risk_json,
+        "explain": plan.explain_json,
+        "intent": plan.intent,
+        "user_text": plan.user_text,
+        "actor": plan.actor,
+        "created_at": _dt(plan.created_at),
+        "updated_at": _dt(plan.updated_at),
+        "plan": plan.plan_json,
+        "rejection_reason": plan.rejection_reason,
+        "approved_at": _dt(plan.approved_at),
+        "rejected_at": _dt(plan.rejected_at),
+    }
+
+
+def approve_plan(db_path: str, plan_id: str) -> dict[str, Any]:
+    from gismo.core.models import PlanStatus
+    from gismo.core.plan_store import enqueue_plan_actions
+
+    with StateStore(db_path) as store:
+        plan = store.get_pending_plan(plan_id)
+        if plan is None:
+            raise ValueError(f"Plan not found: {plan_id}")
+        if plan.status != PlanStatus.PENDING:
+            raise ValueError(f"Plan is already {plan.status.value.lower()}")
+        enqueued_ids, skipped = enqueue_plan_actions(store, plan.plan_json)
+        store.approve_pending_plan(plan_id)
+
+    return {"id": plan_id, "status": "APPROVED", "enqueued_ids": enqueued_ids, "skipped": skipped}
+
+
+def reject_plan(db_path: str, plan_id: str, reason: str | None = None) -> dict[str, Any]:
+    from gismo.core.models import PlanStatus
+
+    with StateStore(db_path) as store:
+        plan = store.get_pending_plan(plan_id)
+        if plan is None:
+            raise ValueError(f"Plan not found: {plan_id}")
+        if plan.status != PlanStatus.PENDING:
+            raise ValueError(f"Plan is already {plan.status.value.lower()}")
+        store.reject_pending_plan(plan_id, reason=reason)
+
+    return {"id": plan_id, "status": "REJECTED", "reason": reason}
+
+
+def patch_plan(
+    db_path: str,
+    plan_id: str,
+    *,
+    action_index: int | None = None,
+    new_command: str | None = None,
+    remove_action: bool = False,
+) -> dict[str, Any]:
+    from gismo.core.models import PlanStatus
+
+    with StateStore(db_path) as store:
+        plan = store.get_pending_plan(plan_id)
+        if plan is None:
+            raise ValueError(f"Plan not found: {plan_id}")
+        if plan.status != PlanStatus.PENDING:
+            raise ValueError(f"Plan is {plan.status.value.lower()} and cannot be edited")
+
+        if action_index is None:
+            raise ValueError("action_index is required")
+
+        new_plan = dict(plan.plan_json)
+        actions = list(new_plan.get("actions", []))
+
+        if action_index < 0 or action_index >= len(actions):
+            raise ValueError(
+                f"action_index {action_index} out of range (plan has {len(actions)} actions)"
+            )
+
+        if remove_action:
+            actions.pop(action_index)
+        elif new_command is not None:
+            actions[action_index] = dict(actions[action_index])
+            actions[action_index]["command"] = new_command
+        else:
+            raise ValueError("Provide new_command or remove_action=true")
+
+        new_plan["actions"] = actions
+        updated = store.update_pending_plan_json(plan_id, new_plan)
+
+    return {
+        "id": plan_id,
+        "action_count": len(new_plan["actions"]),
+        "plan": updated.plan_json if updated else new_plan,
+    }
+
+
 # ── TTS ────────────────────────────────────────────────────────────────────
 
 

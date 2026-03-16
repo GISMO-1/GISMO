@@ -7,6 +7,7 @@ state errors.
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 from gismo.core.models import QueueStatus
@@ -363,6 +364,26 @@ def patch_plan(
 
 # ── Chat ───────────────────────────────────────────────────────────────────
 
+_CHAT_HISTORY_FILE = Path(".gismo") / "chat_history.jsonl"
+
+
+def _append_chat_record(message: str, reply: str) -> None:
+    """Append a single user/assistant exchange to the JSONL history file."""
+    import json
+
+    record = {
+        "timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "user": message,
+        "assistant": reply,
+    }
+    try:
+        _CHAT_HISTORY_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with _CHAT_HISTORY_FILE.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+    except OSError:
+        pass  # never let logging failures break the chat
+
+
 _CHAT_SYSTEM = (
     "I am GISMO, a local-first, policy-controlled personal AI assistant built by Mike Burns. "
     "I run entirely on your hardware — no cloud services, no silent actions, and a full audit trail of everything I do. "
@@ -385,6 +406,7 @@ def chat_message(
         reply = ollama_freeform_chat(messages, system=_CHAT_SYSTEM, model="gismo")
     except OllamaError as exc:
         raise RuntimeError(str(exc)) from exc
+    _append_chat_record(message, reply)
     return {"reply": reply}
 
 

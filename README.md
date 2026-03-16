@@ -1,5 +1,10 @@
 # GISMO
 
+[![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+[![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-lightgrey.svg)]()
+[![GitHub Stars](https://img.shields.io/github/stars/GISMO-1/GISMO?style=social)](https://github.com/GISMO-1/GISMO/stargazers)
+
 **General Intelligent System for Multiflow Operations**
 
 A local-first, policy-controlled personal AI that runs entirely on your hardware. No cloud. No silent actions. Full audit trail. Yours.

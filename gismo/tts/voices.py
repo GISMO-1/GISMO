@@ -12,7 +12,7 @@ ENGINE_PIPER = "piper"
 
 # ── Registry ────────────────────────────────────────────────────────────────
 
-DEFAULT_VOICE = "af_heart"
+DEFAULT_VOICE = "bm_lewis"
 
 VOICES: dict[str, dict] = {
     # ── Kokoro voices ───────────────────────────────────────────────────────
@@ -20,7 +20,7 @@ VOICES: dict[str, dict] = {
         "name": "Heart",
         "lang": "en-US",
         "quality": "high",
-        "description": "American female, warm and expressive (default)",
+        "description": "American female, warm and expressive",
         "engine": ENGINE_KOKORO,
     },
     "af_bella": {
@@ -90,7 +90,7 @@ VOICES: dict[str, dict] = {
         "name": "Lewis",
         "lang": "en-GB",
         "quality": "high",
-        "description": "British male, calm and clear",
+        "description": "British male, calm and clear (default)",
         "engine": ENGINE_KOKORO,
     },
     # ── Piper voices (fallback) ─────────────────────────────────────────────

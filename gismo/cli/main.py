@@ -5342,6 +5342,11 @@ def _handle_tui(args: argparse.Namespace) -> None:
     tui_app.run(db_path=args.db_path)
 
 
+def _handle_app(args: argparse.Namespace) -> None:
+    from gismo.desktop.app import launch
+    launch(db_path=args.db_path)
+
+
 def _handle_web(args: argparse.Namespace) -> None:
     web_server.run(
         db_path=args.db_path,
@@ -7157,6 +7162,13 @@ def build_parser() -> argparse.ArgumentParser:
         parents=[db_parent_optional],
     )
     tui_parser.set_defaults(handler=_handle_tui)
+
+    app_parser = subparsers.add_parser(
+        "app",
+        help="Open GISMO as a native desktop window (no browser)",
+        parents=[db_parent_optional],
+    )
+    app_parser.set_defaults(handler=_handle_app)
 
     web_parser = subparsers.add_parser(
         "web",

@@ -382,7 +382,7 @@ def chat_message(
 
     messages = list(history) + [{"role": "user", "content": message}]
     try:
-        reply = ollama_freeform_chat(messages, system=_CHAT_SYSTEM)
+        reply = ollama_freeform_chat(messages, system=_CHAT_SYSTEM, model="gismo")
     except OllamaError as exc:
         raise RuntimeError(str(exc)) from exc
     return {"reply": reply}

@@ -308,6 +308,7 @@ def _ollama_chat_via_curl(
             command,
             capture_output=True,
             text=True,
+            encoding="utf-8",
             check=False,
             timeout=timeout_s,
         )

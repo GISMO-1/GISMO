@@ -384,6 +384,14 @@ def _append_chat_record(message: str, reply: str) -> None:
         pass  # never let logging failures break the chat
 
 
+def _clean_reply(text: str) -> str:
+    """Strip model artefacts from a chat reply before display."""
+    import re
+    # Remove special tokens like <|end|>, <|assistant|>, <|im_end|>, etc.
+    text = re.sub(r"<\|[^|>]*\|>", "", text)
+    return text.strip()
+
+
 def _build_chat_system(db_path: str) -> str:
     from gismo.onboarding import get_operator_name
 
@@ -411,6 +419,7 @@ def chat_message(
         reply = ollama_freeform_chat(messages, system=_build_chat_system(db_path), model="gismo")
     except OllamaError as exc:
         raise RuntimeError(str(exc)) from exc
+    reply = _clean_reply(reply)
     _append_chat_record(message, reply)
     return {"reply": reply}
 

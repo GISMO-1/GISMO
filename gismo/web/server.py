@@ -69,6 +69,8 @@ def _make_handler(db_path: str) -> type[BaseHTTPRequestHandler]:
                     _json_response(self, web_api.get_memory(db_path))
                 elif path == "/api/tts/voices":
                     _json_response(self, web_api.get_voices(db_path))
+                elif path == "/api/onboarding":
+                    _json_response(self, web_api.get_onboarding_status(db_path))
                 elif path == "/api/plans":
                     from urllib.parse import parse_qs, urlparse
                     qs = parse_qs(urlparse(self.path).query)
@@ -128,6 +130,17 @@ def _make_handler(db_path: str) -> type[BaseHTTPRequestHandler]:
                             _json_response(self, web_api.approve_plan(db_path, plan_id))
                         else:
                             _json_response(self, web_api.reject_plan(db_path, plan_id, body.get("reason")))
+                    except ValueError as exc:
+                        _error(self, str(exc), 400)
+                elif path == "/api/onboarding/complete":
+                    body = _read_json_body(self)
+                    name = (body.get("name") or "").strip()
+                    voice_id = (body.get("voice_id") or "").strip()
+                    if not name or not voice_id:
+                        _error(self, "name and voice_id are required", 400)
+                        return
+                    try:
+                        _json_response(self, web_api.complete_onboarding(db_path, name, voice_id))
                     except ValueError as exc:
                         _error(self, str(exc), 400)
                 elif path == "/api/chat":

@@ -140,9 +140,51 @@ HTML = r"""<!DOCTYPE html>
   #tts-status { font-size: 11px; color: var(--dim); margin-top: 6px; min-height: 16px; }
   select { background: var(--bg); border: 1px solid var(--border); color: var(--text); padding: 3px 6px; border-radius: 4px; font-family: inherit; font-size: 12px; }
   select:focus { outline: none; border-color: var(--blue); }
+
+  /* Onboarding wizard */
+  #onboarding-overlay { position: fixed; inset: 0; background: var(--bg); z-index: 9999; display: flex; align-items: center; justify-content: center; }
+  .ob-card { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 48px 56px; max-width: 520px; width: 100%; text-align: center; }
+  .ob-logo { font-size: 32px; letter-spacing: 8px; color: var(--blue); margin-bottom: 8px; font-weight: bold; }
+  .ob-tagline { color: var(--dim); font-size: 12px; margin-bottom: 40px; letter-spacing: 1px; }
+  .ob-step { margin-bottom: 28px; text-align: left; }
+  .ob-step label { display: block; font-size: 11px; text-transform: uppercase; letter-spacing: 1px; color: var(--dim); margin-bottom: 8px; }
+  .ob-step input, .ob-step select { width: 100%; background: var(--bg); border: 1px solid var(--border); color: var(--text); padding: 10px 12px; border-radius: 6px; font-family: inherit; font-size: 14px; }
+  .ob-step input:focus, .ob-step select:focus { outline: none; border-color: var(--blue); }
+  .ob-voice-row { display: flex; gap: 8px; align-items: center; }
+  .ob-voice-row select { flex: 1; }
+  .ob-btn-primary { width: 100%; padding: 12px; background: var(--blue); border: none; color: #0d1117; font-family: inherit; font-size: 14px; font-weight: bold; border-radius: 6px; cursor: pointer; letter-spacing: 1px; margin-top: 8px; }
+  .ob-btn-primary:hover { opacity: 0.9; }
+  .ob-btn-primary:disabled { opacity: 0.5; cursor: default; }
+  #ob-status { font-size: 11px; color: var(--dim); margin-top: 12px; min-height: 16px; text-align: center; }
 </style>
 </head>
 <body>
+
+<!-- Onboarding wizard — shown fullscreen on first run -->
+<div id="onboarding-overlay" style="display:none;">
+  <div class="ob-card">
+    <div class="ob-logo">GISMO</div>
+    <div class="ob-tagline">General Intelligent System for Multiflow Operations</div>
+
+    <div class="ob-step">
+      <label>What should I call you?</label>
+      <input type="text" id="ob-name" placeholder="Your name…" autocomplete="off"
+             onkeydown="if(event.key==='Enter') document.getElementById('ob-voice-select').focus()" />
+    </div>
+
+    <div class="ob-step">
+      <label>Choose a voice</label>
+      <div class="ob-voice-row">
+        <select id="ob-voice-select"></select>
+        <button class="btn btn-blue" onclick="obPreviewVoice()">▶ Preview</button>
+      </div>
+    </div>
+
+    <button class="ob-btn-primary" id="ob-submit" onclick="obComplete()">Get Started →</button>
+    <div id="ob-status"></div>
+  </div>
+</div>
+
 <header>
   <h1>GISMO</h1>
   <span class="db-path" id="db-path-label">Loading…</span>
@@ -910,7 +952,101 @@ async function refreshAll() {
   ind.classList.remove('active');
 }
 
+// ── Onboarding wizard ──────────────────────────────────────────────────────
+
+async function checkOnboarding() {
+  try {
+    const data = await API('/api/onboarding');
+    if (data.needs_onboarding) {
+      await obLoadVoices();
+      document.getElementById('onboarding-overlay').style.display = 'flex';
+      setTimeout(() => document.getElementById('ob-name').focus(), 50);
+    }
+  } catch(e) { /* non-fatal */ }
+}
+
+async function obLoadVoices() {
+  try {
+    const data = await API('/api/tts/voices');
+    const sel = document.getElementById('ob-voice-select');
+    sel.innerHTML = '';
+    const kokoro = data.voices.filter(v => v.engine === 'kokoro');
+    kokoro.forEach(v => {
+      const opt = document.createElement('option');
+      opt.value = v.id;
+      opt.textContent = `${v.name}  (${v.lang})  — ${v.description}`;
+      if (v.is_default) opt.selected = true;
+      sel.appendChild(opt);
+    });
+  } catch(e) { /* non-fatal */ }
+}
+
+async function obPreviewVoice() {
+  const name = document.getElementById('ob-name').value.trim() || 'Operator';
+  const voice = document.getElementById('ob-voice-select').value;
+  if (!voice) return;
+  document.getElementById('ob-status').textContent = 'Speaking…';
+  try {
+    const resp = await API('/api/tts/speak', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({text: `Hello, ${name}. I'm GISMO.`, voice}),
+      raw: true,
+    });
+    if (!resp.ok) { document.getElementById('ob-status').textContent = 'TTS unavailable.'; return; }
+    const blob = await resp.blob();
+    const url = URL.createObjectURL(blob);
+    const audio = new Audio(url);
+    audio.play();
+    audio.onended = () => { URL.revokeObjectURL(url); document.getElementById('ob-status').textContent = ''; };
+  } catch(e) { document.getElementById('ob-status').textContent = 'TTS unavailable.'; }
+}
+
+async function obComplete() {
+  const name = document.getElementById('ob-name').value.trim();
+  const voice_id = document.getElementById('ob-voice-select').value;
+  if (!name) { document.getElementById('ob-name').focus(); return; }
+  if (!voice_id) return;
+
+  const btn = document.getElementById('ob-submit');
+  const status = document.getElementById('ob-status');
+  btn.disabled = true;
+  status.textContent = 'Saving…';
+
+  try {
+    await API('/api/onboarding/complete', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({name, voice_id}),
+    });
+
+    status.textContent = 'Speaking welcome…';
+    try {
+      const resp = await API('/api/tts/speak', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({text: `Welcome, ${name}. I'm yours.`, voice: voice_id}),
+        raw: true,
+      });
+      if (resp.ok) {
+        const blob = await resp.blob();
+        const url = URL.createObjectURL(blob);
+        const audio = new Audio(url);
+        audio.play();
+        audio.onended = () => URL.revokeObjectURL(url);
+      }
+    } catch(e) { /* TTS is best-effort */ }
+
+    document.getElementById('onboarding-overlay').style.display = 'none';
+    refreshAll();
+  } catch(e) {
+    status.textContent = 'Error saving — please try again.';
+    btn.disabled = false;
+  }
+}
+
 refreshAll();
+checkOnboarding();
 setInterval(refreshAll, 5000);
 </script>
 </body>

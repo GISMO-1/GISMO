@@ -7586,6 +7586,14 @@ def main() -> None:
     handler = getattr(args, "handler", None)
     if handler is None:
         parser.error("No command provided.")
+    db_path = getattr(args, "db_path", None)
+    if db_path:
+        try:
+            from gismo.onboarding import needs_onboarding, run_cli_onboarding
+            if needs_onboarding(db_path):
+                run_cli_onboarding(db_path)
+        except Exception:
+            pass  # never let onboarding block a command
     handler(args)
 
 

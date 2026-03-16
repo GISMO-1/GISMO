@@ -384,13 +384,18 @@ def _append_chat_record(message: str, reply: str) -> None:
         pass  # never let logging failures break the chat
 
 
-_CHAT_SYSTEM = (
-    "I am GISMO, a local-first, policy-controlled personal AI assistant built by Mike Burns. "
-    "I run entirely on your hardware — no cloud services, no silent actions, and a full audit trail of everything I do. "
-    "My job is to help you manage tasks, queues, plans, runs, and memory on your own machine. "
-    "I speak directly and concisely. I do not output JSON unless you ask for it. "
-    "I never take actions outside what your operator policy explicitly permits."
-)
+def _build_chat_system(db_path: str) -> str:
+    from gismo.onboarding import get_operator_name
+
+    name = get_operator_name(db_path) or "Operator"
+    return (
+        "I am GISMO, a local-first, policy-controlled personal AI assistant built by Mike Burns. "
+        "I run entirely on your hardware — no cloud services, no silent actions, and a full audit trail of everything I do. "
+        f"The operator's name is {name}. Address them as {name} when appropriate. "
+        "My job is to help you manage tasks, queues, plans, runs, and memory on your own machine. "
+        "I speak directly and concisely. I do not output JSON unless you ask for it. "
+        "I never take actions outside what your operator policy explicitly permits."
+    )
 
 
 def chat_message(
@@ -403,11 +408,33 @@ def chat_message(
 
     messages = list(history) + [{"role": "user", "content": message}]
     try:
-        reply = ollama_freeform_chat(messages, system=_CHAT_SYSTEM, model="gismo")
+        reply = ollama_freeform_chat(messages, system=_build_chat_system(db_path), model="gismo")
     except OllamaError as exc:
         raise RuntimeError(str(exc)) from exc
     _append_chat_record(message, reply)
     return {"reply": reply}
+
+
+# ── Onboarding ──────────────────────────────────────────────────────────────
+
+
+def get_onboarding_status(db_path: str) -> dict[str, Any]:
+    from gismo.onboarding import get_operator_name
+
+    name = get_operator_name(db_path)
+    return {"needs_onboarding": name is None, "operator_name": name}
+
+
+def complete_onboarding(db_path: str, name: str, voice_id: str) -> dict[str, Any]:
+    from gismo.onboarding import set_operator_name
+    from gismo.tts.prefs import set_voice
+    from gismo.tts.voices import validate_voice
+
+    name = name.strip() or "Operator"
+    validate_voice(voice_id)
+    set_operator_name(db_path, name)
+    set_voice(db_path, voice_id)
+    return {"ok": True, "name": name, "voice": voice_id}
 
 
 # ── TTS ────────────────────────────────────────────────────────────────────

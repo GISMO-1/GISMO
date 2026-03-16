@@ -363,6 +363,49 @@ LOCAL WEB DASHBOARD
 
 -------------------------------------------------------------------------------
 
+WEB CHAT
+
+STARTING THE CHAT INTERFACE:
+
+  gismo web
+
+- Chat tab is available in the web dashboard at 127.0.0.1:7800
+- Uses the gismo Ollama model (local, no cloud)
+- Full conversation history is maintained within the session
+
+SENDING A MESSAGE:
+
+- Type in the input box and press Enter or click Send
+- GISMO responds inline in the chat window
+- Responses reflect GISMO's identity and operator policy
+
+MIC BUTTON (VOICE INPUT):
+
+- Click the mic button to record a voice message
+- Recording stops when you click again or after silence is detected
+- Transcribed text is inserted into the chat input automatically
+- Requires a browser with microphone access (localhost is always allowed)
+- No audio is sent to any external service; transcription is local
+
+CHAT HISTORY LOGGING:
+
+Every user/assistant exchange is automatically appended to:
+
+  .gismo/chat_history.jsonl
+
+Format (one JSON object per line):
+
+  {"timestamp": "2026-03-16T14:23:01+00:00", "user": "...", "assistant": "..."}
+
+Notes:
+- The file is created automatically on first chat message
+- Directory (.gismo/) is created if it does not exist
+- Logging failures are silent and never block the chat
+- This file is suitable as fine-tuning training data for future model runs
+- To review recent exchanges: python -c "import json,pathlib; [print(json.loads(l)['user']) for l in pathlib.Path('.gismo/chat_history.jsonl').read_text().splitlines()]"
+
+-------------------------------------------------------------------------------
+
 TEXT-TO-SPEECH (TTS)
 
 GISMO supports local TTS synthesis using piper-tts. Voice models download on first use.

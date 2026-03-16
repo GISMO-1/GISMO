@@ -426,6 +426,7 @@ def get_voices(db_path: str) -> dict[str, Any]:
             "lang": info["lang"],
             "quality": info["quality"],
             "description": info["description"],
+            "engine": info.get("engine", "piper"),
             "downloaded": is_downloaded(vid),
             "is_default": vid == DEFAULT_VOICE,
             "is_selected": vid == current,

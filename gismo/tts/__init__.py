@@ -1,1 +1,1 @@
-# gismo.tts — piper-tts voice synthesis
+# gismo.tts — kokoro-onnx primary / piper-tts fallback voice synthesis

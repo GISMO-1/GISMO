@@ -12,6 +12,7 @@ license = {text = "UNLICENSED"}
 dependencies = [
     "textual>=0.80",
     "piper-tts>=1.4",
+    "kokoro-onnx>=0.4",
 ]
 
 [project.scripts]

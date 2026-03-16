@@ -1,467 +1,215 @@
 # GISMO
 
-GISMO (General Intelligent System for Multiflow Operations) is a local-first, operator-grade autonomous orchestration system. It can plan, schedule, execute, audit, and recover tasks on a single machine using a controlled local LLM (Large Language Model) for planning. GISMO is not a chatbot or a cloud service — it runs entirely on your hardware and is built for determinism, safety, and clarity.
+**General Intelligent System for Multiflow Operations**
 
-Key Features and Principles:
+A local-first, policy-controlled personal AI that runs entirely on your hardware. No cloud. No silent actions. Full audit trail. Yours.
 
-- Fully Local & Deterministic:
-  GISMO operates with no external dependencies or cloud APIs. All decisions and state are local. Execution is deterministic and repeatable, with a persistent SQLite state database (.gismo/state.db by default) recording runs and tasks.
+Built by [Mike Burns](https://x.com/GISMO_ai).
 
-- Operator Commands & Structured Tasks:
-  GISMO accepts explicit operator commands (like echo:, note:, shell:, graph:) that define actions. High-level goals can be decomposed by the planner into sequences of these commands, but only within strict safety bounds.
+---
 
-- Queued Orchestration Engine:
-  Tasks are enqueued and executed via a durable queue and daemon process, ensuring reliable, resume-safe operation. Each task transitions through clear states (QUEUED → IN_PROGRESS → SUCCEEDED/FAILED), with retry handling and failure retention for auditability.
+## What is GISMO?
 
-- Policy-Enforced Tooling:
-  All operations are gated by security policies. Policies supported include readonly and dev-safe modes. Disallowed actions (like unapproved shell: commands) are blocked by default, logged, and safely marked failed.
+GISMO is an autonomous AI orchestration system designed to plan, execute, and manage tasks on your own machine — privately, transparently, and under your complete control.
 
-- Auditability:
-  Every action and decision is logged. GISMO produces detailed JSONL audit logs per run, capturing tool inputs/outputs, tool receipts (canonical payloads + hashes), and outcomes. Nothing happens silently.
+Every AI assistant you use today runs on someone else's server. Your data passes through their infrastructure. You don't own it.
 
-- Memory & Context (Persistent, Policy-Gated):
-  GISMO includes a persistent local memory layer (SQLite-backed) for facts, preferences, notes, and retention-governed context. The planner and agent can inject read-only memory context into prompts (bounded and audited). The LLM may emit “memory suggestions”; these are advisory by default and are only written if explicitly applied (policy + confirmation gated).
+GISMO is different. It runs locally using [Ollama](https://ollama.com) for its language model, stores everything in a local SQLite database, and gates every action through an explicit operator policy. Nothing happens without your permission. Nothing happens silently.
 
-- Leashed Autonomy (Agent Loop):
-  GISMO includes an operator-leashed agent loop that can iterate toward a goal under strict guardrails. The agent plans, enqueues, and executes only through the same queue/daemon machinery, with the same confirmation gates and policy checks as ask.
+**Core philosophy: Policy before power.**
 
-- Cross-Platform, Windows-First:
-  GISMO is built to run reliably on Windows first, as well as Linux. It avoids Unix assumptions and handles Windows-specific concerns (paths, subprocess behavior, locking) explicitly.
+---
 
-- No Magic, No Surprises:
-  Policy before power. Explicit > implicit. No silent actions. No hidden behavior.
+## Features
 
--------------------------------------------------------------------------------
+**Local LLM Brain** — Ollama integration, model-agnostic, zero cloud dependency. GISMO includes a fine-tuned model identity with its own Modelfile.
 
-INSTALLATION
+**Durable Task Engine** — Queue, daemon, state machine, resume-safe execution with retry handling and failure retention.
 
-Prereqs:
-- Python 3.11+ recommended (tested on Python 3.13)
-- A virtual environment is strongly recommended
-- Optional (for planner features): Ollama running locally with an available model
+**Full Audit Trail** — Every decision, plan, and action logged in tamper-evident JSONL format with cryptographic receipts.
 
-Install (from repo root):
+**Deterministic Risk Classification** — Every plan rated LOW / MEDIUM / HIGH before anything executes. No surprises.
 
-1) Create venv
-   Windows (PowerShell):
-     python -m venv .venv
-     .\.venv\Scripts\Activate.ps1
+**Policy-Gated Everything** — Deny by default. Shell commands blocked unless explicitly allowlisted. Confirmation gates for anything above LOW risk.
 
-   Linux/macOS:
-     python -m venv .venv
-     source .venv/bin/activate
+**Persistent Memory** — SQLite-backed memory with namespaces, profiles, retention rules, snapshots, and tamper detection. Operator-controlled writes only.
 
-2) Editable install
-     pip install -e .
+**Interactive Plan Approval** — Defer plans for review. Inspect, edit, approve, or reject individual actions before execution via CLI or web UI.
 
-3) Verify
-     python scripts/verify.py
+**Web Dashboard** — Local browser UI at `127.0.0.1:7800` with Queue, Runs, Memory, Plans, Chat, and Settings tabs. Zero external web framework dependencies.
 
--------------------------------------------------------------------------------
+**Terminal Dashboard (TUI)** — Live terminal interface with queue, runs, and daemon status. Auto-refreshes every 3 seconds.
 
-SMOKE SCRIPTS (WINDOWS)
+**Chat Interface** — Talk to GISMO through the web UI. GISMO responds using the local LLM and speaks responses aloud.
 
-Windows-friendly operator smoke checks (no Ollama required):
+**Text-to-Speech** — 5 selectable voices via piper-tts. Models download on first use. Voice preference stored in memory. Configurable in web Settings.
 
-  powershell -ExecutionPolicy Bypass -File scripts/operator_smoke.ps1
-  powershell -ExecutionPolicy Bypass -File scripts/e2e_smoke.ps1
+**Leashed Autonomy** — Agent loop that iterates toward goals under strict guardrails. Plans, enqueues, and executes only through the same policy gates as everything else.
 
-Notes:
-- Scripts create a temp DB under %TEMP% and clean it up afterward.
-- `e2e_smoke.ps1` validates enqueue → daemon --once → export for the core operator loop.
-- `e2e_smoke.ps1 -EnableMemoryPreview` records and checks a memory injection trace event (no Ollama).
+**Windows-First** — Built for Windows as the primary platform. Also runs on Linux and macOS.
 
--------------------------------------------------------------------------------
+---
 
-CANONICAL INVOCATION
+## Quick Start
 
-Prefer:
-  gismo ...
+**Prerequisites:** Python 3.11+, [Ollama](https://ollama.com) installed and running.
 
-Fallback (no console script available):
-  python -m gismo.cli.main ...
+```bash
+# Clone
+git clone https://github.com/GISMO-1/GISMO.git
+cd GISMO
 
--------------------------------------------------------------------------------
+# Set up virtual environment
+python -m venv .venv
 
-STATE & DEFAULT PATHS
+# Activate (Windows PowerShell)
+.venv\Scripts\Activate.ps1
 
-- Default DB path: .gismo/state.db
-- The `--db` flag can appear before or after the subcommand (e.g., `gismo --db PATH queue stats` or `gismo queue stats --db PATH`).
-- Exports are DB-anchored:
-  By default, exports are written to an `exports/` directory located next to the DB file.
-  Example:
-    DB:      .gismo/state.db
-    Exports: .gismo/exports/
+# Activate (Linux/macOS)
+source .venv/bin/activate
 
-This behavior is intentional: exports must not depend on the current working directory.
+# Install
+pip install -e .
 
--------------------------------------------------------------------------------
+# Verify
+python scripts/verify.py
 
-CORE COMMANDS (CLI)
+# Create GISMO's model identity in Ollama
+ollama create gismo -f Modelfile
 
-Run a single operator command immediately:
+# Launch the web dashboard
+gismo web
+```
 
-  gismo run "echo:Hello from GISMO"
-
-Enqueue a command to be executed by the daemon later:
-
-  gismo enqueue "note:remember this"
-
-Shell commands require explicit policy allowance and exact allowlist matches:
-
-  gismo run "shell:echo hello"
-
-- Shell commands are deny-by-default.
-- Policies must include run_shell in allowed_tools and a matching shell.allowlist entry.
-
-Start the daemon loop (foreground):
-
-  gismo daemon
-
-Queue introspection:
-
-  gismo queue stats
-  gismo queue list
-  gismo queue show ID_OR_PREFIX
-
-Notes:
-- queue show supports short-id prefix resolution (with ambiguity detection).
-- Queue item IDs are not run IDs. Use `runs show RUN_ID` or `export --run RUN_ID` for run-level data.
-- Human-readable output is available; JSON output is available where requested.
-
-Run introspection:
-
-  gismo runs list
-  gismo runs show RUN_ID
-  gismo runs show RUN_ID --json
-
-Export audit logs:
-
-  gismo export --latest
-  gismo export --run RUN_ID
-
-Tool receipt audit + replay:
-
-  gismo tools receipts list --run RUN_ID
-  gismo tools receipts show RECEIPT_ID
-  gismo tools replay --run RUN_ID --from-export /path/to/export.jsonl --dry-run
-
-Memory management (policy-gated; confirmation required for high-risk namespaces):
-
-  gismo memory put --namespace global --key key --kind note --value-text "value" \
-    --confidence high --source operator --policy policy/dev-safe.json --yes
-  gismo memory delete --namespace global key --policy policy/dev-safe.json --yes
-  gismo memory namespace list --policy policy/dev-safe.json
-  gismo memory namespace show global --policy policy/dev-safe.json
-  gismo memory namespace retire global --reason "governance" \
-    --policy /path/to/policy.json --yes
-  gismo memory profile list --policy policy/dev-safe.json
-  gismo memory profile show operator --policy policy/dev-safe.json
-  gismo memory profile create --name operator --description "Operator defaults" \
-    --include-namespace global --include-kind preference --include-kind fact \
-    --max-items 20 --policy policy/dev-operator.json --yes
-  gismo memory profile retire operator --policy policy/dev-operator.json --yes
-  gismo memory retention list --policy policy/dev-safe.json
-  gismo memory retention show global --policy policy/dev-safe.json
-  gismo memory retention set global --max-items 500 --ttl-seconds 86400 \
-    --reason "governance" --policy /path/to/policy.json --yes
-  gismo memory retention clear global --policy /path/to/policy.json --yes
-  gismo memory snapshot export --namespace project:* --out snapshots/project.json \
-    --policy policy/dev-safe.json
-  gismo memory snapshot diff --in snapshots/project.json --db .gismo/state.db \
-    --policy policy/dev-safe.json
-  gismo memory snapshot import --in snapshots/project.json --mode merge \
-    --policy policy/dev-safe.json --yes --non-interactive
-  gismo memory snapshot import --in snapshots/project.json --mode merge --dry-run \
-    --policy policy/dev-safe.json --yes --non-interactive
-  gismo memory explain --plan PLAN_EVENT_ID
-  gismo memory explain --run RUN_ID --json
-  gismo memory preview --memory-profile operator --policy policy/dev-operator.json --json
-  gismo memory doctor check --db .gismo/state.db --policy policy/dev-safe.json
-  gismo memory doctor check --db .gismo/state.db --policy policy/dev-safe.json --json
-  gismo memory doctor repair --rebuild-indexes --policy /path/to/policy.json --yes
-  gismo memory doctor repair --purge-tombstones --namespace global --older-than-seconds 86400 \
-    --limit 1000 --policy /path/to/policy.json --yes
-
-Notes:
-- Global/project namespaces require confirmation unless policy explicitly exempts them.
-- Use --non-interactive to fail closed instead of prompting.
-- Namespace retirement requires a policy that allows memory.namespace.retire for the target namespace.
-- Memory profiles control read-only visibility only; they never write memory.
-- Memory profile create/retire requires policy allowance for memory.profile.create and
-  memory.profile.retire plus explicit confirmation (use policy/dev-operator.json).
-- Retention enforcement is policy/confirmation-gated via memory.retention.enforce and runs only on writes.
-- Memory explain is observational only; it reads selection traces captured during ask/agent runs.
-- Memory injection trace is bounded and deterministic; it appears in explain JSON and
-  gismo memory preview for live inspection.
-- Memory doctor repairs are operator-controlled, policy-gated, and require explicit flags (no automatic fixes).
-- Snapshot item_hash values are computed from a canonical JSON payload that includes
-  created_at/updated_at timestamps; snapshot_hash is the sha256 of ordered item_hashes.
-
-Windows examples (explicit module invocation):
-
-  python -m gismo.cli.main --db .\tmp\dev.db runs list
-  python -m gismo.cli.main --db .\tmp\dev.db runs show RUN_ID
-  python -m gismo.cli.main --db .\tmp\dev.db runs show RUN_ID --json
-  python -m gismo.cli.main --db .\tmp\dev.db export RUN_ID
-
-Planner (local LLM via Ollama):
-
-  gismo ask "Summarize the last 10 queue failures" --dry-run
-  gismo ask "Do X safely" --enqueue
-  gismo ask "Plan with memory context" --dry-run --memory
-  gismo ask "Plan with operator memory profile" --dry-run --memory-profile operator
-  gismo ask "Remember the default model" --apply-memory-suggestions \
-    --policy policy/dev-safe.json --yes
-  Notes:
-  - Inquire intent is echo-only and never enqueues work; ask acts as read-only answer mode.
-  - Explicit write intent or flags (for example, --enqueue or --apply-memory-suggestions)
-    are required to log/remember.
-
-Agent loop (leashed autonomy):
-
-  gismo agent "Summarize the last 10 queue failures" --dry-run
-  gismo agent "Do X safely" --once
-  gismo agent "Do X safely" --max-cycles 3 --yes
-  gismo agent "Plan with memory context" --dry-run --memory
-  gismo agent "Plan with operator memory profile" --dry-run --memory-profile operator
-  gismo agent --role planner "Plan as the planner role"
-  gismo agent "Apply memory suggestions" --dry-run --apply-memory-suggestions \
-    --policy policy/dev-safe.json --yes
-  gismo agent role list --policy policy/dev-safe.json
-  gismo agent role create --name planner --memory-profile operator \
-    --policy policy/dev-safe.json --yes
-  gismo agent role retire planner --policy policy/dev-safe.json --yes
-
-Agent sessions (operator-controlled checkpointing, no background autonomy):
-
-  gismo agent session start --goal "Prepare incident summary" --role planner
-  gismo agent session list
-  gismo agent session show SESSION_ID --json
-  gismo agent session resume SESSION_ID --yes
-  gismo agent session pause SESSION_ID --yes
-  gismo agent session resume SESSION_ID --dry-run
-  gismo agent session cancel SESSION_ID --yes
-
-Session notes:
-- Each resume runs a single bounded iteration (no daemons, no timers, no parallelism).
-- Confirmation gates and policy checks still apply; non-interactive mode fails closed.
-
-Agent notes:
-- The agent loop is leashed autonomy: it plans, enqueues, and executes only through the queue/daemon.
-- Confirmation is required for MEDIUM/HIGH risk plans unless --yes is provided.
-- Memory context and suggestion handling mirror `ask`: suggestions are advisory unless
-  --apply-memory-suggestions is set (policy/confirmation-gated; use --non-interactive to fail closed).
-- Agent roles provide sequential, operator-controlled identities; roles determine which memory profile
-  is injected and are recorded in audit logs. Roles cannot be used once retired.
-- Use either --role or --memory/--memory-profile; role selection is authoritative.
-
-Memory profiles (read-only selection):
-- Profiles define which namespaces/kinds are visible for memory injection; they do not write memory.
-- Example profiles:
-  - operator: include global preferences/facts with a max-items cap.
-  - project: include project:<name> namespace kinds for task context.
-  - minimal: no filters (empty profile yields no injected memory).
-
-Agent roles (multi-agent identities):
-- Roles bind a name + description to a memory profile and are immutable except for retirement.
-- Roles are sequential only; they do not enable parallel execution or autonomy.
-- Roles differ from memory profiles: profiles describe visibility rules, while roles bind those rules
-  to a named identity (e.g., planner vs executor).
-- Creating/retiring roles requires policy allowance for agent.role.create/agent.role.retire plus
-  explicit confirmation (use --yes or --non-interactive to fail closed).
-
-Planner behavior:
-- Produces enqueue-only plans under strict schema.
-- Actions are bounded (hard limit on action count).
-- Normalization/coercion exists so malformed model output does not break the system.
-- Optional memory suggestions may be included in plan output for operator review (advisory only; no auto-write).
-- Use --apply-memory-suggestions to write memory items from validated suggestions (policy-gated).
-- Ollama is called in JSON mode and uses keep_alive to avoid repeated model reloads.
-- Full audit trail is recorded for planner outputs and execution.
-- Every plan includes a deterministic risk assessment (LOW/MEDIUM/HIGH) with flags and rationale.
-- Risk levels:
-  - LOW: read-only inspection (echo/list/show/diff/export/explain).
-  - MEDIUM: more than 3 actions, memory modifications, or supervisor lifecycle commands.
-  - HIGH: shell usage or write/modify tools (including dangerous tool categories).
-- MEDIUM/HIGH risk plans require confirmation before enqueueing unless --yes is used.
-- Non-interactive mode fails closed if confirmation would be required.
-- Dry-run prints the explain artifact and records audit events only (no state writes beyond audit).
-- --explain prints expanded explain details.
-- --json emits the explain artifact (stable JSON).
-- Use --debug to print tracebacks for ask failures.
-- --memory injects eligible read-only memory context into the planner prompt (bounded, audited).
-- --apply-memory-suggestions writes memory_suggestions after policy + confirmation checks. Use --yes to auto-confirm.
-- Planner prompts are policy-aware (allowed tools, shell allowlist summary, write permissions) but policy is still enforced at runtime.
-
-Planner configuration:
-- Increase --timeout-s on CPU machines (60s baseline) if prompts time out.
-- Environment overrides:
-  - GISMO_LLM_MODEL or GISMO_OLLAMA_MODEL (model name)
-  - GISMO_LLM_TIMEOUT_S or GISMO_OLLAMA_TIMEOUT_S (LLM timeout)
-  - GISMO_OLLAMA_URL or OLLAMA_HOST (Ollama endpoint)
-  - GISMO_OLLAMA_TRANSPORT=python|curl (Windows defaults to curl when available because urllib can be slow)
-- keep_alive defaults to 10m so models stay loaded for smoother repeated calls.
-
-Plan approval (defer, inspect, and approve/reject plans before execution):
-
-  gismo ask "Do X" --defer                # save plan as pending instead of enqueueing
-  gismo plan list                          # list all pending plans
-  gismo plan list --status PENDING         # filter by status (PENDING/APPROVED/REJECTED)
-  gismo plan list --json
-  gismo plan show PLAN_ID                  # full plan + risk + explain
-  gismo plan show PLAN_ID --json
-  gismo plan approve PLAN_ID              # enqueue actions and mark approved
-  gismo plan approve PLAN_ID --yes        # skip confirmation prompt
-  gismo plan reject PLAN_ID               # mark rejected
-  gismo plan reject PLAN_ID --reason "too risky"
-  gismo plan edit PLAN_ID --action 1 --cmd "echo:updated"   # edit action command (1-based index)
-  gismo plan edit PLAN_ID --action 2 --remove               # remove an action
-
-Notes:
-- Short-ID prefix resolution works for PLAN_ID (same as queue items).
-- approve enqueues all actions from the plan_json and marks the plan APPROVED.
-- edit only works on PENDING plans; approved/rejected plans are immutable.
-- Plans are also manageable in the web UI Plans tab with inline editing.
-
-Terminal dashboard:
-
-  gismo tui
-
-Local web dashboard (opens browser):
-
-  gismo web
-  gismo web --port 8080 --no-browser
-
-Text-to-speech (piper-tts, models download on first use):
-
-  gismo tts voices list
-  gismo tts voices set en_US-ryan-high
-  gismo tts voices download en_US-lessac-medium
-  gismo tts speak "Hello from GISMO"
-  gismo tts speak "Hello" --voice en_GB-alan-medium
-  gismo tts speak "Hello" --out hello.wav
-
-Available voices:
-  en_GB-northern_english_male-medium  (default)
-  en_GB-alan-medium
-  en_US-lessac-medium
-  en_US-ryan-high
-  en_US-amy-medium
-
-Voice preference is stored in GISMO memory (namespace gismo:settings, key tts.voice).
-Voice models are cached at ~/.cache/gismo/tts/.
-Voice settings are also available in the web dashboard (Settings tab).
-
--------------------------------------------------------------------------------
-
-SUPERVISION & IPC (WINDOWS-FIRST)
-
-GISMO includes a supervisor lifecycle for running as a local service-like system:
-
-  gismo up
-  gismo status
-  gismo down
-  gismo recover
-
-These coordinate:
-- The daemon process
-- The IPC server (Windows named pipes) with token auth
-
-Maintenance loop (stale recovery):
-
-  gismo maintain --once --stale-minutes 0
-  gismo maintain --interval-seconds 30 --stale-minutes 10
-
--------------------------------------------------------------------------------
-
-POLICY & SAFETY MODEL
-
-- Deny by default.
-- Tools are permission-gated.
-- shell: is blocked unless explicitly allowlisted by policy.
-- Permission failures are safe, auditable, and do not partially execute actions.
-
-Supported policies include:
-- readonly.json
-- dev-safe.json
-
--------------------------------------------------------------------------------
-
-WHAT GISMO IS (AND IS NOT)
-
-GISMO IS:
-- A local-first orchestration core
-- Deterministic and stateful via SQLite
-- CLI-first, inspectable, and auditable
-- Policy-controlled and safe by default
-
-GISMO IS NOT:
-- A chatbot
-- A cloud agent framework
-- A networking/remote admin tool (unless you explicitly build/enable that interface)
-- A system that silently does things behind your back
-
--------------------------------------------------------------------------------
-
-CURRENT STATUS / ROADMAP SNAPSHOT
-
-Phase 0 — Foundation: COMPLETE
-- SQLite state store with WAL, retries, backoff, cancellation
-- Durable queue + daemon execution engine
-- IPC server (Windows named pipes) with token auth
-- Supervisor lifecycle (up/down/status/recover)
-- Maintenance loop (stale recovery)
-- Exportable audit logs (jsonl, run/task/tool granularity)
-- Idempotent, test-covered CLI
-- Windows-native support
-
-Phase 1 — Local LLM Planner: COMPLETE
-- Ollama integration
-- Model-agnostic config via env + CLI
-- ask pipeline (dry-run, enqueue)
-- Strict plan schema (enqueue-only, bounded actions)
-- Normalization/coercion for model mistakes
-- Timeout handling + failure auditing
-- Test coverage for planner behavior
-
-Phase 2 — Control & Guardrails: COMPLETE
-- Hard limits on action count
-- Enqueue-only execution model
-- Explicit tool allowlists
-- Read-only / dev-safe policy modes
-- Deterministic risk classification (LOW/MEDIUM/HIGH)
-- Centralized confirmation gates for MEDIUM/HIGH risk plans
-- Policy-aware planning prompts
-- Explain-before-enqueue mode
-- Full audit trail for every decision (plan, explain, receipts, outcomes)
-
-Phase 3 — Memory & Context: COMPLETE
-- Persistent memory store (SQLite) with namespaces, profiles, and retention
-- Read-only memory context injection into ask/agent prompts (bounded, audited)
-- Advisory memory suggestions with explicit apply (policy + confirmation gated)
-- Memory snapshots (export/diff/import) with dry-run and tamper detection
-- Memory explain and doctor tooling for observability and operator-controlled maintenance
-- Summarization workflows: promote completed run outcomes into persistent memory under policy
-
-Phase 4 — Interactive GISMO: IN PROGRESS
-- Live terminal dashboard (TUI): queue, runs, daemon status with 3s auto-refresh
-- Local web UI (browser-based dashboard): queue, runs, memory, daemon control via `gismo web`
-- TTS voice support (piper-tts): 5 voices, on-demand download, memory-backed preference, web settings panel
-- Interactive plan approval: defer plans for review; inspect, edit, approve/reject via CLI (`gismo plan`) and web UI Plans tab
-- Always-on local service behavior
-- Plans, explains, executes, remembers, recovers
-- No cloud dependency and no silent actions
-
--------------------------------------------------------------------------------
-
-DOCUMENTATION
-
-- docs/OPERATOR.md  : operator usage and lifecycle guidance
-- Handoff.md        : maintainer handoff and architecture overview
-
--------------------------------------------------------------------------------
-
-LICENSE
-
-MIT
+Open `http://127.0.0.1:7800` in your browser. You're running.
+
+---
+
+## Core Commands
+
+```bash
+# Run a command
+gismo run "echo:Hello from GISMO"
+
+# Ask GISMO to plan something
+gismo ask "Summarize the last 10 queue failures" --dry-run
+
+# Defer a plan for review before execution
+gismo ask "Do X safely" --defer
+
+# Review and approve plans
+gismo plan list
+gismo plan show PLAN_ID
+gismo plan approve PLAN_ID
+gismo plan reject PLAN_ID --reason "too risky"
+gismo plan edit PLAN_ID --action 1 --cmd "echo:updated"
+
+# Queue and daemon
+gismo enqueue "note:remember this"
+gismo up          # start daemon
+gismo status      # check health
+gismo down        # stop daemon
+
+# Web dashboard
+gismo web
+
+# Terminal dashboard
+gismo tui
+
+# Voice
+gismo tts speak "Hello from GISMO"
+gismo tts voices list
+gismo tts voices set en_GB-northern_english_male-medium
+```
+
+---
+
+## Architecture
+
+```
+gismo/
+  core/       Orchestration engine, queue, daemon, state store, models
+  memory/     SQLite memory store, profiles, retention, summarization
+  llm/        Ollama integration, planner, prompt engineering
+  cli/        All CLI commands and argument parsing
+  tts/        Piper-tts voice engine, preferences, voice registry
+  web/        Local web dashboard (API, server, templates)
+  tui/        Terminal UI dashboard
+  tools/      Tool implementations (echo, note, shell, graph)
+
+policy/       Security policy files (readonly, dev-safe)
+data/         Training data for fine-tuning
+notebooks/    Colab notebook for model fine-tuning
+tests/        Comprehensive test coverage
+docs/         Operator guide and handoff documentation
+```
+
+---
+
+## Voice
+
+GISMO speaks using [piper-tts](https://github.com/rhasspy/piper) with 5 selectable voices:
+
+| Voice | Language | Quality |
+|-------|----------|---------|
+| Northern English Male (default) | en-GB | medium |
+| Alan | en-GB | medium |
+| Lessac | en-US | medium |
+| Ryan | en-US | high |
+| Amy | en-US | medium |
+
+Voice models download automatically on first use and are cached locally. Configure in the web Settings tab or via `gismo tts voices set`.
+
+---
+
+## Policy & Safety
+
+GISMO's safety model is built on real industrial robotics experience. The developer operates real industrial robots — he knows what happens when machines act without proper controls.
+
+- **Deny by default** — nothing executes unless explicitly permitted
+- **Deterministic risk classification** — LOW / MEDIUM / HIGH for every plan
+- **Confirmation gates** — operator approval required for MEDIUM and HIGH risk
+- **Full audit trail** — every action logged with cryptographic receipts
+- **No silent actions** — ever
+
+---
+
+## Roadmap
+
+| Phase | Status |
+|-------|--------|
+| Phase 0 — Foundation | ✅ Complete |
+| Phase 1 — Local LLM Planner | ✅ Complete |
+| Phase 2 — Control & Guardrails | ✅ Complete |
+| Phase 3 — Memory & Context | ✅ Complete |
+| Phase 4 — Interactive GISMO | 🔄 In Progress |
+
+**Phase 4 completed so far:** TUI dashboard, web UI, TTS voice support, interactive plan approval, chat interface, fine-tuned model.
+
+**Up next:** Always-on service behavior, standalone application packaging, authentication and security.
+
+---
+
+## The Story
+
+GISMO was born on Christmas Day 2025. Built by a factory worker who operates industrial robots by day and codes by night, on a 7-year-old laptop in Auburn, New York.
+
+The name is a nod to Gizmo from Gremlins — cute, friendly, helpful. But you need proper rules and controls to keep things safe. That's the whole point.
+
+---
+
+## Documentation
+
+- [Operator Guide](docs/OPERATOR.md) — usage and lifecycle guidance
+- [Handoff](Handoff.md) — maintainer handoff and architecture overview
+
+---
+
+## License
+
+[MIT](LICENSE) — Free. Open source. Yours.
+
+---
+
+**GitHub:** [github.com/GISMO-1/GISMO](https://github.com/GISMO-1/GISMO)
+**Twitter:** [@GISMO_ai](https://x.com/GISMO_ai)

@@ -6487,7 +6487,7 @@ def build_parser() -> argparse.ArgumentParser:
     ask_parser.add_argument(
         "--model",
         default=None,
-        help="Override the local LLM model (default: phi3:mini or GISMO_OLLAMA_MODEL)",
+        help="Override the local LLM model (default: gismo or GISMO_OLLAMA_MODEL)",
     )
     ask_parser.add_argument(
         "--ollama-url",

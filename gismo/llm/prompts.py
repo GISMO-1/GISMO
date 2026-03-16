@@ -79,7 +79,7 @@ def build_system_prompt(
         "\"timeout_seconds\":30,\"retries\":0,\"why\":\"record a note\","
         "\"risk\":\"low\"}],\"notes\":[]}\n"
         "{\"intent\":\"inquire\",\"assumptions\":[],"
-        "\"actions\":[{\"type\":\"echo\",\"command\":\"echo: model is phi3:mini\","
+        "\"actions\":[{\"type\":\"echo\",\"command\":\"echo: model is gismo\","
         "\"timeout_seconds\":0,\"retries\":0,\"why\":\"answer inquiry\","
         "\"risk\":\"low\"}],\"notes\":[]}\n"
         "{\"intent\":\"unsupported\",\"assumptions\":[],\"actions\":[],"

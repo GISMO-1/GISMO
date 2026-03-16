@@ -76,7 +76,7 @@ class AskCliTest(unittest.TestCase):
                             explain=False,
                         )
             output = buffer.getvalue()
-            self.assertIn("LLM: phi3:mini url=http://127.0.0.1:11434 timeout=120s", output)
+            self.assertIn("LLM: gismo url=http://127.0.0.1:11434 timeout=120s", output)
             self.assertIn("=== GISMO LLM Plan ===", output)
             self.assertIn("Intent: greet", output)
 
@@ -1263,7 +1263,7 @@ class AskCliTest(unittest.TestCase):
                             memory_profile=profile.name,
                         )
             output = buffer.getvalue()
-            self.assertIn("phi3:mini", output)
+            self.assertIn("gismo", output)
             with StateStore(db_path) as state_store:
                 event = state_store.list_events()[0]
                 payload = event.json_payload

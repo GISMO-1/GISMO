@@ -15,6 +15,7 @@ from gismo.core.models import (
     AgentSessionStatus,
     AgentRole,
     DaemonHeartbeat,
+    ConnectedDevice,
     Event,
     FailureType,
     PendingPlan,
@@ -306,6 +307,22 @@ class StateStore:
                         event_type TEXT NOT NULL,
                         message TEXT NOT NULL,
                         json_payload TEXT
+                    )
+                    """
+                )
+                cursor.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS devices (
+                        id TEXT PRIMARY KEY,
+                        ip TEXT NOT NULL,
+                        hostname TEXT NULL,
+                        device_type TEXT NOT NULL,
+                        brand TEXT NOT NULL,
+                        rtsp_url TEXT NULL,
+                        snapshot_url TEXT NULL,
+                        metadata_json TEXT NOT NULL DEFAULT '{}',
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL
                     )
                     """
                 )
@@ -616,6 +633,71 @@ class StateStore:
         if row is None:
             return None
         return self._row_to_event(row)
+
+    def upsert_device(self, device: ConnectedDevice) -> ConnectedDevice:
+        now = _utc_now().isoformat()
+        created_at = device.created_at.isoformat() if device.created_at else now
+        updated_at = now
+        with self._connection() as connection:
+            connection.execute(
+                """
+                INSERT INTO devices (
+                    id, ip, hostname, device_type, brand, rtsp_url, snapshot_url,
+                    metadata_json, created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    ip = excluded.ip,
+                    hostname = excluded.hostname,
+                    device_type = excluded.device_type,
+                    brand = excluded.brand,
+                    rtsp_url = excluded.rtsp_url,
+                    snapshot_url = excluded.snapshot_url,
+                    metadata_json = excluded.metadata_json,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    device.id,
+                    device.ip,
+                    device.hostname,
+                    device.device_type,
+                    device.brand,
+                    device.rtsp_url,
+                    device.snapshot_url,
+                    json.dumps(device.metadata_json),
+                    created_at,
+                    updated_at,
+                ),
+            )
+            connection.commit()
+        stored = self.get_device(device.id)
+        if stored is None:
+            raise RuntimeError(f"Failed to store device {device.id}")
+        return stored
+
+    def list_devices(self) -> list[ConnectedDevice]:
+        with self._connection() as connection:
+            rows = connection.execute(
+                "SELECT * FROM devices ORDER BY created_at ASC, id ASC"
+            ).fetchall()
+        return [self._row_to_device(row) for row in rows]
+
+    def get_device(self, device_id: str) -> Optional[ConnectedDevice]:
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM devices WHERE id = ?",
+                (device_id,),
+            ).fetchone()
+        return self._row_to_device(row) if row else None
+
+    def delete_device(self, device_id: str) -> bool:
+        with self._connection() as connection:
+            cursor = connection.execute(
+                "DELETE FROM devices WHERE id = ?",
+                (device_id,),
+            )
+            connection.commit()
+        return cursor.rowcount > 0
 
     def list_memory_events(
         self,
@@ -1932,6 +2014,20 @@ class StateStore:
             event_type=row["event_type"],
             message=row["message"],
             json_payload=json.loads(row["json_payload"]) if row["json_payload"] else None,
+        )
+
+    def _row_to_device(self, row: sqlite3.Row) -> ConnectedDevice:
+        return ConnectedDevice(
+            id=row["id"],
+            ip=row["ip"],
+            hostname=row["hostname"],
+            device_type=row["device_type"],
+            brand=row["brand"],
+            rtsp_url=row["rtsp_url"],
+            snapshot_url=row["snapshot_url"],
+            metadata_json=json.loads(row["metadata_json"]) if row["metadata_json"] else {},
+            created_at=_parse_dt(row["created_at"]),
+            updated_at=_parse_dt(row["updated_at"]),
         )
 
     def _row_to_memory_event(self, row: sqlite3.Row) -> MemoryEventRecord:

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import re
+import subprocess
 import threading
 import webbrowser
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -12,6 +13,7 @@ from gismo.web import api as web_api
 from gismo.web.templates import HTML
 
 _ITEM_ID_RE = re.compile(r"^/api/queue/([^/]+)/cancel$")
+_DEVICE_STREAM_RE = re.compile(r"^/api/devices/([^/]+)/stream$")
 _RUN_ID_RE = re.compile(r"^/api/runs/([^/?]+)$")
 _PLAN_ID_RE = re.compile(r"^/api/plans/([^/]+)$")
 _PLAN_ACTION_RE = re.compile(r"^/api/plans/([^/]+)/(approve|reject)$")
@@ -30,10 +32,80 @@ def _error(handler: BaseHTTPRequestHandler, msg: str, status: int) -> None:
     _json_response(handler, {"error": msg}, status)
 
 
+def _bytes_response(
+    handler: BaseHTTPRequestHandler,
+    body: bytes,
+    *,
+    content_type: str,
+    status: int = 200,
+) -> None:
+    handler.send_response(status)
+    handler.send_header("Content-Type", content_type)
+    handler.send_header("Content-Length", str(len(body)))
+    handler.end_headers()
+    handler.wfile.write(body)
+
+
 def _read_json_body(handler: BaseHTTPRequestHandler) -> Any:
     length = int(handler.headers.get("Content-Length", 0))
     raw = handler.rfile.read(length) if length else b"{}"
     return json.loads(raw or b"{}")
+
+
+def _stream_mjpeg(handler: BaseHTTPRequestHandler, ffmpeg_args: list[str]) -> None:
+    process = subprocess.Popen(
+        ffmpeg_args,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        bufsize=0,
+    )
+    try:
+        handler.send_response(200)
+        handler.send_header("Cache-Control", "no-store")
+        handler.send_header("Pragma", "no-cache")
+        handler.send_header("Connection", "close")
+        handler.send_header("Content-Type", "multipart/x-mixed-replace; boundary=frame")
+        handler.end_headers()
+
+        if process.stdout is None:
+            return
+
+        buffer = b""
+        while True:
+            chunk = process.stdout.read(4096)
+            if not chunk:
+                break
+            buffer += chunk
+            while True:
+                start = buffer.find(b"\xff\xd8")
+                if start < 0:
+                    buffer = b""
+                    break
+                end = buffer.find(b"\xff\xd9", start + 2)
+                if end < 0:
+                    buffer = buffer[start:]
+                    break
+                frame = buffer[start:end + 2]
+                buffer = buffer[end + 2:]
+                part = (
+                    b"--frame\r\n"
+                    b"Content-Type: image/jpeg\r\n"
+                    + f"Content-Length: {len(frame)}\r\n\r\n".encode("ascii")
+                    + frame
+                    + b"\r\n"
+                )
+                try:
+                    handler.wfile.write(part)
+                    handler.wfile.flush()
+                except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+                    return
+    finally:
+        process.terminate()
+        try:
+            process.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=2)
 
 
 def _make_handler(db_path: str) -> type[BaseHTTPRequestHandler]:
@@ -73,14 +145,30 @@ def _make_handler(db_path: str) -> type[BaseHTTPRequestHandler]:
                     _json_response(self, web_api.get_voices(db_path))
                 elif path == "/api/onboarding":
                     _json_response(self, web_api.get_onboarding_status(db_path))
+                elif path == "/api/settings":
+                    _json_response(self, web_api.get_settings(db_path))
                 elif path == "/api/health":
                     _json_response(self, web_api.get_system_health())
                 elif path == "/api/devices":
-                    _json_response(self, web_api.get_devices(db_path))
+                    _json_response(self, web_api.list_devices(db_path))
+                elif path == "/api/devices/list":
+                    _json_response(self, web_api.list_devices(db_path))
+                elif path == "/api/devices/scan":
+                    _json_response(self, web_api.scan_devices(db_path))
                 elif path == "/api/activity":
                     _json_response(self, web_api.get_activity_feed(db_path))
                 elif path == "/api/briefing":
                     _json_response(self, web_api.get_briefing(db_path))
+                elif m := _DEVICE_STREAM_RE.match(path):
+                    payload = web_api.get_device_stream_payload(db_path, m.group(1))
+                    if payload["kind"] == "mjpeg":
+                        _stream_mjpeg(self, payload["ffmpeg_args"])
+                    else:
+                        _bytes_response(
+                            self,
+                            payload["body"],
+                            content_type=payload["content_type"],
+                        )
                 elif path == "/api/plans":
                     from urllib.parse import parse_qs, urlparse
                     qs = parse_qs(urlparse(self.path).query)
@@ -108,21 +196,59 @@ def _make_handler(db_path: str) -> type[BaseHTTPRequestHandler]:
                         _error(self, str(exc), 404)
                 elif path == "/api/devices":
                     body = _read_json_body(self)
-                    name = (body.get("name") or "").strip()
-                    if not name:
-                        _error(self, "name is required", 400)
+                    ip = (body.get("ip") or "").strip()
+                    if not ip:
+                        _error(self, "ip is required", 400)
                         return
                     _json_response(self, web_api.add_device(
-                        db_path, name,
-                        body.get("type", "device"),
-                        body.get("address", ""),
+                        db_path,
+                        ip,
+                        body.get("hostname"),
+                        body.get("device_type", "smart device"),
+                        body.get("brand", "Unknown"),
+                        rtsp_url=body.get("rtsp_url"),
+                        snapshot_url=body.get("snapshot_url"),
+                        open_ports=body.get("open_ports") or [],
                     ))
+                elif path == "/api/devices/add":
+                    body = _read_json_body(self)
+                    ip = (body.get("ip") or "").strip()
+                    if not ip:
+                        _error(self, "ip is required", 400)
+                        return
+                    _json_response(self, web_api.add_device(
+                        db_path,
+                        ip,
+                        body.get("hostname"),
+                        body.get("device_type", "smart device"),
+                        body.get("brand", "Unknown"),
+                        rtsp_url=body.get("rtsp_url"),
+                        snapshot_url=body.get("snapshot_url"),
+                        open_ports=body.get("open_ports") or [],
+                    ))
+                elif path == "/api/devices/remove":
+                    body = _read_json_body(self)
+                    device_id = (body.get("id") or "").strip()
+                    if not device_id:
+                        _error(self, "id is required", 400)
+                        return
+                    _json_response(self, web_api.remove_device(db_path, device_id))
                 elif path == "/api/queue/purge-failed":
                     _json_response(self, web_api.purge_failed(db_path))
                 elif path == "/api/daemon/pause":
                     _json_response(self, web_api.set_daemon_paused(db_path, True))
                 elif path == "/api/daemon/resume":
                     _json_response(self, web_api.set_daemon_paused(db_path, False))
+                elif path == "/api/settings":
+                    body = _read_json_body(self)
+                    _json_response(
+                        self,
+                        web_api.save_settings(
+                            db_path,
+                            operator_name=body.get("operator_name"),
+                            voice_id=body.get("voice_id"),
+                        ),
+                    )
                 elif path == "/api/tts/voices/set":
                     body = _read_json_body(self)
                     voice_id = body.get("voice", "")

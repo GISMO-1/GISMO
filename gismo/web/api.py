@@ -6,11 +6,18 @@ state errors.
 """
 from __future__ import annotations
 
+import ipaddress
+import json
+import shutil
+import socket
+import subprocess
+import urllib.request
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from gismo.core.models import QueueStatus
+from gismo.core.models import ConnectedDevice, QueueStatus
 from gismo.core.state import StateStore
 from gismo.memory.store import list_namespaces, list_items_for_snapshot
 
@@ -468,37 +475,420 @@ def get_system_health() -> dict[str, Any]:
 # ── Devices ────────────────────────────────────────────────────────────────
 
 
-def _devices_file() -> Path:
-    return Path(".gismo") / "devices.json"
+_SCAN_PORTS: dict[int, tuple[str, str]] = {
+    554: ("camera", "RTSP"),
+    8554: ("camera", "RTSP"),
+    6668: ("light", "Tuya"),
+    1883: ("hub", "MQTT"),
+    5353: ("smart device", "mDNS"),
+    80: ("web device", "Web"),
+    443: ("web device", "Web"),
+}
+
+
+def _serialize_device(device: ConnectedDevice, *, status: str | None = None) -> dict[str, Any]:
+    label = device.hostname or device.metadata_json.get("label") or f"{device.brand} {device.device_type}"
+    stream_url = f"/api/devices/{device.id}/stream" if "camera" in device.device_type else None
+    return {
+        "id": device.id,
+        "ip": device.ip,
+        "hostname": device.hostname or device.ip,
+        "name": label,
+        "device_type": device.device_type,
+        "brand": device.brand,
+        "status": status or "online",
+        "rtsp_url": device.rtsp_url,
+        "snapshot_url": device.snapshot_url,
+        "thumbnail_url": stream_url,
+        "stream_url": stream_url,
+        "created_at": _dt(device.created_at),
+        "updated_at": _dt(device.updated_at),
+        "metadata": device.metadata_json,
+    }
+
+
+def _device_is_online(device: ConnectedDevice) -> bool:
+    ports = device.metadata_json.get("open_ports")
+    if not isinstance(ports, list) or not ports:
+        ports = [554, 8554, 6668, 1883, 80, 443]
+    return any(_scan_port(device.ip, int(port), timeout=0.15) for port in ports[:4])
+
+
+def _local_ipv4_addresses() -> list[str]:
+    found: set[str] = set()
+    try:
+        probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        probe.connect(("8.8.8.8", 80))
+        found.add(probe.getsockname()[0])
+        probe.close()
+    except OSError:
+        pass
+    try:
+        for addr in socket.gethostbyname_ex(socket.gethostname())[2]:
+            if "." in addr and not addr.startswith("127."):
+                found.add(addr)
+    except OSError:
+        pass
+    return sorted(found)
+
+
+def _scan_port(ip: str, port: int, timeout: float = 0.2) -> bool:
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.settimeout(timeout)
+    try:
+        return sock.connect_ex((ip, port)) == 0
+    except OSError:
+        return False
+    finally:
+        sock.close()
+
+
+def _safe_hostname(ip: str) -> str | None:
+    try:
+        return socket.gethostbyaddr(ip)[0]
+    except OSError:
+        return None
+
+
+def _default_rtsp_url(ip: str, open_ports: list[int]) -> str | None:
+    if 554 in open_ports:
+        return f"rtsp://{ip}:554/stream1"
+    if 8554 in open_ports:
+        return f"rtsp://{ip}:8554/stream1"
+    return None
+
+
+def _default_snapshot_url(ip: str, open_ports: list[int]) -> str | None:
+    if 80 in open_ports:
+        return f"http://{ip}/snapshot.jpg"
+    if 443 in open_ports:
+        return f"https://{ip}/snapshot.jpg"
+    return None
+
+
+def _infer_device(ip: str, open_ports: list[int], hostname: str | None) -> dict[str, Any] | None:
+    if not open_ports:
+        return None
+    device_type = "smart device"
+    brand = "Unknown"
+    if 554 in open_ports or 8554 in open_ports:
+        device_type = "camera"
+        brand = "RTSP"
+    elif 6668 in open_ports:
+        device_type = "light"
+        brand = "Tuya"
+    elif 1883 in open_ports:
+        device_type = "hub"
+        brand = "MQTT"
+    elif 5353 in open_ports:
+        device_type = "smart device"
+        brand = "mDNS"
+    elif 80 in open_ports or 443 in open_ports:
+        device_type = "web device"
+        brand = "Web"
+    return {
+        "ip": ip,
+        "hostname": hostname or ip,
+        "device_type": device_type,
+        "brand": brand,
+        "open_ports": open_ports,
+        "rtsp_url": _default_rtsp_url(ip, open_ports),
+        "snapshot_url": _default_snapshot_url(ip, open_ports),
+    }
+
+
+def _scan_host(ip: str) -> dict[str, Any] | None:
+    open_ports = [port for port in _SCAN_PORTS if _scan_port(ip, port)]
+    return _infer_device(ip, open_ports, _safe_hostname(ip))
+
+
+def _scan_subnet() -> list[dict[str, Any]]:
+    local_ips = _local_ipv4_addresses()
+    if not local_ips:
+        return []
+    discovered: list[dict[str, Any]] = []
+    seen_ips: set[str] = set(local_ips)
+    hosts: list[str] = []
+    for local_ip in local_ips:
+        network = ipaddress.ip_network(f"{local_ip}/24", strict=False)
+        for host in network.hosts():
+            host_ip = str(host)
+            if host_ip not in seen_ips:
+                hosts.append(host_ip)
+                seen_ips.add(host_ip)
+    with ThreadPoolExecutor(max_workers=48) as executor:
+        futures = {executor.submit(_scan_host, ip): ip for ip in hosts}
+        for future in as_completed(futures):
+            result = future.result()
+            if result is not None:
+                discovered.append(result)
+    discovered.sort(key=lambda item: item["ip"])
+    return discovered
+
+
+def _discover_tinytuya() -> list[dict[str, Any]]:
+    try:
+        import tinytuya
+    except Exception:
+        return []
+    try:
+        result = tinytuya.deviceScan()
+    except Exception:
+        return []
+    devices = result.values() if isinstance(result, dict) else result
+    discovered: list[dict[str, Any]] = []
+    for item in devices:
+        if not isinstance(item, dict):
+            continue
+        ip = item.get("ip")
+        if not ip:
+            continue
+        discovered.append({
+            "ip": str(ip),
+            "hostname": item.get("gwId") or str(ip),
+            "device_type": "light",
+            "brand": "Tuya",
+            "open_ports": [6668],
+            "snapshot_url": None,
+            "rtsp_url": None,
+        })
+    return discovered
+
+
+def _discover_pytapo() -> list[dict[str, Any]]:
+    try:
+        import importlib
+
+        candidates = []
+        for module_name in ("pytapo.discovery", "pytapo"):
+            try:
+                candidates.append(importlib.import_module(module_name))
+            except Exception:
+                continue
+        for module in candidates:
+            for attr in ("discover", "discover_devices", "scan"):
+                fn = getattr(module, attr, None)
+                if not callable(fn):
+                    continue
+                try:
+                    result = fn()
+                except TypeError:
+                    continue
+                except Exception:
+                    return []
+                items = result.values() if isinstance(result, dict) else result
+                discovered: list[dict[str, Any]] = []
+                for item in items or []:
+                    if not isinstance(item, dict):
+                        continue
+                    ip = item.get("ip") or item.get("host")
+                    if not ip:
+                        continue
+                    discovered.append({
+                        "ip": str(ip),
+                        "hostname": item.get("hostname") or item.get("name") or str(ip),
+                        "device_type": "camera",
+                        "brand": "Tapo",
+                        "open_ports": [554],
+                        "rtsp_url": f"rtsp://{ip}:554/stream1",
+                        "snapshot_url": f"http://{ip}/snapshot.jpg",
+                    })
+                return discovered
+    except Exception:
+        return []
+    return []
+
+
+def scan_devices(db_path: str) -> list[dict[str, Any]]:
+    saved = {device.ip: device for device in _list_device_models(db_path)}
+    merged: dict[str, dict[str, Any]] = {}
+    for item in _scan_subnet() + _discover_pytapo() + _discover_tinytuya():
+        ip = item.get("ip")
+        if not ip:
+            continue
+        current = merged.get(ip, {})
+        current.update(item)
+        merged[ip] = current
+    results = []
+    for ip, item in sorted(merged.items()):
+        saved_device = saved.get(ip)
+        results.append({
+            "ip": ip,
+            "hostname": item.get("hostname") or ip,
+            "device_type": item.get("device_type") or "smart device",
+            "brand": item.get("brand") or "Unknown",
+            "rtsp_url": item.get("rtsp_url"),
+            "snapshot_url": item.get("snapshot_url"),
+            "open_ports": item.get("open_ports") or [],
+            "saved": saved_device is not None,
+            "saved_id": saved_device.id if saved_device else None,
+        })
+    return results
+
+
+def _list_device_models(db_path: str) -> list[ConnectedDevice]:
+    with StateStore(db_path) as store:
+        return store.list_devices()
+
+
+def list_devices(db_path: str) -> list[dict[str, Any]]:
+    return [
+        _serialize_device(device, status="online" if _device_is_online(device) else "offline")
+        for device in _list_device_models(db_path)
+    ]
 
 
 def get_devices(db_path: str) -> list[dict[str, Any]]:
-    import json
-    try:
-        with _devices_file().open("r", encoding="utf-8") as fh:
-            return json.load(fh)
-    except (FileNotFoundError, json.JSONDecodeError):
-        return []
+    """Backward-compatible alias for saved devices."""
+    return list_devices(db_path)
 
 
-def add_device(db_path: str, name: str, device_type: str, address: str = "") -> dict[str, Any]:
-    import json
-    import uuid
-    devices = get_devices(db_path)
-    device: dict[str, Any] = {
-        "id": str(uuid.uuid4())[:8],
-        "name": name,
-        "type": device_type,
-        "address": address,
-        "status": "online",
-        "added_at": datetime.now(timezone.utc).isoformat(),
+def _device_name(hostname: str | None, brand: str, device_type: str, ip: str) -> str:
+    if hostname and hostname != ip:
+        return hostname
+    return f"{brand} {device_type}".strip()
+
+
+def add_device(
+    db_path: str,
+    ip: str,
+    hostname: str | None,
+    device_type: str,
+    brand: str,
+    *,
+    rtsp_url: str | None = None,
+    snapshot_url: str | None = None,
+    open_ports: list[int] | None = None,
+) -> dict[str, Any]:
+    with StateStore(db_path) as store:
+        existing = next((device for device in store.list_devices() if device.ip == ip), None)
+        device = ConnectedDevice(
+            id=existing.id if existing else ConnectedDevice(ip=ip, device_type=device_type, brand=brand).id,
+            ip=ip,
+            hostname=hostname or ip,
+            device_type=device_type,
+            brand=brand,
+            rtsp_url=rtsp_url,
+            snapshot_url=snapshot_url,
+            metadata_json={
+                "label": _device_name(hostname, brand, device_type, ip),
+                "open_ports": open_ports or [],
+            },
+            created_at=existing.created_at if existing else datetime.now(timezone.utc),
+        )
+        stored = store.upsert_device(device)
+        store.record_event(
+            actor="web",
+            event_type="device_added",
+            message=f"Connected {stored.brand} {stored.device_type} at {stored.ip}",
+            json_payload={"device_id": stored.id, "ip": stored.ip},
+        )
+    return _serialize_device(stored, status="online" if _device_is_online(stored) else "offline")
+
+
+def remove_device(db_path: str, device_id: str) -> dict[str, Any]:
+    with StateStore(db_path) as store:
+        device = store.get_device(device_id)
+        if device is None:
+            raise ValueError(f"Device not found: {device_id}")
+        deleted = store.delete_device(device_id)
+        if deleted:
+            store.record_event(
+                actor="web",
+                event_type="device_removed",
+                message=f"Removed {device.brand} {device.device_type} at {device.ip}",
+                json_payload={"device_id": device.id, "ip": device.ip},
+            )
+    return {"ok": deleted, "id": device_id}
+
+
+def get_device_stream_payload(db_path: str, device_id: str) -> dict[str, Any]:
+    with StateStore(db_path) as store:
+        device = store.get_device(device_id)
+    if device is None:
+        raise ValueError(f"Device not found: {device_id}")
+
+    ffmpeg = shutil.which("ffmpeg")
+    if ffmpeg and device.rtsp_url:
+        return {
+            "kind": "mjpeg",
+            "content_type": "multipart/x-mixed-replace; boundary=frame",
+            "ffmpeg_args": [
+                ffmpeg,
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-rtsp_transport",
+                "tcp",
+                "-i",
+                device.rtsp_url,
+                "-f",
+                "image2pipe",
+                "-vf",
+                "fps=4,scale=480:-1",
+                "-vcodec",
+                "mjpeg",
+                "-q:v",
+                "6",
+                "pipe:1",
+            ],
+        }
+
+    if device.snapshot_url:
+        try:
+            with urllib.request.urlopen(device.snapshot_url, timeout=4) as response:
+                body = response.read()
+            return {"kind": "snapshot", "content_type": "image/jpeg", "body": body}
+        except Exception:
+            pass
+
+    label = _device_name(device.hostname, device.brand, device.device_type, device.ip)
+    body = (
+        "<svg xmlns='http://www.w3.org/2000/svg' width='640' height='360'>"
+        "<rect width='100%' height='100%' fill='#141417'/>"
+        "<text x='50%' y='45%' text-anchor='middle' fill='#e2e2e8' font-size='24' "
+        "font-family='Arial, sans-serif'>Live preview unavailable</text>"
+        f"<text x='50%' y='58%' text-anchor='middle' fill='#64647a' font-size='16' "
+        f"font-family='Arial, sans-serif'>{label} · {device.ip}</text>"
+        "</svg>"
+    ).encode("utf-8")
+    return {"kind": "snapshot", "content_type": "image/svg+xml", "body": body}
+
+
+# ── Settings ───────────────────────────────────────────────────────────────
+
+
+def get_settings(db_path: str) -> dict[str, Any]:
+    from gismo.onboarding import get_operator_name
+    from gismo.tts.prefs import get_voice
+
+    voices = [
+        voice for voice in get_voices(db_path)["voices"]
+        if voice.get("engine") == "kokoro"
+    ]
+    return {
+        "operator_name": get_operator_name(db_path) or "",
+        "voice": get_voice(db_path),
+        "voices": voices,
+        "theme": "Coming soon",
     }
-    devices.append(device)
-    fp = _devices_file()
-    fp.parent.mkdir(parents=True, exist_ok=True)
-    with fp.open("w", encoding="utf-8") as fh:
-        json.dump(devices, fh, ensure_ascii=False, indent=2)
-    return device
+
+
+def save_settings(
+    db_path: str,
+    *,
+    operator_name: str | None = None,
+    voice_id: str | None = None,
+) -> dict[str, Any]:
+    from gismo.onboarding import set_operator_name
+    from gismo.tts.prefs import set_voice
+
+    name = (operator_name or "").strip()
+    if name:
+        set_operator_name(db_path, name)
+    if voice_id:
+        set_voice(db_path, voice_id)
+    return get_settings(db_path)
 
 
 # ── Activity feed ──────────────────────────────────────────────────────────

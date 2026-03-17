@@ -46,6 +46,8 @@ body{background:var(--bg);color:var(--text);font-family:var(--font);font-size:13
 #search::placeholder{color:var(--dim)}
 #op-badge{margin-left:auto;font-size:11px;color:var(--dim);flex-shrink:0}
 #op-badge span{color:var(--accent)}
+#top-actions{margin-left:auto;display:flex;align-items:center;gap:10px}
+.top-icon{width:32px;height:32px}
 
 /* GRID */
 #grid{display:grid;grid-template-columns:260px 1fr 240px;flex:1;overflow:hidden;min-height:0}
@@ -59,16 +61,25 @@ body{background:var(--bg);color:var(--text);font-family:var(--font);font-size:13
 .sec-ttl{font-size:9px;font-weight:700;letter-spacing:2px;color:var(--dim);text-transform:uppercase}
 
 /* DEVICES */
-#dev-scroll{flex:1;overflow-y:auto;padding:6px;min-height:0}
-.dev-row{display:flex;align-items:center;gap:9px;padding:8px 9px;border-radius:7px;cursor:pointer;transition:background .15s}
-.dev-row:hover{background:rgba(255,255,255,.04)}
+#dev-scroll{flex:1;overflow-y:auto;padding:8px;min-height:0;display:flex;flex-direction:column;gap:8px}
+.dev-card{padding:10px;border:1px solid var(--border);border-radius:10px;background:rgba(255,255,255,.02)}
+.dev-head{display:flex;gap:10px;align-items:flex-start}
+.dev-thumb{width:84px;height:52px;border-radius:8px;overflow:hidden;background:var(--bg);border:1px solid var(--border);flex-shrink:0;cursor:pointer}
+.dev-thumb img{width:100%;height:100%;object-fit:cover;display:block}
+.dev-thumb-empty{width:100%;height:100%;display:flex;align-items:center;justify-content:center;color:var(--dim);font-size:10px}
 .d-dot{width:8px;height:8px;border-radius:50%;flex-shrink:0}
 .d-on {background:var(--green);box-shadow:0 0 5px var(--green)}
 .d-alt{background:var(--yellow)}
 .d-off{background:var(--gray)}
 .d-info{flex:1;min-width:0}
+.d-title{display:flex;align-items:center;gap:8px}
 .d-name{font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.d-type{font-size:10px;color:var(--dim);margin-top:1px}
+.d-type{font-size:10px;color:var(--dim);margin-top:4px}
+.d-ip{font-size:10px;color:var(--dim);margin-top:3px}
+.dev-actions{display:flex;gap:6px;margin-top:8px}
+.mini-btn{padding:6px 8px;border-radius:7px;border:1px solid var(--border);background:transparent;color:var(--text);font-family:var(--font);font-size:10px;cursor:pointer}
+.mini-btn:hover{border-color:var(--accent);color:var(--accent)}
+.mini-btn[disabled]{opacity:.45;cursor:default;border-color:var(--border);color:var(--dim)}
 #add-dev-btn{margin:6px;padding:8px;background:transparent;border:1px dashed var(--border);color:var(--dim);border-radius:7px;cursor:pointer;font-family:var(--font);font-size:11px;text-align:center;transition:all .2s;flex-shrink:0}
 #add-dev-btn:hover{border-color:var(--accent);color:var(--accent)}
 
@@ -168,6 +179,21 @@ body{background:var(--bg);color:var(--text);font-family:var(--font);font-size:13
 .modal-actions{display:flex;gap:8px;margin-top:6px}
 .cancel-btn{flex:1;padding:9px;border-radius:7px;background:var(--bg);border:1px solid var(--border);color:var(--dim);font-family:var(--font);font-size:12px;cursor:pointer}
 .confirm-btn{flex:1;padding:9px;border-radius:7px;background:var(--accent);border:none;color:var(--bg);font-family:var(--font);font-size:12px;font-weight:700;cursor:pointer}
+.scan-status{font-size:12px;color:var(--dim);margin-bottom:14px}
+.scan-spinner{width:26px;height:26px;border:2px solid rgba(255,255,255,.08);border-top-color:var(--accent);border-radius:50%;animation:spin 1s linear infinite;margin-bottom:14px}
+.scan-grid{display:grid;grid-template-columns:1fr;gap:8px;max-height:320px;overflow:auto}
+.scan-card{border:1px solid var(--border);border-radius:10px;padding:12px;background:var(--bg);display:flex;align-items:center;justify-content:space-between;gap:10px}
+.scan-main{min-width:0}
+.scan-name{font-size:12px}
+.scan-meta{font-size:10px;color:var(--dim);margin-top:4px}
+.scan-empty{font-size:12px;color:var(--dim);padding:18px 0;text-align:center}
+.viewer-modal{width:min(860px,92vw);padding:20px}
+.viewer-frame{width:100%;height:min(70vh,520px);border:1px solid var(--border);border-radius:12px;overflow:hidden;background:var(--bg)}
+.viewer-frame img{width:100%;height:100%;object-fit:contain;display:block}
+.settings-grid{display:flex;flex-direction:column;gap:12px}
+.field-label{font-size:10px;color:var(--dim);letter-spacing:1px;text-transform:uppercase}
+.field-note{font-size:11px;color:var(--dim)}
+@keyframes spin{to{transform:rotate(360deg)}}
 
 /* SCROLLBARS */
 ::-webkit-scrollbar{width:4px;height:4px}
@@ -186,7 +212,14 @@ body{background:var(--bg);color:var(--text);font-family:var(--font);font-size:13
     <span id="s-txt">OFFLINE</span>
   </div>
   <input id="search" type="text" placeholder="Search commands, runs, memory…" oninput="onSearch(this.value)" />
-  <div id="op-badge">operator: <span id="op-name">—</span></div>
+  <div id="top-actions">
+    <div id="op-badge">operator: <span id="op-name">—</span></div>
+    <button class="icon-btn top-icon" id="settings-btn" onclick="openSettings()" title="Settings">
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor">
+        <path d="M19.14 12.94a7.49 7.49 0 0 0 .05-.94 7.49 7.49 0 0 0-.05-.94l2.03-1.58a.5.5 0 0 0 .12-.64l-1.92-3.32a.5.5 0 0 0-.6-.22l-2.39.96a7.16 7.16 0 0 0-1.63-.94L14.5 2.5a.5.5 0 0 0-.49-.4h-4.02a.5.5 0 0 0-.49.4l-.36 2.58a7.16 7.16 0 0 0-1.63.94l-2.39-.96a.5.5 0 0 0-.6.22L2.6 8.6a.5.5 0 0 0 .12.64l2.03 1.58a7.49 7.49 0 0 0-.05.94 7.49 7.49 0 0 0 .05.94L2.72 14.3a.5.5 0 0 0-.12.64l1.92 3.32a.5.5 0 0 0 .6.22l2.39-.96c.5.39 1.04.71 1.63.94l.36 2.58a.5.5 0 0 0 .49.4h4.02a.5.5 0 0 0 .49-.4l.36-2.58c.59-.23 1.13-.55 1.63-.94l2.39.96a.5.5 0 0 0 .6-.22l1.92-3.32a.5.5 0 0 0-.12-.64zM12 15.5A3.5 3.5 0 1 1 12 8a3.5 3.5 0 0 1 0 7.5z"/>
+      </svg>
+    </button>
+  </div>
 </div>
 
 <!-- GRID -->
@@ -281,14 +314,55 @@ body{background:var(--bg);color:var(--text);font-family:var(--font);font-size:13
 
 <!-- ADD DEVICE -->
 <div class="overlay hidden" id="dev-overlay">
-  <div class="modal sm-modal">
-    <div class="sm-ttl">Add Device</div>
-    <input class="modal-input" id="dev-name" type="text" placeholder="Name (e.g. Workstation-2)" />
-    <input class="modal-input" id="dev-type" type="text" placeholder="Type (e.g. agent, server, sensor)" />
-    <input class="modal-input" id="dev-addr" type="text" placeholder="Address (optional)" />
+  <div class="modal">
+    <div class="sm-ttl">Finding devices on your network</div>
+    <div id="scan-loading">
+      <div class="scan-spinner"></div>
+      <div class="scan-status">Scanning your network…</div>
+    </div>
+    <div class="scan-grid" id="scan-results"></div>
     <div class="modal-actions">
-      <button class="cancel-btn" onclick="closeAddDev()">Cancel</button>
-      <button class="confirm-btn" onclick="submitDev()">Add Device</button>
+      <button class="cancel-btn" onclick="closeAddDev()">Close</button>
+      <button class="confirm-btn" onclick="scanDevices()">Scan Again</button>
+    </div>
+  </div>
+</div>
+
+<!-- VIEWER -->
+<div class="overlay hidden" id="viewer-overlay">
+  <div class="modal viewer-modal">
+    <div class="sm-ttl" id="viewer-title">Live view</div>
+    <div class="viewer-frame"><img id="viewer-image" alt="Device preview" /></div>
+    <div class="modal-actions">
+      <button class="cancel-btn" onclick="closeViewer()">Close</button>
+    </div>
+  </div>
+</div>
+
+<!-- SETTINGS -->
+<div class="overlay hidden" id="settings-overlay">
+  <div class="modal">
+    <div class="sm-ttl">Settings</div>
+    <div class="settings-grid">
+      <div>
+        <div class="field-label">Operator Name</div>
+        <input class="field-input" id="settings-name" type="text" placeholder="Your name" />
+      </div>
+      <div>
+        <div class="field-label">Voice</div>
+        <select class="field-input" id="settings-voice"></select>
+        <div class="modal-actions">
+          <button class="cancel-btn" onclick="previewSettingsVoice()">Preview</button>
+        </div>
+      </div>
+      <div>
+        <div class="field-label">Theme</div>
+        <div class="field-note">More themes are coming soon.</div>
+      </div>
+    </div>
+    <div class="modal-actions">
+      <button class="cancel-btn" onclick="closeSettings()">Cancel</button>
+      <button class="confirm-btn" onclick="saveSettings()">Save</button>
     </div>
   </div>
 </div>
@@ -303,6 +377,7 @@ var obVoice       = null;
 var briefingDone  = false;
 var ttsEnabled    = true;   // operator can toggle via mic mute concept
 var currentAudio  = null;
+var lastScan      = [];
 
 // ── Boot ──────────────────────────────────────────────────────────────────────
 async function init() {
@@ -388,37 +463,108 @@ function bar(k, pct, label) {
 
 // ── Devices ───────────────────────────────────────────────────────────────────
 async function refreshDevices() {
-  var devs = await get('/api/devices') || [];
-  var el   = $('dev-scroll');
-  // localhost dot mirrors daemon status
+  var devs = await get('/api/devices/list') || [];
+  var el = $('dev-scroll');
   var localDot = ($('s-txt').textContent === 'ONLINE') ? 'd-on' : 'd-off';
-  var html = '<div class="dev-row">'
-    + '<div class="d-dot ' + localDot + '" id="localhost-dot"></div>'
-    + '<div class="d-info"><div class="d-name">localhost</div>'
-    + '<div class="d-type">local daemon</div></div></div>';
-  devs.forEach(function(d) {
-    var dc = d.status === 'online' ? 'd-on' : d.status === 'alert' ? 'd-alt' : 'd-off';
-    html += '<div class="dev-row"><div class="d-dot ' + dc + '"></div>'
-      + '<div class="d-info"><div class="d-name">' + esc(d.name) + '</div>'
-      + '<div class="d-type">' + esc(d.type || 'device') + '</div></div></div>';
+  var html = '<div class="dev-card"><div class="dev-head">'
+    + '<div class="dev-thumb"><div class="dev-thumb-empty">GISMO</div></div>'
+    + '<div class="d-info"><div class="d-title"><div class="d-dot ' + localDot + '"></div><div class="d-name">This computer</div></div>'
+    + '<div class="d-type">Local daemon</div><div class="d-ip">127.0.0.1</div></div></div></div>';
+  devs.forEach(function(device) {
+    var dot = device.status === 'online' ? 'd-on' : 'd-off';
+    var thumb = device.thumbnail_url
+      ? '<div class="dev-thumb js-open-viewer" data-stream="' + esc(device.stream_url) + '" data-title="'
+          + esc(device.name) + '"><img src="' + esc(device.thumbnail_url) + '?t=' + Date.now() + '" alt="'
+          + esc(device.name) + '" /></div>'
+      : '<div class="dev-thumb"><div class="dev-thumb-empty">' + esc(shortType(device.device_type)) + '</div></div>';
+    html += '<div class="dev-card"><div class="dev-head">' + thumb
+      + '<div class="d-info"><div class="d-title"><div class="d-dot ' + dot + '"></div><div class="d-name">' + esc(device.name) + '</div></div>'
+      + '<div class="d-type">' + esc(device.brand) + ' · ' + esc(device.device_type) + '</div>'
+      + '<div class="d-ip">' + esc(device.ip) + '</div>'
+      + '<div class="dev-actions">'
+      + (device.stream_url ? '<button class="mini-btn js-open-viewer" data-stream="' + esc(device.stream_url)
+          + '" data-title="' + esc(device.name) + '">View</button>' : '')
+      + '<button class="mini-btn js-remove-device" data-device-id="' + esc(device.id) + '">Remove</button>'
+      + '</div></div></div></div>';
   });
   el.innerHTML = html;
+  bindDeviceActions();
 }
 
-function openAddDev()  { $('dev-overlay').classList.remove('hidden'); $('dev-name').focus(); }
-function closeAddDev() { $('dev-overlay').classList.add('hidden'); }
+function openAddDev() {
+  $('dev-overlay').classList.remove('hidden');
+  scanDevices();
+}
 
-async function submitDev() {
-  var name = $('dev-name').value.trim();
-  if (!name) return;
-  await post('/api/devices', {
-    name:    name,
-    type:    $('dev-type').value.trim() || 'device',
-    address: $('dev-addr').value.trim()
-  });
-  closeAddDev();
-  $('dev-name').value = ''; $('dev-type').value = ''; $('dev-addr').value = '';
+function closeAddDev() {
+  $('dev-overlay').classList.add('hidden');
+}
+
+async function scanDevices() {
+  $('scan-loading').style.display = 'block';
+  $('scan-results').innerHTML = '';
+  var results = await get('/api/devices/scan') || [];
+  lastScan = results;
+  $('scan-loading').style.display = 'none';
+  if (!results.length) {
+    $('scan-results').innerHTML = '<div class="scan-empty">No devices found yet. Try again in a moment.</div>';
+    return;
+  }
+  $('scan-results').innerHTML = results.map(function(device, index) {
+    var action = device.saved
+      ? '<button class="mini-btn" disabled>Connected</button>'
+      : '<button class="mini-btn js-connect-device" data-index="' + index + '">Connect</button>';
+    return '<div class="scan-card"><div class="scan-main">'
+      + '<div class="scan-name">' + esc(device.hostname || device.ip) + '</div>'
+      + '<div class="scan-meta">' + esc(device.brand) + ' · ' + esc(device.device_type) + ' · ' + esc(device.ip) + '</div>'
+      + '</div>' + action + '</div>';
+  }).join('');
+  bindScanActions();
+}
+
+async function connectScannedDevice(index) {
+  var device = lastScan[index];
+  if (!device) return;
+  await post('/api/devices/add', device);
+  await refreshDevices();
+  await scanDevices();
+}
+
+async function removeDevice(id) {
+  await post('/api/devices/remove', {id: id});
   refreshDevices();
+}
+
+function bindDeviceActions() {
+  document.querySelectorAll('#dev-scroll .js-open-viewer').forEach(function(el) {
+    el.addEventListener('click', function() {
+      openViewer(el.dataset.stream, el.dataset.title);
+    });
+  });
+  document.querySelectorAll('#dev-scroll .js-remove-device').forEach(function(el) {
+    el.addEventListener('click', function() {
+      removeDevice(el.dataset.deviceId);
+    });
+  });
+}
+
+function bindScanActions() {
+  document.querySelectorAll('#scan-results .js-connect-device').forEach(function(el) {
+    el.addEventListener('click', function() {
+      connectScannedDevice(Number(el.dataset.index));
+    });
+  });
+}
+
+function openViewer(url, title) {
+  $('viewer-title').textContent = title || 'Live view';
+  $('viewer-image').src = url + '?t=' + Date.now();
+  $('viewer-overlay').classList.remove('hidden');
+}
+
+function closeViewer() {
+  $('viewer-overlay').classList.add('hidden');
+  $('viewer-image').src = '';
 }
 
 // ── 5. Activity feed ──────────────────────────────────────────────────────────
@@ -426,7 +572,7 @@ async function refreshActivity() {
   var items = await get('/api/queue') || [];
   var el = $('act-scroll');
   if (!items.length) {
-    el.innerHTML = '<div style="padding:14px;color:var(--dim);font-size:11px;text-align:center">Waiting for activity?</div>';
+    el.innerHTML = '<div style="padding:14px;color:var(--dim);font-size:11px;text-align:center">Waiting for activity…</div>';
     return;
   }
   el.innerHTML = items.slice(0, 10).map(function(item) {
@@ -673,6 +819,49 @@ function setOp(name) {
   $('op-name').textContent = name || '\u2014';
 }
 
+async function openSettings() {
+  var data = await get('/api/settings');
+  if (!data) return;
+  $('settings-name').value = data.operator_name || '';
+  $('settings-voice').innerHTML = (data.voices || []).map(function(voice) {
+    var selected = voice.id === data.voice ? ' selected' : '';
+    return '<option value="' + esc(voice.id) + '"' + selected + '>' + esc(voice.name) + ' · ' + esc(voice.lang) + '</option>';
+  }).join('');
+  $('settings-overlay').classList.remove('hidden');
+}
+
+function closeSettings() {
+  $('settings-overlay').classList.add('hidden');
+}
+
+async function previewSettingsVoice() {
+  var voiceId = $('settings-voice').value;
+  try {
+    var res = await fetch('/api/tts/speak', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({text: 'Hello. This is how I sound.', voice: voiceId})
+    });
+    if (!res.ok) return;
+    var blob = await res.blob();
+    var url = URL.createObjectURL(blob);
+    var audio = new Audio(url);
+    audio.onended = function() { URL.revokeObjectURL(url); };
+    audio.play();
+  } catch (e) {
+  }
+}
+
+async function saveSettings() {
+  var data = await post('/api/settings', {
+    operator_name: $('settings-name').value.trim(),
+    voice_id: $('settings-voice').value
+  });
+  if (!data) return;
+  setOp(data.operator_name);
+  closeSettings();
+}
+
 // ── Search (placeholder) ──────────────────────────────────────────────────────
 function onSearch(q) {
   // Future: filter activity feed rows or focus chat
@@ -688,6 +877,14 @@ function esc(s) {
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;');
+}
+
+function shortType(kind) {
+  if (!kind) return 'DEVICE';
+  if (kind.indexOf('camera') >= 0) return 'CAM';
+  if (kind.indexOf('light') >= 0) return 'LIGHT';
+  if (kind.indexOf('hub') >= 0) return 'HUB';
+  return String(kind).toUpperCase();
 }
 
 function age(iso) {

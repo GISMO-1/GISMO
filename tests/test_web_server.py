@@ -90,6 +90,44 @@ class TestWebServerEndpoints(unittest.TestCase):
         self.assertIn("needs_onboarding", data)
         self.assertIn("operator_name", data)
 
+    def test_settings_endpoint_shape(self) -> None:
+        data = self._request_json("/api/settings")
+        self.assertIn("operator_name", data)
+        self.assertIn("voice", data)
+        self.assertIn("voices", data)
+
+    def test_devices_add_list_remove(self) -> None:
+        added = self._request_json(
+            "/api/devices/add",
+            method="POST",
+            payload={
+                "ip": "192.168.1.55",
+                "hostname": "Desk Lamp",
+                "device_type": "light",
+                "brand": "Tuya",
+                "open_ports": [6668],
+            },
+        )
+        listed = self._request_json("/api/devices/list")
+        self.assertEqual(len(listed), 1)
+        self.assertEqual(listed[0]["id"], added["id"])
+
+        removed = self._request_json(
+            "/api/devices/remove",
+            method="POST",
+            payload={"id": added["id"]},
+        )
+        self.assertTrue(removed["ok"])
+
+    def test_devices_scan_endpoint(self) -> None:
+        with mock.patch.object(
+            web_api,
+            "scan_devices",
+            return_value=[{"ip": "192.168.1.20", "hostname": "front-door", "device_type": "camera", "brand": "Tapo"}],
+        ):
+            data = self._request_json("/api/devices/scan")
+        self.assertEqual(data[0]["brand"], "Tapo")
+
     def test_chat_endpoint_returns_reply(self) -> None:
         with mock.patch.object(web_api, "chat_message", return_value={"reply": "hello"}) as chat_mock:
             data = self._request_json(

@@ -228,6 +228,20 @@ class Event:
 
 
 @dataclass
+class ConnectedDevice:
+    ip: str
+    device_type: str
+    brand: str
+    id: str = field(default_factory=lambda: str(uuid4()))
+    hostname: Optional[str] = None
+    rtsp_url: Optional[str] = None
+    snapshot_url: Optional[str] = None
+    metadata_json: Dict[str, Any] = field(default_factory=dict)
+    created_at: datetime = field(default_factory=_utc_now)
+    updated_at: datetime = field(default_factory=_utc_now)
+
+
+@dataclass
 class DaemonHeartbeat:
     pid: int
     started_at: datetime

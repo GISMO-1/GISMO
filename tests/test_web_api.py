@@ -236,5 +236,56 @@ class TestOnboardingAndHealth(unittest.TestCase):
         self.assertEqual(data, {"cpu_percent": 12.5, "virtual_memory": 61.0})
 
 
+class TestDevicesAndSettings(unittest.TestCase):
+    def test_device_roundtrip_and_stream_fallback(self) -> None:
+        tmp = Path("tmp") / f"web-api-{uuid4().hex}"
+        tmp.mkdir(parents=True, exist_ok=False)
+        try:
+            db = _make_db(str(tmp))
+            added = web_api.add_device(
+                db,
+                "192.168.1.25",
+                "Front Door",
+                "camera",
+                "Tapo",
+                rtsp_url="rtsp://192.168.1.25:554/stream1",
+                open_ports=[554],
+            )
+            listed = web_api.list_devices(db)
+            self.assertEqual(len(listed), 1)
+            self.assertEqual(listed[0]["ip"], "192.168.1.25")
+
+            with mock.patch("gismo.web.api.shutil.which", return_value=None):
+                payload = web_api.get_device_stream_payload(db, added["id"])
+            self.assertEqual(payload["kind"], "snapshot")
+            self.assertIn("content_type", payload)
+            self.assertIn("body", payload)
+
+            removed = web_api.remove_device(db, added["id"])
+            self.assertTrue(removed["ok"])
+            self.assertEqual(web_api.list_devices(db), [])
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_settings_roundtrip(self) -> None:
+        tmp = Path("tmp") / f"web-api-{uuid4().hex}"
+        tmp.mkdir(parents=True, exist_ok=False)
+        try:
+            db = _make_db(str(tmp))
+            current = web_api.get_settings(db)
+            self.assertIn("voices", current)
+            voice_id = current["voices"][0]["id"]
+
+            updated = web_api.save_settings(
+                db,
+                operator_name="Mike",
+                voice_id=voice_id,
+            )
+            self.assertEqual(updated["operator_name"], "Mike")
+            self.assertEqual(updated["voice"], voice_id)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
 if __name__ == "__main__":
     unittest.main()

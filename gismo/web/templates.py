@@ -614,11 +614,16 @@ async function loadObVoices() {
   if (!d) return;
   $('ob-voices').innerHTML = d.voices.map(function(v) {
     var sel = v.is_selected ? ' sel' : '';
-    return '<div class="vi' + sel + '" onclick="selVoice(\'' + esc(v.id) + '\',this)">'
+    return '<div class="vi' + sel + '" data-voice-id="' + esc(v.id) + '">'
       + '<div class="vi-name">' + esc(v.name) + '</div>'
       + '<div class="vi-desc">' + esc(v.description) + ' \xb7 ' + esc(v.lang) + ' \xb7 ' + esc(v.quality) + '</div>'
       + '</div>';
   }).join('');
+  document.querySelectorAll('#ob-voices .vi').forEach(function(el) {
+    el.addEventListener('click', function() {
+      selVoice(el.dataset.voiceId, el);
+    });
+  });
   // pre-select first voice
   var first = d.voices[0];
   if (first) {

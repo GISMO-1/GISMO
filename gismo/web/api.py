@@ -8,11 +8,14 @@ from __future__ import annotations
 
 import ipaddress
 import json
+import re
 import shutil
 import socket
 import subprocess
+import sys
+import time
 import urllib.request
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -50,7 +53,7 @@ def get_status(db_path: str) -> dict[str, Any]:
     now = datetime.now(timezone.utc)
     daemon: dict[str, Any]
     if hb is None:
-        daemon = {"running": False, "paused": paused}
+        daemon = {"running": False, "paused": paused, "stale": False, "state": "ready"}
     else:
         last_seen = hb.last_seen
         if last_seen.tzinfo is None:
@@ -58,9 +61,10 @@ def get_status(db_path: str) -> dict[str, Any]:
         age_secs = max(0, int((now - last_seen).total_seconds()))
         stale = age_secs > 30
         daemon = {
-            "running": True,
+            "running": not stale,
             "paused": paused,
             "stale": stale,
+            "state": "online" if not stale else "ready",
             "pid": hb.pid,
             "started_at": _dt(hb.started_at),
             "last_seen": _dt(hb.last_seen),
@@ -466,24 +470,30 @@ def get_system_health() -> dict[str, Any]:
     """Return CPU and RAM usage percentages."""
     import psutil
 
+    internet_connected = False
+    internet_latency_ms = None
+    for host in ("1.1.1.1", "8.8.8.8"):
+        started = time.monotonic()
+        try:
+            with socket.create_connection((host, 53), timeout=1.5):
+                internet_connected = True
+                internet_latency_ms = round((time.monotonic() - started) * 1000)
+                break
+        except OSError:
+            continue
+
     return {
         "cpu_percent": psutil.cpu_percent(),
         "virtual_memory": psutil.virtual_memory().percent,
+        "internet_connected": internet_connected,
+        "internet_latency_ms": internet_latency_ms,
     }
 
 
 # ── Devices ────────────────────────────────────────────────────────────────
 
 
-_SCAN_PORTS: dict[int, tuple[str, str]] = {
-    554: ("camera", "RTSP"),
-    8554: ("camera", "RTSP"),
-    6668: ("light", "Tuya"),
-    1883: ("hub", "MQTT"),
-    5353: ("smart device", "mDNS"),
-    80: ("web device", "Web"),
-    443: ("web device", "Web"),
-}
+_IP_RE = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
 
 
 def _serialize_device(device: ConnectedDevice, *, status: str | None = None) -> dict[str, Any]:
@@ -550,176 +560,168 @@ def _safe_hostname(ip: str) -> str | None:
         return None
 
 
-def _default_rtsp_url(ip: str, open_ports: list[int]) -> str | None:
-    if 554 in open_ports:
-        return f"rtsp://{ip}:554/stream1"
-    if 8554 in open_ports:
-        return f"rtsp://{ip}:8554/stream1"
-    return None
-
-
-def _default_snapshot_url(ip: str, open_ports: list[int]) -> str | None:
-    if 80 in open_ports:
-        return f"http://{ip}/snapshot.jpg"
-    if 443 in open_ports:
-        return f"https://{ip}/snapshot.jpg"
-    return None
-
-
-def _infer_device(ip: str, open_ports: list[int], hostname: str | None) -> dict[str, Any] | None:
-    if not open_ports:
-        return None
+def _infer_device_identity(ip: str, hostname: str | None) -> dict[str, Any]:
+    host = (hostname or "").lower()
     device_type = "smart device"
-    brand = "Unknown"
-    if 554 in open_ports or 8554 in open_ports:
+    brand = "Network"
+    rtsp_url = None
+    snapshot_url = None
+    if any(token in host for token in ("tapo", "camera", "cam", "rtsp")):
         device_type = "camera"
-        brand = "RTSP"
-    elif 6668 in open_ports:
+        brand = "Tapo" if "tapo" in host else "Camera"
+        rtsp_url = f"rtsp://{ip}:554/stream1"
+        snapshot_url = f"http://{ip}/snapshot.jpg"
+    elif any(token in host for token in ("tuya", "feit", "light", "lamp", "bulb")):
         device_type = "light"
-        brand = "Tuya"
-    elif 1883 in open_ports:
+        brand = "FEIT" if "feit" in host else "Tuya"
+    elif any(token in host for token in ("mqtt", "hub", "bridge")):
         device_type = "hub"
         brand = "MQTT"
-    elif 5353 in open_ports:
-        device_type = "smart device"
-        brand = "mDNS"
-    elif 80 in open_ports or 443 in open_ports:
-        device_type = "web device"
-        brand = "Web"
     return {
         "ip": ip,
         "hostname": hostname or ip,
         "device_type": device_type,
         "brand": brand,
-        "open_ports": open_ports,
-        "rtsp_url": _default_rtsp_url(ip, open_ports),
-        "snapshot_url": _default_snapshot_url(ip, open_ports),
+        "open_ports": [],
+        "rtsp_url": rtsp_url,
+        "snapshot_url": snapshot_url,
     }
 
 
-def _scan_host(ip: str) -> dict[str, Any] | None:
-    open_ports = [port for port in _SCAN_PORTS if _scan_port(ip, port)]
-    return _infer_device(ip, open_ports, _safe_hostname(ip))
-
-
-def _scan_subnet() -> list[dict[str, Any]]:
-    local_ips = _local_ipv4_addresses()
-    if not local_ips:
-        return []
-    discovered: list[dict[str, Any]] = []
-    seen_ips: set[str] = set(local_ips)
-    hosts: list[str] = []
-    for local_ip in local_ips:
-        network = ipaddress.ip_network(f"{local_ip}/24", strict=False)
-        for host in network.hosts():
-            host_ip = str(host)
-            if host_ip not in seen_ips:
-                hosts.append(host_ip)
-                seen_ips.add(host_ip)
-    with ThreadPoolExecutor(max_workers=48) as executor:
-        futures = {executor.submit(_scan_host, ip): ip for ip in hosts}
-        for future in as_completed(futures):
-            result = future.result()
-            if result is not None:
-                discovered.append(result)
-    discovered.sort(key=lambda item: item["ip"])
-    return discovered
-
-
-def _discover_tinytuya() -> list[dict[str, Any]]:
-    try:
-        import tinytuya
-    except Exception:
-        return []
-    try:
-        result = tinytuya.deviceScan()
-    except Exception:
-        return []
-    devices = result.values() if isinstance(result, dict) else result
-    discovered: list[dict[str, Any]] = []
-    for item in devices:
-        if not isinstance(item, dict):
+def _local_networks() -> list[ipaddress.IPv4Network]:
+    networks: list[ipaddress.IPv4Network] = []
+    for local_ip in _local_ipv4_addresses():
+        try:
+            network = ipaddress.ip_network(f"{local_ip}/24", strict=False)
+        except ValueError:
             continue
-        ip = item.get("ip")
-        if not ip:
-            continue
-        discovered.append({
-            "ip": str(ip),
-            "hostname": item.get("gwId") or str(ip),
-            "device_type": "light",
-            "brand": "Tuya",
-            "open_ports": [6668],
-            "snapshot_url": None,
-            "rtsp_url": None,
-        })
-    return discovered
+        if network not in networks:
+            networks.append(network)
+    return networks
 
 
-def _discover_pytapo() -> list[dict[str, Any]]:
+def _is_local_ip(ip: str, networks: list[ipaddress.IPv4Network]) -> bool:
     try:
-        import importlib
+        addr = ipaddress.ip_address(ip)
+    except ValueError:
+        return False
+    return any(addr in network for network in networks)
 
-        candidates = []
-        for module_name in ("pytapo.discovery", "pytapo"):
+
+def _read_arp_table(timeout_seconds: float = 2.0) -> list[str]:
+    commands = []
+    if sys.platform.startswith("win"):
+        commands.append(["arp", "-a"])
+    else:
+        commands.extend((["ip", "neigh"], ["arp", "-an"]))
+    for command in commands:
+        try:
+            result = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                timeout=timeout_seconds,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+        output = f"{result.stdout}\n{result.stderr}"
+        ips: list[str] = []
+        for match in _IP_RE.findall(output):
             try:
-                candidates.append(importlib.import_module(module_name))
-            except Exception:
+                ipaddress.ip_address(match)
+            except ValueError:
                 continue
-        for module in candidates:
-            for attr in ("discover", "discover_devices", "scan"):
-                fn = getattr(module, attr, None)
-                if not callable(fn):
-                    continue
-                try:
-                    result = fn()
-                except TypeError:
-                    continue
-                except Exception:
-                    return []
-                items = result.values() if isinstance(result, dict) else result
-                discovered: list[dict[str, Any]] = []
-                for item in items or []:
-                    if not isinstance(item, dict):
-                        continue
-                    ip = item.get("ip") or item.get("host")
-                    if not ip:
-                        continue
-                    discovered.append({
-                        "ip": str(ip),
-                        "hostname": item.get("hostname") or item.get("name") or str(ip),
-                        "device_type": "camera",
-                        "brand": "Tapo",
-                        "open_ports": [554],
-                        "rtsp_url": f"rtsp://{ip}:554/stream1",
-                        "snapshot_url": f"http://{ip}/snapshot.jpg",
-                    })
-                return discovered
-    except Exception:
-        return []
+            if match not in ips:
+                ips.append(match)
+        if ips:
+            return ips
     return []
 
 
-def scan_devices(db_path: str) -> list[dict[str, Any]]:
+def _ping_host(ip: str, timeout_ms: int = 700) -> bool:
+    if sys.platform.startswith("win"):
+        command = ["ping", "-n", "1", "-w", str(timeout_ms), ip]
+    else:
+        wait_seconds = max(1, int(timeout_ms / 1000))
+        command = ["ping", "-c", "1", "-W", str(wait_seconds), ip]
+    try:
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            timeout=max(1.0, timeout_ms / 1000 + 0.5),
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return result.returncode == 0
+
+
+def _ping_sweep(networks: list[ipaddress.IPv4Network], deadline: float) -> list[str]:
+    local_ips = set(_local_ipv4_addresses())
+    targets: list[str] = []
+    for network in networks:
+        for host in network.hosts():
+            ip = str(host)
+            if ip not in local_ips:
+                targets.append(ip)
+    if not targets:
+        return []
+
+    discovered: list[str] = []
+    max_workers = min(64, max(8, len(targets)))
+    executor = ThreadPoolExecutor(max_workers=max_workers)
+    try:
+        futures = {executor.submit(_ping_host, ip): ip for ip in targets}
+        while futures:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            try:
+                future = next(as_completed(futures, timeout=min(remaining, 0.5)))
+            except FuturesTimeoutError:
+                continue
+            ip = futures.pop(future)
+            try:
+                if future.result():
+                    discovered.append(ip)
+            except Exception:
+                continue
+        for future in futures:
+            future.cancel()
+    finally:
+        executor.shutdown(wait=False, cancel_futures=True)
+    return discovered
+
+
+def scan_devices(db_path: str, timeout_seconds: float = 10.0) -> list[dict[str, Any]]:
+    deadline = time.monotonic() + max(0.01, timeout_seconds)
     saved = {device.ip: device for device in _list_device_models(db_path)}
     merged: dict[str, dict[str, Any]] = {}
-    for item in _scan_subnet() + _discover_pytapo() + _discover_tinytuya():
-        ip = item.get("ip")
-        if not ip:
+    networks = _local_networks()
+
+    for ip in _read_arp_table(timeout_seconds=min(2.0, max(0.2, deadline - time.monotonic()))):
+        if not _is_local_ip(ip, networks):
             continue
-        current = merged.get(ip, {})
-        current.update(item)
-        merged[ip] = current
+        merged[ip] = _infer_device_identity(ip, _safe_hostname(ip))
+
+    if time.monotonic() < deadline and networks:
+        for ip in _ping_sweep(networks, deadline):
+            current = merged.get(ip, {})
+            current.update(_infer_device_identity(ip, current.get("hostname") or _safe_hostname(ip)))
+            merged[ip] = current
+
     results = []
     for ip, item in sorted(merged.items()):
         saved_device = saved.get(ip)
         results.append({
             "ip": ip,
-            "hostname": item.get("hostname") or ip,
-            "device_type": item.get("device_type") or "smart device",
-            "brand": item.get("brand") or "Unknown",
-            "rtsp_url": item.get("rtsp_url"),
-            "snapshot_url": item.get("snapshot_url"),
-            "open_ports": item.get("open_ports") or [],
+            "hostname": item.get("hostname") or (saved_device.hostname if saved_device else ip) or ip,
+            "device_type": item.get("device_type") or (saved_device.device_type if saved_device else "smart device"),
+            "brand": item.get("brand") or (saved_device.brand if saved_device else "Unknown"),
+            "rtsp_url": item.get("rtsp_url") or (saved_device.rtsp_url if saved_device else None),
+            "snapshot_url": item.get("snapshot_url") or (saved_device.snapshot_url if saved_device else None),
+            "open_ports": item.get("open_ports") or (saved_device.metadata_json.get("open_ports", []) if saved_device else []),
             "saved": saved_device is not None,
             "saved_id": saved_device.id if saved_device else None,
         })
@@ -1037,3 +1039,12 @@ def tts_synthesize(db_path: str, text: str, voice_id: str | None = None) -> byte
     if not voice_id:
         voice_id = get_voice(db_path)
     return synthesize(text, voice_id)
+
+
+def tts_preview(db_path: str, voice_id: str | None = None) -> bytes:
+    """Return a short voice preview clip."""
+    return tts_synthesize(
+        db_path,
+        "Hello. This is how I sound.",
+        voice_id=voice_id,
+    )

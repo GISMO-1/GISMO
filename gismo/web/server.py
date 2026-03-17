@@ -269,6 +269,15 @@ def _make_handler(db_path: str) -> type[BaseHTTPRequestHandler]:
                     self.send_header("Content-Length", str(len(wav_bytes)))
                     self.end_headers()
                     self.wfile.write(wav_bytes)
+                elif path == "/api/tts/preview":
+                    body = _read_json_body(self)
+                    voice_id = body.get("voice") or body.get("voice_id") or None
+                    wav_bytes = web_api.tts_preview(db_path, voice_id)
+                    self.send_response(200)
+                    self.send_header("Content-Type", "audio/wav")
+                    self.send_header("Content-Length", str(len(wav_bytes)))
+                    self.end_headers()
+                    self.wfile.write(wav_bytes)
                 elif m := _PLAN_ACTION_RE.match(path):
                     plan_id, action = m.group(1), m.group(2)
                     body = _read_json_body(self)

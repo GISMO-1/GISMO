@@ -1,8 +1,10 @@
 """Tests for gismo.web.api — pure data layer."""
 from __future__ import annotations
 
+import ipaddress
 import shutil
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -32,29 +34,42 @@ def _make_db(tmp: str) -> str:
 
 class TestGetStatus(unittest.TestCase):
     def test_no_daemon(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            db = _make_db(tmp)
+        tmp = Path("tmp") / f"web-api-{uuid4().hex}"
+        tmp.mkdir(parents=True, exist_ok=False)
+        try:
+            db = _make_db(str(tmp))
             data = web_api.get_status(db)
             self.assertIn("daemon", data)
             self.assertIn("queue", data)
             self.assertFalse(data["daemon"]["running"])
+            self.assertEqual(data["daemon"]["state"], "ready")
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
 
     def test_queue_stats_included(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            db = _make_db(tmp)
+        tmp = Path("tmp") / f"web-api-{uuid4().hex}"
+        tmp.mkdir(parents=True, exist_ok=False)
+        try:
+            db = _make_db(str(tmp))
             data = web_api.get_status(db)
             self.assertIn("total", data["queue"])
             self.assertGreater(data["queue"]["total"], 0)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
 
 
 class TestSetDaemonPaused(unittest.TestCase):
     def test_pause_and_resume(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            db = _make_db(tmp)
+        tmp = Path("tmp") / f"web-api-{uuid4().hex}"
+        tmp.mkdir(parents=True, exist_ok=False)
+        try:
+            db = _make_db(str(tmp))
             result = web_api.set_daemon_paused(db, True)
             self.assertTrue(result["paused"])
             result = web_api.set_daemon_paused(db, False)
             self.assertFalse(result["paused"])
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
 
 
 class TestGetQueueStats(unittest.TestCase):
@@ -230,13 +245,52 @@ class TestOnboardingAndHealth(unittest.TestCase):
             cpu_percent=lambda: 12.5,
             virtual_memory=lambda: SimpleNamespace(percent=61.0),
         )
-        with mock.patch.dict("sys.modules", {"psutil": fake_psutil}):
+        fake_socket = mock.MagicMock()
+        fake_socket.__enter__.return_value = fake_socket
+        fake_socket.__exit__.return_value = False
+        with mock.patch.dict("sys.modules", {"psutil": fake_psutil}), mock.patch(
+            "gismo.web.api.socket.create_connection",
+            return_value=fake_socket,
+        ):
             data = web_api.get_system_health()
 
-        self.assertEqual(data, {"cpu_percent": 12.5, "virtual_memory": 61.0})
+        self.assertEqual(data["cpu_percent"], 12.5)
+        self.assertEqual(data["virtual_memory"], 61.0)
+        self.assertTrue(data["internet_connected"])
+        self.assertIn("internet_latency_ms", data)
 
 
 class TestDevicesAndSettings(unittest.TestCase):
+    def test_scan_devices_times_out_and_returns_partial_results(self) -> None:
+        tmp = Path("tmp") / f"web-api-{uuid4().hex}"
+        tmp.mkdir(parents=True, exist_ok=False)
+        try:
+            db = _make_db(str(tmp))
+            started = time.monotonic()
+            with mock.patch("gismo.web.api._list_device_models", return_value=[]), mock.patch(
+                "gismo.web.api._local_networks",
+                return_value=[ipaddress.ip_network("192.168.1.0/30")],
+            ), mock.patch(
+                "gismo.web.api._local_ipv4_addresses",
+                return_value=["192.168.1.1"],
+            ), mock.patch(
+                "gismo.web.api._read_arp_table",
+                return_value=["192.168.1.2"],
+            ), mock.patch(
+                "gismo.web.api._safe_hostname",
+                return_value="desk-lamp",
+            ), mock.patch(
+                "gismo.web.api._ping_host",
+                side_effect=lambda *_args, **_kwargs: (time.sleep(0.2), True)[1],
+            ):
+                data = web_api.scan_devices(db, timeout_seconds=0.05)
+            elapsed = time.monotonic() - started
+            self.assertLess(elapsed, 0.2)
+            self.assertEqual(len(data), 1)
+            self.assertEqual(data[0]["ip"], "192.168.1.2")
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
     def test_device_roundtrip_and_stream_fallback(self) -> None:
         tmp = Path("tmp") / f"web-api-{uuid4().hex}"
         tmp.mkdir(parents=True, exist_ok=False)

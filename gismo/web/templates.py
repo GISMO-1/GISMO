@@ -242,7 +242,7 @@ body{background:var(--bg);color:var(--text);font-family:var(--font);font-size:13
         <div class="hb-track"><div class="hb-fill fill-ram" id="ram-b" style="width:0"></div></div>
       </div>
       <div class="hb">
-        <div class="hb-row"><span class="hb-key">NET</span><span class="hb-val" id="net-v">—</span></div>
+        <div class="hb-row"><span class="hb-key" id="net-k">Internet</span><span class="hb-val" id="net-v">—</span></div>
         <div class="hb-track"><div class="hb-fill fill-net" id="net-b" style="width:0"></div></div>
       </div>
     </div>
@@ -318,11 +318,11 @@ body{background:var(--bg);color:var(--text);font-family:var(--font);font-size:13
     <div class="sm-ttl">Finding devices on your network</div>
     <div id="scan-loading">
       <div class="scan-spinner"></div>
-      <div class="scan-status">Scanning your network…</div>
     </div>
+    <div class="scan-status" id="scan-status">Scanning your network...</div>
     <div class="scan-grid" id="scan-results"></div>
     <div class="modal-actions">
-      <button class="cancel-btn" onclick="closeAddDev()">Close</button>
+      <button class="cancel-btn" id="scan-cancel-btn" onclick="cancelScan()">Cancel</button>
       <button class="confirm-btn" onclick="scanDevices()">Scan Again</button>
     </div>
   </div>
@@ -378,9 +378,11 @@ var briefingDone  = false;
 var ttsEnabled    = true;   // operator can toggle via mic mute concept
 var currentAudio  = null;
 var lastScan      = [];
+var scanController = null;
 
-// ── Boot ──────────────────────────────────────────────────────────────────────
+// -- Boot --------------------------------------------------------------------
 async function init() {
+  if ($('settings-btn')) $('settings-btn').onclick = openSettings;
   var ob = await get('/api/onboarding');
   if (!ob) {
     addMsg('gismo', 'Could not reach GISMO server. Is it running?');
@@ -394,16 +396,20 @@ async function init() {
   await refreshHealth();
   await refreshActivity();
   await refreshDevices();
+  updateMicAvailability();
   setInterval(refreshStatus, 5000);
   setInterval(refreshHealth, 5000);
   setInterval(refreshActivity, 5000);
   setInterval(refreshDevices, 10000);
 }
 
-// ── 3. Daemon status + 4. Queue stats ────────────────────────────────────────
+// -- Daemon status + queue stats ---------------------------------------------
 async function refreshStatus() {
   var data = await get('/api/status');
-  if (!data) return;
+  if (!data) {
+    setStatusOffline();
+    return;
+  }
   updatePill(data.daemon || {});
   updateStats(data.queue || {});
 }
@@ -416,14 +422,31 @@ function updatePill(d) {
     dot.className  = 'pill-dot dot-green';
     txt.textContent = 'ONLINE';
   } else {
-    pill.className = 'pill-offline';
-    dot.className  = 'pill-dot dot-red';
-    txt.textContent = 'OFFLINE';
+    pill.className = 'pill-paused';
+    dot.className  = 'pill-dot dot-yellow';
+    txt.textContent = 'READY';
   }
   daemonPaused = !!d.paused;
   $('pause-btn').textContent  = daemonPaused ? 'Resume' : 'Pause';
-  $('daemon-val').textContent = !d.running ? 'offline'
-    : d.paused ? 'paused' : d.stale ? 'stale' : 'running';
+  $('daemon-val').textContent = d.paused ? 'paused'
+    : online ? 'running'
+    : d.stale ? 'stale heartbeat'
+    : 'ready';
+}
+
+function setStatusOffline() {
+  var pill = $('status-pill'), dot = $('s-dot'), txt = $('s-txt');
+  pill.className = 'pill-offline';
+  dot.className = 'pill-dot dot-red';
+  txt.textContent = 'OFFLINE';
+  $('daemon-val').textContent = 'database unavailable';
+}
+
+function localStatusDot() {
+  var txt = $('s-txt').textContent;
+  if (txt === 'ONLINE') return 'd-on';
+  if (txt === 'READY') return 'd-alt';
+  return 'd-off';
 }
 
 function updateStats(q) {
@@ -434,7 +457,7 @@ function updateStats(q) {
   $('q-failed').textContent  = b.FAILED      != null ? b.FAILED      : 0;
 }
 
-// ── 1. Chat briefing on load ──────────────────────────────────────────────────
+// -- Chat briefing on load ----------------------------------------------------
 async function maybeBriefing() {
   if (briefingDone) return;
   briefingDone = true;
@@ -445,27 +468,33 @@ async function maybeBriefing() {
   }
 }
 
-// ── 5. System health ──────────────────────────────────────────────────────────
+// -- System health ------------------------------------------------------------
 async function refreshHealth() {
   var data = await get('/api/health');
   if (!data) return;
   var cpu = Math.round(data.cpu_percent || 0);
   var ram = Math.round(data.virtual_memory || 0);
+  var online = !!data.internet_connected;
+  var latency = data.internet_latency_ms;
   bar('cpu', cpu, cpu + '%');
   bar('ram', ram, ram + '%');
-  bar('net', 100, 'OK');
+  $('net-k').textContent = 'Internet';
+  $('net-b').style.background = online ? 'var(--green)' : 'var(--red)';
+  bar('net', online ? 100 : 14, online
+    ? (latency != null ? 'Connected (' + latency + ' ms)' : 'Connected')
+    : 'Offline');
 }
 
 function bar(k, pct, label) {
-  $(k + '-v').textContent    = label;
-  $(k + '-b').style.width    = pct + '%';
+  $(k + '-v').textContent = label;
+  $(k + '-b').style.width = pct + '%';
 }
 
-// ── Devices ───────────────────────────────────────────────────────────────────
+// -- Devices -----------------------------------------------------------------
 async function refreshDevices() {
   var devs = await get('/api/devices/list') || [];
   var el = $('dev-scroll');
-  var localDot = ($('s-txt').textContent === 'ONLINE') ? 'd-on' : 'd-off';
+  var localDot = localStatusDot();
   var html = '<div class="dev-card"><div class="dev-head">'
     + '<div class="dev-thumb"><div class="dev-thumb-empty">GISMO</div></div>'
     + '<div class="d-info"><div class="d-title"><div class="d-dot ' + localDot + '"></div><div class="d-name">This computer</div></div>'
@@ -479,7 +508,7 @@ async function refreshDevices() {
       : '<div class="dev-thumb"><div class="dev-thumb-empty">' + esc(shortType(device.device_type)) + '</div></div>';
     html += '<div class="dev-card"><div class="dev-head">' + thumb
       + '<div class="d-info"><div class="d-title"><div class="d-dot ' + dot + '"></div><div class="d-name">' + esc(device.name) + '</div></div>'
-      + '<div class="d-type">' + esc(device.brand) + ' · ' + esc(device.device_type) + '</div>'
+      + '<div class="d-type">' + esc(device.brand) + ' / ' + esc(device.device_type) + '</div>'
       + '<div class="d-ip">' + esc(device.ip) + '</div>'
       + '<div class="dev-actions">'
       + (device.stream_url ? '<button class="mini-btn js-open-viewer" data-stream="' + esc(device.stream_url)
@@ -491,35 +520,73 @@ async function refreshDevices() {
   bindDeviceActions();
 }
 
+function setScanLoading(active) {
+  $('scan-loading').style.display = active ? 'block' : 'none';
+}
+
+function setScanStatus(text) {
+  $('scan-status').textContent = text;
+}
+
 function openAddDev() {
   $('dev-overlay').classList.remove('hidden');
   scanDevices();
 }
 
 function closeAddDev() {
+  if (scanController) {
+    scanController.abort();
+    scanController = null;
+  }
   $('dev-overlay').classList.add('hidden');
 }
 
+function cancelScan() {
+  setScanStatus('Scan cancelled.');
+  closeAddDev();
+}
+
 async function scanDevices() {
-  $('scan-loading').style.display = 'block';
-  $('scan-results').innerHTML = '';
-  var results = await get('/api/devices/scan') || [];
-  lastScan = results;
-  $('scan-loading').style.display = 'none';
-  if (!results.length) {
-    $('scan-results').innerHTML = '<div class="scan-empty">No devices found yet. Try again in a moment.</div>';
-    return;
+  if (scanController) {
+    scanController.abort();
   }
-  $('scan-results').innerHTML = results.map(function(device, index) {
-    var action = device.saved
-      ? '<button class="mini-btn" disabled>Connected</button>'
-      : '<button class="mini-btn js-connect-device" data-index="' + index + '">Connect</button>';
-    return '<div class="scan-card"><div class="scan-main">'
-      + '<div class="scan-name">' + esc(device.hostname || device.ip) + '</div>'
-      + '<div class="scan-meta">' + esc(device.brand) + ' · ' + esc(device.device_type) + ' · ' + esc(device.ip) + '</div>'
-      + '</div>' + action + '</div>';
-  }).join('');
-  bindScanActions();
+  var controller = new AbortController();
+  scanController = controller;
+  setScanLoading(true);
+  setScanStatus('Scanning your network...');
+  $('scan-results').innerHTML = '';
+  try {
+    var res = await fetch('/api/devices/scan', {signal: controller.signal});
+    if (!res.ok) throw new Error('scan failed');
+    var results = await res.json();
+    if (scanController !== controller) return;
+    lastScan = results || [];
+    setScanLoading(false);
+    if (!lastScan.length) {
+      setScanStatus('No devices found - try again.');
+      $('scan-results').innerHTML = '<div class="scan-empty">No devices found - try again.</div>';
+      return;
+    }
+    setScanStatus('Found ' + lastScan.length + ' device' + (lastScan.length === 1 ? '' : 's') + '.');
+    $('scan-results').innerHTML = lastScan.map(function(device, index) {
+      var action = device.saved
+        ? '<button class="mini-btn" disabled>Connected</button>'
+        : '<button class="mini-btn js-connect-device" data-index="' + index + '">Connect</button>';
+      return '<div class="scan-card"><div class="scan-main">'
+        + '<div class="scan-name">' + esc(device.hostname || device.ip) + '</div>'
+        + '<div class="scan-meta">' + esc(device.brand) + ' / ' + esc(device.device_type) + ' / ' + esc(device.ip) + '</div>'
+        + '</div>' + action + '</div>';
+    }).join('');
+    bindScanActions();
+  } catch (err) {
+    if (err && err.name === 'AbortError') return;
+    setScanLoading(false);
+    setScanStatus('No devices found - try again.');
+    $('scan-results').innerHTML = '<div class="scan-empty">No devices found - try again.</div>';
+    console.error('scanDevices error:', err);
+  } finally {
+    if (scanController === controller) scanController = null;
+  }
 }
 
 async function connectScannedDevice(index) {
@@ -704,7 +771,7 @@ function toggleMic() {
   var btn = $('mic-btn');
   var SR  = window.SpeechRecognition || window.webkitSpeechRecognition;
   if (!SR) {
-    addMsg('gismo', 'Speech recognition is not available in this browser. Try Chrome.');
+    addMsg('gismo', 'Voice input not available - type your message instead.');
     return;
   }
   if (micActive) {
@@ -713,33 +780,43 @@ function toggleMic() {
     btn.classList.remove('mic-on');
     return;
   }
-  // stop any TTS while user speaks
   if (currentAudio) { currentAudio.pause(); currentAudio = null; }
 
   micRec = new SR();
-  micRec.continuous      = false;
-  micRec.interimResults  = false;
-  micRec.lang            = 'en-US';
+  micRec.continuous = false;
+  micRec.interimResults = false;
+  micRec.lang = 'en-US';
 
   micRec.onresult = function(e) {
     var transcript = e.results[0][0].transcript;
     $('chat-input').value = transcript;
     micActive = false;
     btn.classList.remove('mic-on');
-    sendChat();           // auto-send after voice input
+    sendChat();
   };
   micRec.onerror = function(e) {
-    console.warn('Speech recognition error:', e.error);
     micActive = false;
     btn.classList.remove('mic-on');
+    addMsg('gismo', 'Voice input not available - type your message instead.');
   };
   micRec.onend = function() {
     micActive = false;
     btn.classList.remove('mic-on');
   };
-  micRec.start();
-  micActive = true;
-  btn.classList.add('mic-on');
+  try {
+    micRec.start();
+    micActive = true;
+    btn.classList.add('mic-on');
+  } catch (e) {
+    addMsg('gismo', 'Voice input not available - type your message instead.');
+  }
+}
+
+function updateMicAvailability() {
+  var SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SR) {
+    $('mic-btn').title = 'Voice input not available - type your message instead';
+  }
 }
 
 // ── Daemon control ────────────────────────────────────────────────────────────
@@ -820,14 +897,17 @@ function setOp(name) {
 }
 
 async function openSettings() {
+  $('settings-overlay').classList.remove('hidden');
   var data = await get('/api/settings');
-  if (!data) return;
+  if (!data) {
+    addMsg('gismo', 'Could not load settings right now.');
+    return;
+  }
   $('settings-name').value = data.operator_name || '';
   $('settings-voice').innerHTML = (data.voices || []).map(function(voice) {
     var selected = voice.id === data.voice ? ' selected' : '';
-    return '<option value="' + esc(voice.id) + '"' + selected + '>' + esc(voice.name) + ' · ' + esc(voice.lang) + '</option>';
+    return '<option value="' + esc(voice.id) + '"' + selected + '>' + esc(voice.name) + ' / ' + esc(voice.lang) + '</option>';
   }).join('');
-  $('settings-overlay').classList.remove('hidden');
 }
 
 function closeSettings() {
@@ -837,18 +917,19 @@ function closeSettings() {
 async function previewSettingsVoice() {
   var voiceId = $('settings-voice').value;
   try {
-    var res = await fetch('/api/tts/speak', {
+    var res = await fetch('/api/tts/preview', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({text: 'Hello. This is how I sound.', voice: voiceId})
+      body: JSON.stringify({voice: voiceId})
     });
-    if (!res.ok) return;
+    if (!res.ok) throw new Error('preview failed');
     var blob = await res.blob();
     var url = URL.createObjectURL(blob);
     var audio = new Audio(url);
     audio.onended = function() { URL.revokeObjectURL(url); };
     audio.play();
   } catch (e) {
+    addMsg('gismo', 'Voice preview is not available right now.');
   }
 }
 
@@ -914,6 +995,7 @@ function statusLabel(status) {
 async function get(path) {
   try {
     var r = await fetch(path);
+    if (!r.ok) return null;
     return await r.json();
   } catch (e) {
     return null;
@@ -927,6 +1009,7 @@ async function post(path, body) {
       headers: {'Content-Type': 'application/json'},
       body:    JSON.stringify(body)
     });
+    if (!r.ok) return null;
     return await r.json();
   } catch (e) {
     return null;

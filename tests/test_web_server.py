@@ -75,10 +75,18 @@ class TestWebServerEndpoints(unittest.TestCase):
         with mock.patch.object(
             web_api,
             "get_system_health",
-            return_value={"cpu_percent": 7.0, "virtual_memory": 55.0},
+            return_value={
+                "cpu_percent": 7.0,
+                "virtual_memory": 55.0,
+                "internet_connected": True,
+                "internet_latency_ms": 24,
+            },
         ):
             data = self._request_json("/api/health")
-        self.assertEqual(data, {"cpu_percent": 7.0, "virtual_memory": 55.0})
+        self.assertEqual(data["cpu_percent"], 7.0)
+        self.assertEqual(data["virtual_memory"], 55.0)
+        self.assertTrue(data["internet_connected"])
+        self.assertEqual(data["internet_latency_ms"], 24)
 
     def test_status_endpoint_shape(self) -> None:
         data = self._request_json("/api/status")
@@ -141,6 +149,21 @@ class TestWebServerEndpoints(unittest.TestCase):
             [{"role": "user", "content": "earlier"}],
         )
         self.assertEqual(data, {"reply": "hello"})
+
+    def test_tts_preview_endpoint(self) -> None:
+        with mock.patch.object(web_api, "tts_preview", return_value=b"wav") as preview_mock:
+            request = urllib.request.Request(
+                f"{self.base_url}/api/tts/preview",
+                data=json.dumps({"voice": "af_bella"}).encode("utf-8"),
+                method="POST",
+                headers={"Content-Type": "application/json"},
+            )
+            with urllib.request.urlopen(request, timeout=5) as response:
+                body = response.read()
+                content_type = response.headers.get("Content-Type")
+        preview_mock.assert_called_once_with(self.db, "af_bella")
+        self.assertEqual(body, b"wav")
+        self.assertEqual(content_type, "audio/wav")
 
 
 if __name__ == "__main__":

@@ -40,11 +40,11 @@ def _status_val(status: Any) -> str:
     return status.value if hasattr(status, "value") else str(status)
 
 
-# ── status / daemon ────────────────────────────────────────────────────────
+# ── status / worker ────────────────────────────────────────────────────────
 
 
 def get_status(db_path: str) -> dict[str, Any]:
-    """Return daemon heartbeat info + queue stats."""
+    """Return background worker status + queue stats."""
     with StateStore(db_path) as store:
         hb = store.get_daemon_heartbeat()
         paused = store.get_daemon_paused()
@@ -981,12 +981,12 @@ def get_briefing(db_path: str) -> dict[str, Any]:
     if not running and not queued and done:
         parts.append(f"All clear \u2014 {done} completed.")
 
-    if not daemon.get("running"):
-        parts.append("Daemon is offline.")
-    elif daemon.get("paused"):
-        parts.append("Daemon is paused.")
+    if daemon.get("paused"):
+        parts.append("GISMO is paused.")
+    elif running:
+        parts.append("GISMO is handling tasks.")
     else:
-        parts.append("Systems nominal.")
+        parts.append("GISMO is ready.")
 
     try:
         pending = get_plans(db_path, status="PENDING")

@@ -249,10 +249,10 @@ body{background:var(--bg);color:var(--text);font-family:var(--font);font-size:13
 
     <div class="daemon-sec">
       <div>
-        <div class="daemon-lbl">Daemon</div>
+        <div class="daemon-lbl">GISMO</div>
         <div class="daemon-val" id="daemon-val">—</div>
       </div>
-      <button class="ctrl-btn" id="pause-btn" onclick="togglePause()">Pause</button>
+      <button class="ctrl-btn" id="pause-btn" onclick="togglePause()">Pause Work</button>
     </div>
   </div>
 
@@ -410,28 +410,30 @@ async function refreshStatus() {
     setStatusOffline();
     return;
   }
-  updatePill(data.daemon || {});
+  updatePill(data.daemon || {}, data.queue || {});
   updateStats(data.queue || {});
 }
 
-function updatePill(d) {
+function updatePill(d, q) {
   var pill = $('status-pill'), dot = $('s-dot'), txt = $('s-txt');
+  var byStatus = (q && q.by_status) || {};
+  var working = (byStatus.IN_PROGRESS || 0) > 0;
   var online = !!d.running && !d.stale;
-  if (online) {
+  if (working) {
     pill.className = 'pill-online';
     dot.className  = 'pill-dot dot-green';
-    txt.textContent = 'ONLINE';
+    txt.textContent = 'WORKING';
   } else {
     pill.className = 'pill-paused';
     dot.className  = 'pill-dot dot-yellow';
     txt.textContent = 'READY';
   }
   daemonPaused = !!d.paused;
-  $('pause-btn').textContent  = daemonPaused ? 'Resume' : 'Pause';
-  $('daemon-val').textContent = d.paused ? 'paused'
-    : online ? 'running'
-    : d.stale ? 'stale heartbeat'
-    : 'ready';
+  $('pause-btn').textContent  = daemonPaused ? 'Resume Work' : 'Pause Work';
+  $('daemon-val').textContent = d.paused ? 'Paused'
+    : working ? 'Working'
+    : online ? 'Ready'
+    : 'Ready';
 }
 
 function setStatusOffline() {
@@ -439,12 +441,12 @@ function setStatusOffline() {
   pill.className = 'pill-offline';
   dot.className = 'pill-dot dot-red';
   txt.textContent = 'OFFLINE';
-  $('daemon-val').textContent = 'database unavailable';
+  $('daemon-val').textContent = 'Unavailable';
 }
 
 function localStatusDot() {
   var txt = $('s-txt').textContent;
-  if (txt === 'ONLINE') return 'd-on';
+  if (txt === 'WORKING') return 'd-on';
   if (txt === 'READY') return 'd-alt';
   return 'd-off';
 }
@@ -498,7 +500,7 @@ async function refreshDevices() {
   var html = '<div class="dev-card"><div class="dev-head">'
     + '<div class="dev-thumb"><div class="dev-thumb-empty">GISMO</div></div>'
     + '<div class="d-info"><div class="d-title"><div class="d-dot ' + localDot + '"></div><div class="d-name">This computer</div></div>'
-    + '<div class="d-type">Local daemon</div><div class="d-ip">127.0.0.1</div></div></div></div>';
+    + '<div class="d-type">Local system</div><div class="d-ip">127.0.0.1</div></div></div></div>';
   devs.forEach(function(device) {
     var dot = device.status === 'online' ? 'd-on' : 'd-off';
     var thumb = device.thumbnail_url

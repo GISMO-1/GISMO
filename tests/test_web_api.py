@@ -72,6 +72,24 @@ class TestSetDaemonPaused(unittest.TestCase):
             shutil.rmtree(tmp, ignore_errors=True)
 
 
+class TestBriefingLanguage(unittest.TestCase):
+    def test_briefing_avoids_daemon_terms(self) -> None:
+        with mock.patch("gismo.onboarding.get_operator_name", return_value="Mike"), mock.patch.object(
+            web_api,
+            "get_status",
+            return_value={
+                "daemon": {"running": False, "paused": False},
+                "queue": {"by_status": {"QUEUED": 0, "IN_PROGRESS": 0, "FAILED": 0, "SUCCEEDED": 2}},
+            },
+        ):
+            data = web_api.get_briefing("tmp/state.db")
+
+        briefing = data["briefing"].lower()
+        self.assertNotIn("daemon", briefing)
+        self.assertNotIn("heartbeat", briefing)
+        self.assertIn("gismo is ready", briefing)
+
+
 class TestGetQueueStats(unittest.TestCase):
     def test_returns_store_queue_stats(self) -> None:
         tmp = Path("tmp") / f"web-api-{uuid4().hex}"

@@ -9,6 +9,7 @@ import webbrowser
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import Any
 
+from gismo.core.background_worker import ensure_background_worker
 from gismo.web import api as web_api
 from gismo.web.templates import HTML
 
@@ -341,6 +342,7 @@ def _make_handler(db_path: str) -> type[BaseHTTPRequestHandler]:
 
 def run(db_path: str, host: str = "127.0.0.1", port: int = 7800, open_browser: bool = True) -> None:
     """Start the local web server and optionally open the browser."""
+    ensure_background_worker(db_path)
     handler_cls = _make_handler(db_path)
     server = HTTPServer((host, port), handler_cls)
     url = f"http://{host}:{port}/"

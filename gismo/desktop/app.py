@@ -8,6 +8,8 @@ import time
 from http.server import HTTPServer
 from pathlib import Path
 
+from gismo.core.background_worker import ensure_background_worker
+
 # ── Splash screen HTML ──────────────────────────────────────────────────────
 
 _SPLASH_HTML = """<!DOCTYPE html>
@@ -155,6 +157,7 @@ def launch(db_path: str) -> None:
 
     # Ensure db directory exists
     Path(db_path).parent.mkdir(parents=True, exist_ok=True)
+    ensure_background_worker(db_path)
 
     port = _find_free_port()
     server = _start_server(db_path, port)

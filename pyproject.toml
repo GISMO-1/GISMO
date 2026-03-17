@@ -14,6 +14,7 @@ dependencies = [
     "piper-tts>=1.4",
     "kokoro-onnx>=0.4",
     "pywebview>=4.0",
+    "psutil>=5.9",
 ]
 
 [project.scripts]

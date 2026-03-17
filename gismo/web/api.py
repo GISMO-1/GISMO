@@ -62,6 +62,12 @@ def get_status(db_path: str) -> dict[str, Any]:
     return {"daemon": daemon, "queue": stats}
 
 
+def get_queue_stats(db_path: str) -> dict[str, Any]:
+    """Return queue summary statistics only."""
+    with StateStore(db_path) as store:
+        return store.queue_stats()
+
+
 def set_daemon_paused(db_path: str, paused: bool) -> dict[str, Any]:
     with StateStore(db_path) as store:
         store.set_daemon_paused(paused)
@@ -444,6 +450,160 @@ def complete_onboarding(db_path: str, name: str, voice_id: str) -> dict[str, Any
     set_operator_name(db_path, name)
     set_voice(db_path, voice_id)
     return {"ok": True, "name": name, "voice": voice_id}
+
+
+# ── System health ──────────────────────────────────────────────────────────
+
+
+def get_system_health() -> dict[str, Any]:
+    """Return CPU and RAM usage percentages."""
+    import psutil
+
+    return {
+        "cpu_percent": psutil.cpu_percent(),
+        "virtual_memory": psutil.virtual_memory().percent,
+    }
+
+
+# ── Devices ────────────────────────────────────────────────────────────────
+
+
+def _devices_file() -> Path:
+    return Path(".gismo") / "devices.json"
+
+
+def get_devices(db_path: str) -> list[dict[str, Any]]:
+    import json
+    try:
+        with _devices_file().open("r", encoding="utf-8") as fh:
+            return json.load(fh)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return []
+
+
+def add_device(db_path: str, name: str, device_type: str, address: str = "") -> dict[str, Any]:
+    import json
+    import uuid
+    devices = get_devices(db_path)
+    device: dict[str, Any] = {
+        "id": str(uuid.uuid4())[:8],
+        "name": name,
+        "type": device_type,
+        "address": address,
+        "status": "online",
+        "added_at": datetime.now(timezone.utc).isoformat(),
+    }
+    devices.append(device)
+    fp = _devices_file()
+    fp.parent.mkdir(parents=True, exist_ok=True)
+    with fp.open("w", encoding="utf-8") as fh:
+        json.dump(devices, fh, ensure_ascii=False, indent=2)
+    return device
+
+
+# ── Activity feed ──────────────────────────────────────────────────────────
+
+
+def get_activity_feed(db_path: str, limit: int = 40) -> list[dict[str, Any]]:
+    """Merge recent queue items, runs, and chat history into a unified activity timeline."""
+    import json as _json
+
+    _Q_COLORS = {
+        "QUEUED": "blue", "IN_PROGRESS": "teal",
+        "SUCCEEDED": "green", "FAILED": "red", "CANCELLED": "gray",
+    }
+    _R_COLORS = {"succeeded": "green", "failed": "red", "running": "teal", "pending": "blue"}
+
+    events: list[dict[str, Any]] = []
+
+    for item in get_queue(db_path, limit=25):
+        st = item["status"]
+        label = (item.get("command_text") or "")[:60] or f"item/{item['id'][:8]}"
+        events.append({
+            "type": "queue",
+            "label": label,
+            "status": st,
+            "color": _Q_COLORS.get(st, "gray"),
+            "timestamp": item.get("updated_at") or item.get("created_at"),
+        })
+
+    for run in get_runs(db_path, limit=20):
+        st = run["status"]
+        events.append({
+            "type": "run",
+            "label": run.get("label") or f"run/{run['id'][:8]}",
+            "status": st.upper(),
+            "color": _R_COLORS.get(st, "gray"),
+            "timestamp": run.get("created_at"),
+        })
+
+    # Pull recent chat exchanges from history file
+    try:
+        hist_path = _CHAT_HISTORY_FILE
+        if hist_path.exists():
+            lines = hist_path.read_text(encoding="utf-8").splitlines()
+            for line in reversed(lines[-20:]):
+                rec = _json.loads(line)
+                snippet = (rec.get("user") or "")[:50]
+                events.append({
+                    "type": "chat",
+                    "label": snippet or "(empty)",
+                    "status": "CHAT",
+                    "color": "teal",
+                    "timestamp": rec.get("timestamp"),
+                })
+    except Exception:
+        pass
+
+    events.sort(key=lambda e: e.get("timestamp") or "", reverse=True)
+    return events[:limit]
+
+
+# ── Morning briefing ───────────────────────────────────────────────────────
+
+
+def get_briefing(db_path: str) -> dict[str, Any]:
+    """Generate a text briefing from current system state."""
+    from gismo.onboarding import get_operator_name
+
+    name = get_operator_name(db_path) or "Operator"
+    data = get_status(db_path)
+    daemon = data.get("daemon", {})
+    by_status = (data.get("queue") or {}).get("by_status", {})
+
+    hour = datetime.now().hour
+    greeting = "Good morning" if hour < 12 else "Good afternoon" if hour < 17 else "Good evening"
+
+    parts = [f"{greeting}, {name}."]
+    queued  = by_status.get("QUEUED", 0)
+    running = by_status.get("IN_PROGRESS", 0)
+    failed  = by_status.get("FAILED", 0)
+    done    = by_status.get("SUCCEEDED", 0)
+
+    if running:
+        parts.append(f"{running} task{'s' if running != 1 else ''} currently running.")
+    if queued:
+        parts.append(f"{queued} item{'s' if queued != 1 else ''} queued.")
+    if failed:
+        parts.append(f"\u26a0 {failed} failed item{'s' if failed != 1 else ''} need attention.")
+    if not running and not queued and done:
+        parts.append(f"All clear \u2014 {done} completed.")
+
+    if not daemon.get("running"):
+        parts.append("Daemon is offline.")
+    elif daemon.get("paused"):
+        parts.append("Daemon is paused.")
+    else:
+        parts.append("Systems nominal.")
+
+    try:
+        pending = get_plans(db_path, status="PENDING")
+        if pending:
+            parts.append(f"{len(pending)} plan{'s' if len(pending) != 1 else ''} awaiting approval.")
+    except Exception:
+        pass
+
+    return {"name": name, "briefing": " ".join(parts)}
 
 
 # ── TTS ────────────────────────────────────────────────────────────────────

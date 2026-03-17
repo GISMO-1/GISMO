@@ -1,9 +1,13 @@
 """Tests for gismo.web.api — pure data layer."""
 from __future__ import annotations
 
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
+from uuid import uuid4
 
 from gismo.core.models import TaskStatus, QueueStatus
 from gismo.core.state import StateStore
@@ -51,6 +55,20 @@ class TestSetDaemonPaused(unittest.TestCase):
             self.assertTrue(result["paused"])
             result = web_api.set_daemon_paused(db, False)
             self.assertFalse(result["paused"])
+
+
+class TestGetQueueStats(unittest.TestCase):
+    def test_returns_store_queue_stats(self) -> None:
+        tmp = Path("tmp") / f"web-api-{uuid4().hex}"
+        tmp.mkdir(parents=True, exist_ok=False)
+        try:
+            db = _make_db(str(tmp))
+            data = web_api.get_queue_stats(db)
+            self.assertIn("total", data)
+            self.assertIn("by_status", data)
+            self.assertEqual(data["by_status"]["QUEUED"], 1)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
 
 
 class TestGetQueue(unittest.TestCase):
@@ -185,6 +203,37 @@ class TestGetMemory(unittest.TestCase):
             self.assertIn("global", data["items"])
             keys = [i["key"] for i in data["items"]["global"]]
             self.assertIn("test-key", keys)
+
+
+class TestOnboardingAndHealth(unittest.TestCase):
+    def test_onboarding_status_shape(self) -> None:
+        from gismo.onboarding import set_operator_name
+
+        tmp = Path("tmp") / f"web-api-{uuid4().hex}"
+        tmp.mkdir(parents=True, exist_ok=False)
+        try:
+            db = _make_db(str(tmp))
+            data = web_api.get_onboarding_status(db)
+            self.assertIn("needs_onboarding", data)
+            self.assertIn("operator_name", data)
+            self.assertIsInstance(data["needs_onboarding"], bool)
+
+            set_operator_name(db, "Mike")
+            updated = web_api.get_onboarding_status(db)
+            self.assertFalse(updated["needs_onboarding"])
+            self.assertEqual(updated["operator_name"], "Mike")
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_system_health_shape(self) -> None:
+        fake_psutil = SimpleNamespace(
+            cpu_percent=lambda: 12.5,
+            virtual_memory=lambda: SimpleNamespace(percent=61.0),
+        )
+        with mock.patch.dict("sys.modules", {"psutil": fake_psutil}):
+            data = web_api.get_system_health()
+
+        self.assertEqual(data, {"cpu_percent": 12.5, "virtual_memory": 61.0})
 
 
 if __name__ == "__main__":

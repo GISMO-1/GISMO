@@ -57,6 +57,8 @@ def _make_handler(db_path: str) -> type[BaseHTTPRequestHandler]:
                     _json_response(self, data)
                 elif path == "/api/queue":
                     _json_response(self, web_api.get_queue(db_path))
+                elif path == "/api/queue/stats":
+                    _json_response(self, web_api.get_queue_stats(db_path))
                 elif path == "/api/runs":
                     _json_response(self, web_api.get_runs(db_path))
                 elif m := _RUN_ID_RE.match(path):
@@ -71,6 +73,14 @@ def _make_handler(db_path: str) -> type[BaseHTTPRequestHandler]:
                     _json_response(self, web_api.get_voices(db_path))
                 elif path == "/api/onboarding":
                     _json_response(self, web_api.get_onboarding_status(db_path))
+                elif path == "/api/health":
+                    _json_response(self, web_api.get_system_health())
+                elif path == "/api/devices":
+                    _json_response(self, web_api.get_devices(db_path))
+                elif path == "/api/activity":
+                    _json_response(self, web_api.get_activity_feed(db_path))
+                elif path == "/api/briefing":
+                    _json_response(self, web_api.get_briefing(db_path))
                 elif path == "/api/plans":
                     from urllib.parse import parse_qs, urlparse
                     qs = parse_qs(urlparse(self.path).query)
@@ -96,6 +106,17 @@ def _make_handler(db_path: str) -> type[BaseHTTPRequestHandler]:
                         _json_response(self, web_api.cancel_queue_item(db_path, item_id))
                     except ValueError as exc:
                         _error(self, str(exc), 404)
+                elif path == "/api/devices":
+                    body = _read_json_body(self)
+                    name = (body.get("name") or "").strip()
+                    if not name:
+                        _error(self, "name is required", 400)
+                        return
+                    _json_response(self, web_api.add_device(
+                        db_path, name,
+                        body.get("type", "device"),
+                        body.get("address", ""),
+                    ))
                 elif path == "/api/queue/purge-failed":
                     _json_response(self, web_api.purge_failed(db_path))
                 elif path == "/api/daemon/pause":

@@ -4,7 +4,6 @@ from __future__ import annotations
 import socket
 import sys
 import threading
-import time
 from http.server import HTTPServer
 from pathlib import Path
 
@@ -136,7 +135,6 @@ def _start_server(db_path: str, port: int) -> HTTPServer:
 
 def _startup(window, server_url: str) -> None:
     """Called by webview in a daemon thread after the GUI loop starts."""
-    time.sleep(0.9)  # let the splash breathe
     window.load_url(server_url)
 
 

@@ -57,6 +57,9 @@ _DEVICE_MUTATION_PATTERNS = (
     r"^device:\s*(turn|switch|power)\s+(on|off)\b",
     r"^device:\s*(lock|unlock|open|close)\b",
 )
+_CALENDAR_MUTATION_PATTERNS = (
+    r"^calendar:\s*(add|update|delete|delete_range)\b",
+)
 
 
 def classify_plan_risk(actions: Iterable[dict[str, object]]) -> PlanRisk:
@@ -89,6 +92,8 @@ def classify_plan_risk(actions: Iterable[dict[str, object]]) -> PlanRisk:
             risk_flags.add("supervisor_lifecycle")
 
         if _matches_device_mutation(command_lower):
+            risk_flags.add("writes")
+        if _matches_calendar_mutation(command_lower):
             risk_flags.add("writes")
 
     ordered_flags = _order_flags(risk_flags)
@@ -145,6 +150,8 @@ def _infer_tools_from_command(command: str) -> list[str]:
         return ["run_shell"]
     if lower.startswith("device:"):
         return ["device_control"]
+    if lower.startswith("calendar:"):
+        return ["calendar_control"]
     if lower.startswith("graph:"):
         remainder = trimmed.split(":", 1)[1].strip()
         if not remainder:
@@ -177,6 +184,10 @@ def _matches_device_mutation(command_lower: str) -> bool:
     return any(re.search(pattern, command_lower) for pattern in _DEVICE_MUTATION_PATTERNS)
 
 
+def _matches_calendar_mutation(command_lower: str) -> bool:
+    return any(re.search(pattern, command_lower) for pattern in _CALENDAR_MUTATION_PATTERNS)
+
+
 def infer_tools_from_command(command: str) -> list[str]:
     return _infer_tools_from_command(command)
 
@@ -197,6 +208,8 @@ def command_implies_write(command: str) -> bool:
     if _contains_write_tool(tool_names):
         return True
     if _matches_memory_mutation(command_lower):
+        return True
+    if _matches_calendar_mutation(command_lower):
         return True
     return False
 

@@ -79,6 +79,10 @@ class TestWebServerEndpoints(unittest.TestCase):
             return_value={
                 "cpu_percent": 7.0,
                 "virtual_memory": 55.0,
+                "lan_connected": True,
+                "lan_type": "wifi",
+                "lan_name": "Home Wi-Fi",
+                "lan_signal_percent": 78,
                 "internet_connected": True,
                 "internet_latency_ms": 24,
             },
@@ -86,6 +90,8 @@ class TestWebServerEndpoints(unittest.TestCase):
             data = self._request_json("/api/health")
         self.assertEqual(data["cpu_percent"], 7.0)
         self.assertEqual(data["virtual_memory"], 55.0)
+        self.assertTrue(data["lan_connected"])
+        self.assertEqual(data["lan_type"], "wifi")
         self.assertTrue(data["internet_connected"])
         self.assertEqual(data["internet_latency_ms"], 24)
 
@@ -93,6 +99,12 @@ class TestWebServerEndpoints(unittest.TestCase):
         data = self._request_json("/api/status")
         self.assertIn("daemon", data)
         self.assertIn("queue", data)
+        self.assertIn("gismo", data)
+
+    def test_ready_endpoint_shape(self) -> None:
+        data = self._request_json("/api/ready")
+        self.assertIn("ready", data)
+        self.assertIn("stages", data)
 
     def test_onboarding_endpoint_shape(self) -> None:
         data = self._request_json("/api/onboarding")
@@ -104,6 +116,8 @@ class TestWebServerEndpoints(unittest.TestCase):
         self.assertIn("operator_name", data)
         self.assertIn("voice", data)
         self.assertIn("voices", data)
+        self.assertIn("model", data)
+        self.assertIn("models", data)
 
     def test_devices_add_list_remove(self) -> None:
         added = self._request_json(

@@ -50,6 +50,15 @@ class OperatorShellTest(unittest.TestCase):
         self.assertEqual(plan["steps"][0]["input_json"]["action"], "turn_on")
         self.assertEqual(plan["steps"][0]["input_json"]["target"], "kitchen lights")
 
+    def test_calendar_command_parsing(self) -> None:
+        plan = parse_command(
+            'calendar: add {"title":"Dinner","start_at":"2026-03-20T18:00:00","end_at":"2026-03-20T19:00:00"}'
+        )
+        self.assertEqual(plan["mode"], "single")
+        self.assertEqual(plan["steps"][0]["tool_name"], "calendar_control")
+        self.assertEqual(plan["steps"][0]["input_json"]["action"], "add")
+        self.assertEqual(plan["steps"][0]["input_json"]["payload"]["title"], "Dinner")
+
     def test_shell_command_policy_gating(self) -> None:
         plan = parse_command("shell: echo hello")
         tools = required_tools(plan)

@@ -293,6 +293,7 @@ def _coerce_action_type_to_command(action_type_text: str) -> str | None:
         or lowered.startswith("shell:")
         or lowered.startswith("run_shell:")
         or lowered.startswith("device:")
+        or lowered.startswith("calendar:")
     ):
         return None
     try:
@@ -5431,7 +5432,7 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument(
         "operator_command",
         nargs=argparse.REMAINDER,
-        help="Operator command string (echo:, note:, shell:, device:, or graph:)",
+        help="Operator command string (echo:, note:, shell:, device:, calendar:, or graph:)",
     )
     run_parser.set_defaults(handler=_handle_run)
 

@@ -55,6 +55,7 @@ def tool_kind_for_name(tool_name: str) -> str:
         "echo": "builtin",
         "write_note": "state",
         "device_control": "device",
+        "calendar_control": "calendar",
     }
     return mapping.get(tool_name, "tool")
 

@@ -42,6 +42,17 @@ class PlanRiskTest(unittest.TestCase):
         self.assertEqual(risk.risk_level, "HIGH")
         self.assertIn("writes", risk.risk_flags)
 
+    def test_calendar_add_action_is_high_risk(self) -> None:
+        actions = [
+            {
+                "type": "enqueue",
+                "command": 'calendar: add {"title":"Dinner","start_at":"2026-03-20T18:00:00","end_at":"2026-03-20T19:00:00"}',
+            }
+        ]
+        risk = classify_plan_risk(actions)
+        self.assertEqual(risk.risk_level, "HIGH")
+        self.assertIn("writes", risk.risk_flags)
+
 
 if __name__ == "__main__":
     unittest.main()

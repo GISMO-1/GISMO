@@ -276,6 +276,10 @@ class TestOnboardingAndHealth(unittest.TestCase):
 
         self.assertEqual(data["cpu_percent"], 12.5)
         self.assertEqual(data["virtual_memory"], 61.0)
+        self.assertIn("lan_connected", data)
+        self.assertIn("lan_type", data)
+        self.assertIn("lan_name", data)
+        self.assertIn("lan_signal_percent", data)
         self.assertTrue(data["internet_connected"])
         self.assertIn("internet_latency_ms", data)
 
@@ -598,15 +602,19 @@ class TestDevicesAndSettings(unittest.TestCase):
             db = _make_db(str(tmp))
             current = web_api.get_settings(db)
             self.assertIn("voices", current)
+            self.assertIn("model", current)
+            self.assertIn("models", current)
             voice_id = current["voices"][0]["id"]
 
             updated = web_api.save_settings(
                 db,
                 operator_name="Mike",
                 voice_id=voice_id,
+                model_name="tinyllama",
             )
             self.assertEqual(updated["operator_name"], "Mike")
             self.assertEqual(updated["voice"], voice_id)
+            self.assertEqual(updated["model"], "tinyllama")
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 
@@ -695,14 +703,16 @@ class TestCalendar(unittest.TestCase):
             db = _make_db(str(tmp))
             with mock.patch.object(web_api, "_append_chat_record", return_value=None):
                 data = web_api.chat_message(db, "remind me tomorrow at 3", [])
+            with StateStore(db) as store:
+                pending = store.list_pending_plans()
             events = web_api.list_calendar_events(db)
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 
-        self.assertEqual(data["mode"], "reply")
-        self.assertEqual(data["classification"], "system_query")
-        self.assertEqual(len(events), 1)
-        self.assertEqual(events[0]["event_type"], "reminder")
+        self.assertEqual(data["mode"], "plan")
+        self.assertEqual(data["classification"], "operational")
+        self.assertEqual(len(pending), 1)
+        self.assertEqual(events, [])
 
     def test_chat_can_read_calendar_today(self) -> None:
         tmp = Path("tmp") / f"web-api-{uuid4().hex}"

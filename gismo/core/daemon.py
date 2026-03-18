@@ -18,6 +18,7 @@ from gismo.core.orchestrator import Orchestrator
 from gismo.core.permissions import PermissionPolicy, load_policy
 from gismo.core.state import StateStore
 from gismo.core.tools import EchoTool, ToolRegistry, WriteNoteTool
+from gismo.core.toolpacks.calendar_tool import CalendarControlTool
 from gismo.core.toolpacks.device_tool import DeviceControlTool
 from gismo.core.toolpacks.fs_tools import FileSystemConfig, ListDirTool, ReadFileTool, WriteFileTool
 from gismo.core.toolpacks.shell_tool import ShellConfig, ShellTool
@@ -273,6 +274,7 @@ def build_registry(state_store: StateStore, policy: PermissionPolicy) -> ToolReg
     registry = ToolRegistry()
     registry.register(EchoTool())
     registry.register(WriteNoteTool(state_store))
+    registry.register(CalendarControlTool(state_store))
     registry.register(DeviceControlTool(state_store))
     fs_config = FileSystemConfig(base_dir=policy.fs.base_dir)
     registry.register(ReadFileTool(fs_config))

@@ -33,7 +33,7 @@ def parse_command(command: str) -> Dict[str, Any]:
 
     trimmed = command.strip()
 
-    single_match = re.match(r"(?i)^(echo|note|shell|run_shell|device)\s*:\s*(.+)$", trimmed)
+    single_match = re.match(r"(?i)^(echo|note|shell|run_shell|device|calendar)\s*:\s*(.+)$", trimmed)
     if single_match:
         verb = single_match.group(1).lower()
         payload = single_match.group(2).strip()
@@ -64,7 +64,7 @@ def parse_command(command: str) -> Dict[str, Any]:
             steps.append(_build_step(verb, payload))
         return {"mode": "graph", "steps": [step.to_dict() for step in steps]}
 
-    raise ValueError("Unsupported command. Use echo:, note:, shell:, device:, or graph:.")
+    raise ValueError("Unsupported command. Use echo:, note:, shell:, device:, calendar:, or graph:.")
 
 
 def required_tools(plan: Dict[str, Any]) -> Set[str]:
@@ -121,6 +121,13 @@ def _build_step(verb: str, payload: str) -> OperatorStep:
         parsed = _parse_device_command(payload)
         return OperatorStep(
             tool_name="device_control",
+            input_json=parsed["input_json"],
+            title=parsed["title"],
+        )
+    if verb == "calendar":
+        parsed = _parse_calendar_command(payload)
+        return OperatorStep(
+            tool_name="calendar_control",
             input_json=parsed["input_json"],
             title=parsed["title"],
         )
@@ -183,6 +190,43 @@ def _parse_device_command(payload: str) -> Dict[str, Any]:
     raise ValueError(
         "Unsupported device command. Use scan, list, check ..., turn on ..., or turn off ...."
     )
+
+
+def _parse_calendar_command(payload: str) -> Dict[str, Any]:
+    text = " ".join(payload.strip().split())
+    if not text:
+        raise ValueError("calendar command requires text after ':'")
+
+    match = re.match(r"(?i)^(add|update|delete|delete_range|list)\s+(.+)$", text)
+    if not match:
+        raise ValueError(
+            "Unsupported calendar command. Use add, update, delete, delete_range, or list with a JSON payload."
+        )
+    action = match.group(1).lower()
+    raw_payload = match.group(2).strip()
+    try:
+        payload_json = json.loads(raw_payload)
+    except json.JSONDecodeError as exc:
+        raise ValueError("calendar command payload must be valid JSON") from exc
+    if not isinstance(payload_json, dict):
+        raise ValueError("calendar command payload must be a JSON object")
+
+    title = str(payload_json.get("title") or "").strip()
+    if action == "add":
+        step_title = f"Calendar: Add {title or 'event'}"
+    elif action == "update":
+        step_title = f"Calendar: Update {title or 'event'}"
+    elif action == "delete":
+        step_title = "Calendar: Remove event"
+    elif action == "delete_range":
+        step_title = "Calendar: Clear range"
+    else:
+        step_title = "Calendar: List events"
+
+    return {
+        "title": step_title,
+        "input_json": {"action": action, "payload": payload_json},
+    }
 
 
 def _normalize_device_target(text: str) -> str:

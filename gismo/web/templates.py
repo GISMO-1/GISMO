@@ -52,6 +52,15 @@ body{background:var(--bg);color:var(--text);font-family:var(--font);font-size:13
 .shell-tab{padding:6px 12px;border-radius:14px;border:1px solid var(--border);background:transparent;color:var(--dim);font-family:var(--font);font-size:11px;cursor:pointer;transition:all .15s}
 .shell-tab:hover{border-color:var(--accent);color:var(--accent)}
 .shell-tab.active{background:var(--accent-dim);border-color:var(--accent-glow);color:var(--accent)}
+#menu-bar{display:flex;align-items:center;gap:8px;padding:8px 14px;background:#111116;border-bottom:1px solid var(--border);flex-shrink:0;position:relative;z-index:9}
+.menu-wrap{position:relative}
+.menu-btn{padding:6px 10px;border-radius:8px;border:1px solid transparent;background:transparent;color:var(--dim);font-family:var(--font);font-size:11px;cursor:pointer}
+.menu-btn:hover,.menu-btn.open{color:var(--accent);border-color:var(--border);background:rgba(255,255,255,.02)}
+.menu-dd{display:none;position:absolute;top:34px;left:0;min-width:180px;background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:6px;box-shadow:0 14px 40px rgba(0,0,0,.35)}
+.menu-dd.open{display:block}
+.menu-item{width:100%;padding:8px 10px;border:none;border-radius:8px;background:transparent;color:var(--text);text-align:left;font-family:var(--font);font-size:11px;cursor:pointer}
+.menu-item:hover{background:rgba(255,255,255,.04);color:var(--accent)}
+.menu-sep{height:1px;background:var(--border);margin:5px 0}
 
 /* GRID */
 #grid{display:grid;grid-template-columns:260px 1fr 240px;flex:1;overflow:hidden;min-height:0}
@@ -98,7 +107,11 @@ body{background:var(--bg);color:var(--text);font-family:var(--font);font-size:13
 .hb-fill{height:100%;border-radius:2px;transition:width .6s ease}
 .fill-cpu{background:var(--accent)}
 .fill-ram{background:var(--blue)}
-.fill-net{background:var(--green)}
+.network-stack{display:flex;flex-direction:column;gap:6px;margin-top:6px}
+.network-row{display:flex;align-items:center;justify-content:space-between;gap:10px;font-size:10px}
+.network-left{display:flex;align-items:center;gap:8px;color:var(--dim)}
+.network-icon{min-width:32px;color:var(--text)}
+.network-note{color:var(--text);text-align:right}
 
 /* DAEMON */
 .daemon-sec{padding:10px 14px;border-top:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;flex-shrink:0}
@@ -176,6 +189,13 @@ body{background:var(--bg);color:var(--text);font-family:var(--font);font-size:13
 .overlay{position:fixed;inset:0;background:rgba(14,14,17,.90);display:flex;align-items:center;justify-content:center;z-index:200;backdrop-filter:blur(6px)}
 .overlay.hidden{display:none}
 .modal{background:var(--panel);border:1px solid var(--border);border-radius:14px;padding:32px 36px;width:480px;max-width:92vw}
+.boot-modal{width:520px}
+.boot-stage-list{display:flex;flex-direction:column;gap:10px;margin-top:18px}
+.boot-stage{display:flex;align-items:center;justify-content:space-between;padding:10px 12px;border:1px solid var(--border);border-radius:10px;background:var(--bg)}
+.boot-stage-name{font-size:12px}
+.boot-stage-detail{font-size:10px;color:var(--dim)}
+.boot-stage-state{font-size:10px;color:var(--yellow);letter-spacing:1px}
+.boot-stage.ready .boot-stage-state{color:var(--green)}
 .ob-brand{color:var(--accent);font-size:20px;font-weight:700;letter-spacing:3px;margin-bottom:4px}
 .ob-sub{color:var(--dim);font-size:11px;margin-bottom:28px}
 .ob-step{display:none}.ob-step.active{display:block}
@@ -293,6 +313,55 @@ body{background:var(--bg);color:var(--text);font-family:var(--font);font-size:13
   </div>
 </div>
 
+<div id="menu-bar">
+  <div class="menu-wrap">
+    <button class="menu-btn" onclick="toggleMenu('file', event)">File</button>
+    <div class="menu-dd" id="menu-file">
+      <button class="menu-item" onclick="setActiveTab('command'); closeMenus();">Command Center</button>
+      <button class="menu-item" onclick="setActiveTab('calendar'); closeMenus();">Calendar</button>
+      <div class="menu-sep"></div>
+      <button class="menu-item" onclick="refreshAllNow(); closeMenus();">Refresh Now</button>
+    </div>
+  </div>
+  <div class="menu-wrap">
+    <button class="menu-btn" onclick="toggleMenu('system', event)">System</button>
+    <div class="menu-dd" id="menu-system">
+      <button class="menu-item" onclick="togglePause(); closeMenus();">Pause Or Resume Work</button>
+      <button class="menu-item" onclick="refreshStatus(); refreshHealth(); closeMenus();">Check System</button>
+    </div>
+  </div>
+  <div class="menu-wrap">
+    <button class="menu-btn" onclick="toggleMenu('devices', event)">Devices</button>
+    <div class="menu-dd" id="menu-devices">
+      <button class="menu-item" onclick="openAddDev(); closeMenus();">Scan Network</button>
+      <button class="menu-item" onclick="refreshDevices(); closeMenus();">Refresh Device List</button>
+    </div>
+  </div>
+  <div class="menu-wrap">
+    <button class="menu-btn" onclick="toggleMenu('automation', event)">Automation</button>
+    <div class="menu-dd" id="menu-automation">
+      <button class="menu-item" onclick="scrollToActivity(); closeMenus();">Activity Feed</button>
+      <button class="menu-item" onclick="scrollToQueue(); closeMenus();">Work Queue</button>
+    </div>
+  </div>
+  <div class="menu-wrap">
+    <button class="menu-btn" onclick="toggleMenu('settings', event)">Settings</button>
+    <div class="menu-dd" id="menu-settings">
+      <button class="menu-item" onclick="openSettings('operator'); closeMenus();">Operator Settings</button>
+      <button class="menu-item" onclick="openSettings('voice'); closeMenus();">Voice Selection</button>
+      <button class="menu-item" onclick="openSettings('model'); closeMenus();">Model Selection</button>
+    </div>
+  </div>
+  <div class="menu-wrap">
+    <button class="menu-btn" onclick="toggleMenu('help', event)">Help</button>
+    <div class="menu-dd" id="menu-help">
+      <button class="menu-item" onclick="showHelp('about'); closeMenus();">About GISMO</button>
+      <button class="menu-item" onclick="showHelp('voice'); closeMenus();">Voice Input</button>
+      <button class="menu-item" onclick="showHelp('chat'); closeMenus();">Chat Tips</button>
+    </div>
+  </div>
+</div>
+
 <!-- GRID -->
 <div id="grid" class="app-view">
 
@@ -313,8 +382,17 @@ body{background:var(--bg);color:var(--text);font-family:var(--font);font-size:13
         <div class="hb-track"><div class="hb-fill fill-ram" id="ram-b" style="width:0"></div></div>
       </div>
       <div class="hb">
-        <div class="hb-row"><span class="hb-key" id="net-k">Internet</span><span class="hb-val" id="net-v">—</span></div>
-        <div class="hb-track"><div class="hb-fill fill-net" id="net-b" style="width:0"></div></div>
+        <div class="hb-row"><span class="hb-key" id="net-k">Network</span><span class="hb-val" id="net-v">—</span></div>
+        <div class="network-stack">
+          <div class="network-row">
+            <div class="network-left"><span class="network-icon" id="lan-icon">—</span><span>LAN</span></div>
+            <div class="network-note" id="lan-v">—</div>
+          </div>
+          <div class="network-row">
+            <div class="network-left"><span class="network-icon" id="www-icon">WWW</span><span>WWW</span></div>
+            <div class="network-note" id="www-v">—</div>
+          </div>
+        </div>
       </div>
     </div>
 
@@ -400,6 +478,38 @@ body{background:var(--bg);color:var(--text);font-family:var(--font);font-size:13
         <div class="cal-side-actions">
           <button class="cal-primary-btn" style="flex:1" onclick="openCalendarEditor()">Add Event</button>
         </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="overlay" id="boot-overlay">
+  <div class="modal boot-modal">
+    <div class="ob-brand">GISMO</div>
+    <div class="ob-sub">Starting your local assistant</div>
+    <div class="ob-h">Getting ready</div>
+    <div class="ob-p" id="boot-copy">Checking your local system and background worker.</div>
+    <div class="boot-stage-list">
+      <div class="boot-stage" id="boot-stage-state">
+        <div>
+          <div class="boot-stage-name">State</div>
+          <div class="boot-stage-detail" id="boot-detail-state">Waiting</div>
+        </div>
+        <div class="boot-stage-state" id="boot-flag-state">STARTING</div>
+      </div>
+      <div class="boot-stage" id="boot-stage-worker">
+        <div>
+          <div class="boot-stage-name">Worker</div>
+          <div class="boot-stage-detail" id="boot-detail-worker">Waiting</div>
+        </div>
+        <div class="boot-stage-state" id="boot-flag-worker">STARTING</div>
+      </div>
+      <div class="boot-stage" id="boot-stage-api">
+        <div>
+          <div class="boot-stage-name">API</div>
+          <div class="boot-stage-detail" id="boot-detail-api">Waiting</div>
+        </div>
+        <div class="boot-stage-state" id="boot-flag-api">STARTING</div>
       </div>
     </div>
   </div>
@@ -521,6 +631,11 @@ body{background:var(--bg);color:var(--text);font-family:var(--font);font-size:13
         </div>
       </div>
       <div>
+        <div class="field-label">Model</div>
+        <select class="field-input" id="settings-model"></select>
+        <div class="field-note">Pick the local model GISMO should try first.</div>
+      </div>
+      <div>
         <div class="field-label">Theme</div>
         <div class="field-note">More themes are coming soon.</div>
       </div>
@@ -553,26 +668,20 @@ calendarCursor.setHours(12, 0, 0, 0);
 var calendarSelectedDay = dayKey(new Date());
 var calendarEvents = [];
 var editingCalendarId = null;
+var latestStatus = null;
+var latestHealth = null;
+var apiReachable = false;
+var openMenuName = null;
+var bootStartedAt = Date.now();
 
 // -- Boot --------------------------------------------------------------------
 async function init() {
-  if ($('settings-btn')) $('settings-btn').onclick = openSettings;
+  if ($('settings-btn')) $('settings-btn').onclick = function() { openSettings(); };
   if ($('tab-command')) $('tab-command').onclick = function() { setActiveTab('command'); };
   if ($('tab-calendar')) $('tab-calendar').onclick = function() { setActiveTab('calendar'); };
-  var ob = await get('/api/onboarding');
-  if (!ob) {
-    addMsg('gismo', 'Could not reach GISMO server. Is it running?');
-  } else if (ob.needs_onboarding) {
-    showOb();
-  } else {
-    setOp(ob.operator_name);
-    maybeBriefing();
-  }
-  await refreshStatus();
-  await refreshHealth();
-  await refreshActivity();
-  await refreshDevices();
-  await refreshCalendar();
+  document.addEventListener('click', function(ev) {
+    if (!ev.target.closest('#menu-bar')) closeMenus();
+  });
   updateMicAvailability();
   setInterval(refreshStatus, 5000);
   setInterval(refreshHealth, 5000);
@@ -581,39 +690,136 @@ async function init() {
   setInterval(function() {
     if (activeTab === 'calendar') refreshCalendar();
   }, 60000);
+
+  await Promise.all([refreshStatus(), refreshHealth(), refreshActivity(), refreshDevices(), refreshCalendar()]);
+  await waitForBootReady();
+
+  var ob = await get('/api/onboarding');
+  if (!ob) {
+    addMsg('gismo', 'Could not reach GISMO server. Is it running?');
+    return;
+  }
+  if (ob.needs_onboarding) {
+    showOb();
+  } else {
+    setOp(ob.operator_name);
+    maybeBriefing();
+  }
+}
+
+async function waitForBootReady() {
+  while (true) {
+    var ready = await get('/api/ready');
+    updateBootStages(ready);
+    if (ready && ready.ready && (Date.now() - bootStartedAt) >= 10000) {
+      $('boot-overlay').classList.add('hidden');
+      return;
+    }
+    await sleep(800);
+  }
+}
+
+function updateBootStages(data) {
+  var stages = (data && data.stages) || [];
+  var stageMap = {};
+  stages.forEach(function(stage) { stageMap[stage.key] = stage; });
+  [['state', 'State'], ['worker', 'Worker'], ['api', 'API']].forEach(function(entry) {
+    var key = entry[0];
+    var stage = stageMap[key] || {ready: false, detail: 'Waiting'};
+    $('boot-stage-' + key).classList.toggle('ready', !!stage.ready);
+    $('boot-detail-' + key).textContent = stage.detail || 'Waiting';
+    $('boot-flag-' + key).textContent = stage.ready ? 'READY' : 'STARTING';
+  });
+  $('boot-copy').textContent = data && data.ready
+    ? 'Everything is ready. Opening your command center.'
+    : 'Checking your local system and background worker.';
+}
+
+function toggleMenu(name, event) {
+  if (event) event.stopPropagation();
+  var next = openMenuName === name ? null : name;
+  closeMenus();
+  openMenuName = next;
+  if (!next) return;
+  var btn = document.querySelector('.menu-btn[onclick*="' + name + '"]');
+  var dd = $('menu-' + name);
+  if (btn) btn.classList.add('open');
+  if (dd) dd.classList.add('open');
+}
+
+function closeMenus() {
+  openMenuName = null;
+  document.querySelectorAll('#menu-bar .menu-btn').forEach(function(el) { el.classList.remove('open'); });
+  document.querySelectorAll('#menu-bar .menu-dd').forEach(function(el) { el.classList.remove('open'); });
+}
+
+async function refreshAllNow() {
+  await Promise.all([refreshStatus(), refreshHealth(), refreshActivity(), refreshDevices(), refreshCalendar()]);
+}
+
+function scrollToActivity() {
+  setActiveTab('command');
+  $('act-scroll').scrollTop = 0;
+}
+
+function scrollToQueue() {
+  setActiveTab('command');
+  $('right-panel').scrollIntoView({behavior: 'smooth', block: 'end'});
+}
+
+function showHelp(topic) {
+  var msg = 'Ask GISMO a direct question or give a direct instruction.';
+  if (topic === 'about') msg = 'GISMO runs locally on this machine and keeps your work inside your own system.';
+  if (topic === 'voice') msg = 'Voice input depends on browser support. If it is not available, type your message instead.';
+  if (topic === 'chat') msg = 'Try things like ?check the cameras?, ?what do I have today?, or ?remind me tomorrow at 3?.';
+  addMsg('gismo', msg);
 }
 
 // -- Daemon status + queue stats ---------------------------------------------
 async function refreshStatus() {
   var data = await get('/api/status');
   if (!data) {
+    latestStatus = null;
+    apiReachable = false;
     setStatusOffline();
+    updateLocalSystemCard();
     return;
   }
-  updatePill(data.daemon || {}, data.queue || {});
+  latestStatus = data;
+  apiReachable = true;
+  updatePill(data.daemon || {}, data.queue || {}, data.gismo || {});
   updateStats(data.queue || {});
+  updateLocalSystemCard();
 }
 
-function updatePill(d, q) {
+function updatePill(d, q, g) {
   var pill = $('status-pill'), dot = $('s-dot'), txt = $('s-txt');
   var byStatus = (q && q.by_status) || {};
   var working = (byStatus.IN_PROGRESS || 0) > 0;
   var online = !!d.running && !d.stale;
-  if (working) {
+  daemonPaused = !!d.paused;
+  if (working && online) {
     pill.className = 'pill-online';
     dot.className  = 'pill-dot dot-green';
     txt.textContent = 'WORKING';
+  } else if (daemonPaused) {
+    pill.className = 'pill-paused';
+    dot.className  = 'pill-dot dot-yellow';
+    txt.textContent = 'PAUSED';
+  } else if (online) {
+    pill.className = 'pill-online';
+    dot.className  = 'pill-dot dot-green';
+    txt.textContent = 'READY';
   } else {
     pill.className = 'pill-paused';
     dot.className  = 'pill-dot dot-yellow';
-    txt.textContent = 'READY';
+    txt.textContent = 'STARTING';
   }
-  daemonPaused = !!d.paused;
   $('pause-btn').textContent  = daemonPaused ? 'Resume Work' : 'Pause Work';
-  $('daemon-val').textContent = d.paused ? 'Paused'
+  $('daemon-val').textContent = daemonPaused ? 'Paused'
     : working ? 'Working'
     : online ? 'Ready'
-    : 'Ready';
+    : 'Starting';
 }
 
 function setStatusOffline() {
@@ -624,11 +830,33 @@ function setStatusOffline() {
   $('daemon-val').textContent = 'Unavailable';
 }
 
-function localStatusDot() {
-  var txt = $('s-txt').textContent;
-  if (txt === 'WORKING') return 'd-on';
-  if (txt === 'READY') return 'd-alt';
-  return 'd-off';
+function computeLocalSystemState() {
+  if (!apiReachable || !latestStatus) {
+    return {dot: 'd-off', type: 'API unavailable', meta: 'Local system is unreachable.'};
+  }
+  var daemon = latestStatus.daemon || {};
+  var queue = (latestStatus.queue || {}).by_status || {};
+  var cpu = latestHealth ? Math.round(latestHealth.cpu_percent || 0) : null;
+  var ram = latestHealth ? Math.round(latestHealth.virtual_memory || 0) : null;
+  var working = (queue.IN_PROGRESS || 0) > 0;
+  var online = !!daemon.running && !daemon.stale;
+  var pressure = Math.max(cpu || 0, ram || 0);
+  var dot = 'd-on';
+  if (!online || pressure >= 92) dot = 'd-off';
+  else if (pressure >= 75 || daemonPaused) dot = 'd-alt';
+  var type = working ? 'Working' : online ? 'Ready' : 'Starting';
+  var meta = [];
+  if (cpu != null) meta.push('CPU ' + cpu + '%');
+  if (ram != null) meta.push('RAM ' + ram + '%');
+  return {dot: dot, type: type, meta: meta.join(' | ') || 'Local system'};
+}
+
+function updateLocalSystemCard() {
+  if (!$('local-device-dot')) return;
+  var state = computeLocalSystemState();
+  $('local-device-dot').className = 'd-dot ' + state.dot;
+  $('local-device-type').textContent = state.type;
+  $('local-device-ip').textContent = state.meta;
 }
 
 function updateStats(q) {
@@ -654,17 +882,35 @@ async function maybeBriefing() {
 async function refreshHealth() {
   var data = await get('/api/health');
   if (!data) return;
+  latestHealth = data;
   var cpu = Math.round(data.cpu_percent || 0);
   var ram = Math.round(data.virtual_memory || 0);
+  var lanConnected = !!data.lan_connected;
+  var lanType = String(data.lan_type || '');
+  var signal = Math.round(data.lan_signal_percent || 0);
   var online = !!data.internet_connected;
   var latency = data.internet_latency_ms;
   bar('cpu', cpu, cpu + '%');
   bar('ram', ram, ram + '%');
-  $('net-k').textContent = 'Internet';
-  $('net-b').style.background = online ? 'var(--green)' : 'var(--red)';
-  bar('net', online ? 100 : 14, online
-    ? (latency != null ? 'Connected (' + latency + ' ms)' : 'Connected')
-    : 'Offline');
+  $('net-k').textContent = 'Network';
+  $('net-v').textContent = lanConnected ? (lanType === 'wifi' ? 'Wi-Fi' : 'Ethernet') : 'Offline';
+  $('lan-icon').textContent = signalGlyph(signal, lanType, lanConnected);
+  $('lan-v').textContent = lanConnected
+    ? (data.lan_name || (lanType === 'wifi' ? 'Wi-Fi' : 'Ethernet')) + (lanType === 'wifi' && signal ? ' ' + signal + '%' : '')
+    : 'No local connection';
+  $('www-v').textContent = online
+    ? (latency != null ? 'Reachable (' + latency + ' ms)' : 'Reachable')
+    : 'Offline';
+  updateLocalSystemCard();
+}
+
+function signalGlyph(signal, lanType, connected) {
+  if (!connected) return '--';
+  if (lanType === 'ethernet') return '|||';
+  if (signal >= 75) return '||||';
+  if (signal >= 50) return '|||';
+  if (signal >= 25) return '||';
+  return '|';
 }
 
 function bar(k, pct, label) {
@@ -883,6 +1129,7 @@ async function saveCalendarEvent() {
   calendarCursor = new Date(dateFromDayKey(calendarSelectedDay).getFullYear(), dateFromDayKey(calendarSelectedDay).getMonth(), 1, 12, 0, 0, 0);
   closeCalendarEditor();
   await refreshCalendar();
+  await refreshActivity();
 }
 
 async function deleteCalendarEvent() {
@@ -894,6 +1141,7 @@ async function deleteCalendarEvent() {
   }
   closeCalendarEditor();
   await refreshCalendar();
+  await refreshActivity();
 }
 
 function toLocalInputValue(iso) {
@@ -945,11 +1193,11 @@ function calendarTimeLabel(iso) {
 async function refreshDevices() {
   var devs = await get('/api/devices/list') || [];
   var el = $('dev-scroll');
-  var localDot = localStatusDot();
+  var localState = computeLocalSystemState();
   var html = '<div class="dev-card"><div class="dev-head">'
     + '<div class="dev-thumb"><div class="dev-thumb-empty">GISMO</div></div>'
-    + '<div class="d-info"><div class="d-title"><div class="d-dot ' + localDot + '"></div><div class="d-name">This computer</div></div>'
-    + '<div class="d-type">Local system</div><div class="d-ip">127.0.0.1</div></div></div></div>';
+    + '<div class="d-info"><div class="d-title"><div class="d-dot ' + localState.dot + '" id="local-device-dot"></div><div class="d-name">This computer</div></div>'
+    + '<div class="d-type" id="local-device-type">' + esc(localState.type) + '</div><div class="d-ip" id="local-device-ip">' + esc(localState.meta) + '</div></div></div></div>';
   devs.forEach(function(device) {
     var dot = device.status === 'online' ? 'd-on' : 'd-off';
     var thumb = device.thumbnail_url
@@ -968,6 +1216,7 @@ async function refreshDevices() {
       + '</div></div></div></div>';
   });
   el.innerHTML = html;
+  updateLocalSystemCard();
   bindDeviceActions();
 }
 
@@ -1034,7 +1283,6 @@ async function scanDevices() {
     setScanLoading(false);
     setScanStatus('No devices found - try again.');
     $('scan-results').innerHTML = '<div class="scan-empty">No devices found - try again.</div>';
-    console.error('scanDevices error:', err);
   } finally {
     if (scanController === controller) scanController = null;
   }
@@ -1308,6 +1556,9 @@ async function waitForExecution(enqueuedIds, workingMsg) {
       }
       var allDone = items.every(function(item) { return item.status === 'SUCCEEDED'; });
       if (allDone) {
+        await refreshCalendar();
+        await refreshDevices();
+        await refreshActivity();
         var relatedRuns = runs.filter(function(run) {
           return enqueuedIds.indexOf(run.queue_item_id) >= 0;
         });
@@ -1452,7 +1703,7 @@ async function speakText(text) {
     var audio = new Audio(url);
     currentAudio = audio;
     audio.onended = function() { URL.revokeObjectURL(url); currentAudio = null; };
-    audio.play().catch(function(e) { console.warn('TTS play blocked:', e.message); });
+    audio.play().catch(function() {});
   } catch (e) {
     // TTS not available — silent fail
   }
@@ -1588,7 +1839,7 @@ function setOp(name) {
   $('op-name').textContent = name || '\u2014';
 }
 
-async function openSettings() {
+async function openSettings(section) {
   $('settings-overlay').classList.remove('hidden');
   var data = await get('/api/settings');
   if (!data) {
@@ -1600,6 +1851,13 @@ async function openSettings() {
     var selected = voice.id === data.voice ? ' selected' : '';
     return '<option value="' + esc(voice.id) + '"' + selected + '>' + esc(voice.name) + ' / ' + esc(voice.lang) + '</option>';
   }).join('');
+  $('settings-model').innerHTML = (data.models || []).map(function(model) {
+    var selected = model === data.model ? ' selected' : '';
+    return '<option value="' + esc(model) + '"' + selected + '>' + esc(model) + '</option>';
+  }).join('');
+  if (section === 'voice') $('settings-voice').focus();
+  else if (section === 'model') $('settings-model').focus();
+  else $('settings-name').focus();
 }
 
 function closeSettings() {
@@ -1628,7 +1886,8 @@ async function previewSettingsVoice() {
 async function saveSettings() {
   var data = await post('/api/settings', {
     operator_name: $('settings-name').value.trim(),
-    voice_id: $('settings-voice').value
+    voice_id: $('settings-voice').value,
+    model_name: $('settings-model').value
   });
   if (!data) return;
   setOp(data.operator_name);

@@ -99,13 +99,46 @@ def get_status(db_path: str) -> dict[str, Any]:
             "running": not stale,
             "paused": paused,
             "stale": stale,
-            "state": "online" if not stale else "ready",
+            "state": "online" if not stale else "starting",
             "pid": hb.pid,
             "started_at": _dt(hb.started_at),
             "last_seen": _dt(hb.last_seen),
             "age_secs": age_secs,
         }
-    return {"daemon": daemon, "queue": stats}
+    working = int((stats.get("by_status") or {}).get("IN_PROGRESS") or 0) > 0
+    gismo_state = "working" if working and daemon["running"] else "ready" if daemon["running"] else "starting"
+    return {
+        "daemon": daemon,
+        "queue": stats,
+        "database": {"ready": True, "state": "ready"},
+        "api": {"ready": True, "state": "ready"},
+        "gismo": {
+            "state": gismo_state,
+            "ready": bool(daemon["running"]),
+            "working": working,
+            "paused": paused,
+        },
+    }
+
+
+def get_readiness(db_path: str) -> dict[str, Any]:
+    status = get_status(db_path)
+    daemon = status["daemon"]
+    ready = bool(status["database"]["ready"] and status["api"]["ready"] and daemon["running"] and not daemon.get("stale"))
+    return {
+        "ready": ready,
+        "gismo_state": status["gismo"]["state"],
+        "stages": [
+            {"key": "state", "label": "State", "ready": True, "detail": "Connected"},
+            {
+                "key": "worker",
+                "label": "Worker",
+                "ready": bool(daemon["running"] and not daemon.get("stale")),
+                "detail": "Ready" if daemon["running"] and not daemon.get("stale") else "Starting",
+            },
+            {"key": "api", "label": "API", "ready": True, "detail": "Listening"},
+        ],
+    }
 
 
 def get_queue_stats(db_path: str) -> dict[str, Any]:
@@ -467,7 +500,7 @@ _CHAT_AMBIGUOUS_RE = re.compile(
 )
 _CHAT_OPERATIONAL_RE = re.compile(
     r"\b(turn on|turn off|check|scan|lock|unlock|open|close|start|stop|run|queue|save|write|remember|"
-    r"set up|set|pause|resume|look for|find|show me|monitor|connect|remove|add)\b"
+    r"set up|set|pause|resume|look for|find|show me|monitor|connect|remove|add|remind me|schedule)\b"
 )
 _CHAT_INFORMATIONAL_RE = re.compile(
     r"^(who|what|when|where|why|how)\b|"
@@ -497,8 +530,6 @@ _CHAT_PLAN_ERROR_REPLY = "I hit a temporary problem and could not start that rig
 def _is_system_query(text: str) -> bool:
     if not text:
         return False
-    if _CHAT_CALENDAR_CREATE_RE.search(text):
-        return True
     if re.search(r"\bwhat do i have today\b", text):
         return True
     if re.search(r"\bwhat do i have tomorrow\b", text):
@@ -579,6 +610,8 @@ def _format_plan_reply(plan: dict[str, Any], risk: dict[str, Any]) -> tuple[str,
 def _request_chat_plan(
     db_path: str,
     message: str,
+    *,
+    primary_model: str | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
     from gismo.cli.main import _request_llm_plan
 
@@ -592,7 +625,7 @@ def _request_chat_plan(
         f"Request: {message}"
     )
     last_error: BaseException | None = None
-    for model in _chat_model_candidates("gismo"):
+    for model in _chat_model_candidates(primary_model or get_model_preference(db_path)):
         state_store = None
         try:
             plan, risk, explain_payload, _policy_summary, state_store, _payload = _request_llm_plan(
@@ -682,11 +715,12 @@ def _run_freeform_chat_with_fallback(
     *,
     messages: list[dict[str, str]],
     system: str,
+    primary_model: str | None = None,
 ) -> str:
     from gismo.llm.ollama import ollama_freeform_chat
 
     last_error: BaseException | None = None
-    for model in _chat_model_candidates("gismo"):
+    for model in _chat_model_candidates(primary_model or get_model_preference(db_path)):
         try:
             reply = _clean_reply(ollama_freeform_chat(messages, system=system, model=model))
             if reply:
@@ -867,6 +901,38 @@ def _parse_calendar_chat_create(message: str) -> dict[str, Any] | None:
     }
 
 
+def _build_calendar_enqueue_plan(message: str) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]] | None:
+    from gismo.core.risk import classify_plan_risk
+
+    payload = _parse_calendar_chat_create(message)
+    if payload is None:
+        return None
+    command = "calendar: add " + json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+    why = f"add {payload['title']} to your calendar"
+    actions = [
+        {
+            "type": "enqueue",
+            "command": command,
+            "timeout_seconds": 30,
+            "retries": 0,
+            "why": why,
+            "risk": "high",
+        }
+    ]
+    risk = classify_plan_risk(actions).to_dict()
+    return (
+        {
+            "intent": "calendar_update",
+            "assumptions": ["Operator requested a local calendar change."],
+            "actions": actions,
+            "notes": [],
+            "memory_suggestions": [],
+        },
+        risk,
+        {"summary": "calendar_add"},
+    )
+
+
 def _handle_system_query(db_path: str, message: str) -> dict[str, Any] | None:
     lowered = " ".join((message or "").strip().lower().split())
     today = datetime.now(_local_tz()).date()
@@ -900,19 +966,7 @@ def _handle_system_query(db_path: str, message: str) -> dict[str, Any] | None:
         reply = _calendar_reply_for_day(db_path, (today + timedelta(days=1)).isoformat(), label="tomorrow")
         _append_chat_record(message, reply)
         return {"reply": reply, "mode": "reply", "classification": "system_query"}
-    if not _CHAT_CALENDAR_CREATE_RE.search(message or ""):
-        return None
-    payload = _parse_calendar_chat_create(message)
-    if payload is None:
-        reply = "I can add that to your calendar. Tell me the day and time, like tomorrow at 3 PM."
-        _append_chat_record(message, reply)
-        return {"reply": reply, "mode": "clarify", "classification": "ambiguous"}
-    event = create_calendar_event(db_path, payload)
-    local_start = _coerce_calendar_dt(event["start_at"]).astimezone(_local_tz())
-    when = local_start.strftime("%#I:%M %p on %A") if sys.platform == "win32" else local_start.strftime("%-I:%M %p on %A")
-    reply = f"Added {event['title']} to your calendar for {when}."
-    _append_chat_record(message, reply)
-    return {"reply": reply, "mode": "reply", "classification": "system_query", "calendar_event": event}
+    return None
 
 
 def chat_message(
@@ -952,6 +1006,7 @@ def chat_message(
                 db_path,
                 messages=messages,
                 system=_build_chat_system(db_path),
+                primary_model=get_model_preference(db_path),
             )
             _append_chat_record(message, reply)
             return {
@@ -960,7 +1015,15 @@ def chat_message(
                 "classification": classification,
             }
 
-        plan, risk, explain_json = _request_chat_plan(db_path, message)
+        calendar_plan = _build_calendar_enqueue_plan(message)
+        if calendar_plan is not None:
+            plan, risk, explain_json = calendar_plan
+        else:
+            plan, risk, explain_json = _request_chat_plan(
+                db_path,
+                message,
+                primary_model=get_model_preference(db_path),
+            )
 
         actions = [
             action
@@ -1047,10 +1110,83 @@ def complete_onboarding(db_path: str, name: str, voice_id: str) -> dict[str, Any
 # ── System health ──────────────────────────────────────────────────────────
 
 
-def get_system_health() -> dict[str, Any]:
-    """Return CPU and RAM usage percentages."""
+def _parse_netsh_wifi() -> dict[str, Any]:
+    try:
+        completed = subprocess.run(
+            ["netsh", "wlan", "show", "interfaces"],
+            capture_output=True,
+            text=True,
+            timeout=3,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return {"lan_connected": False, "lan_type": None, "lan_name": None, "lan_signal_percent": None}
+
+    output = completed.stdout or ""
+    if "State" not in output:
+        return {"lan_connected": False, "lan_type": None, "lan_name": None, "lan_signal_percent": None}
+
+    details: dict[str, str] = {}
+    for line in output.splitlines():
+        if ":" not in line:
+            continue
+        key, value = line.split(":", 1)
+        details[key.strip().lower()] = value.strip()
+    if details.get("state", "").lower() != "connected":
+        return {"lan_connected": False, "lan_type": None, "lan_name": None, "lan_signal_percent": None}
+
+    try:
+        signal_percent = int(details.get("signal", "").replace("%", "").strip())
+    except ValueError:
+        signal_percent = None
+    return {
+        "lan_connected": True,
+        "lan_type": "wifi",
+        "lan_name": details.get("ssid") or details.get("name") or "Wi-Fi",
+        "lan_signal_percent": signal_percent,
+    }
+
+
+
+def _detect_lan_status() -> dict[str, Any]:
     import psutil
 
+    wifi = _parse_netsh_wifi()
+    if wifi["lan_connected"]:
+        return wifi
+
+    try:
+        stats = psutil.net_if_stats()
+        addrs = psutil.net_if_addrs()
+    except Exception:
+        return {"lan_connected": False, "lan_type": None, "lan_name": None, "lan_signal_percent": None}
+
+    for name, stat in stats.items():
+        lower = name.lower()
+        if not stat.isup or "loopback" in lower:
+            continue
+        ipv4 = [
+            addr.address
+            for addr in addrs.get(name, [])
+            if getattr(addr, "family", None) == socket.AF_INET and not str(addr.address).startswith("127.")
+        ]
+        if not ipv4:
+            continue
+        return {
+            "lan_connected": True,
+            "lan_type": "wifi" if any(token in lower for token in ("wi-fi", "wifi", "wlan", "wireless")) else "ethernet",
+            "lan_name": name,
+            "lan_signal_percent": None,
+        }
+    return {"lan_connected": False, "lan_type": None, "lan_name": None, "lan_signal_percent": None}
+
+
+
+def get_system_health() -> dict[str, Any]:
+    """Return CPU, memory, and network health."""
+    import psutil
+
+    lan = _detect_lan_status()
     internet_connected = False
     internet_latency_ms = None
     for host in ("1.1.1.1", "8.8.8.8"):
@@ -1066,15 +1202,13 @@ def get_system_health() -> dict[str, Any]:
     return {
         "cpu_percent": psutil.cpu_percent(),
         "virtual_memory": psutil.virtual_memory().percent,
+        "lan_connected": lan["lan_connected"],
+        "lan_type": lan["lan_type"],
+        "lan_name": lan["lan_name"],
+        "lan_signal_percent": lan["lan_signal_percent"],
         "internet_connected": internet_connected,
         "internet_latency_ms": internet_latency_ms,
     }
-
-
-# ── Devices ────────────────────────────────────────────────────────────────
-
-
-_IP_RE = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
 
 
 def _device_actions(device: ConnectedDevice) -> list[str]:
@@ -1502,6 +1636,78 @@ def get_device_stream_payload(db_path: str, device_id: str) -> dict[str, Any]:
 # ── Settings ───────────────────────────────────────────────────────────────
 
 
+_SETTINGS_NAMESPACE = "gismo:settings"
+_MODEL_KEY = "llm.model"
+
+
+
+def get_model_preference(db_path: str) -> str:
+    from gismo.llm.ollama import resolve_ollama_model
+    from gismo.memory.store import get_item as memory_get_item
+
+    item = memory_get_item(
+        db_path,
+        namespace=_SETTINGS_NAMESPACE,
+        key=_MODEL_KEY,
+        include_tombstoned=False,
+        actor="web-api",
+        policy_hash="web-settings",
+    )
+    if item is not None and isinstance(item.value, str) and item.value.strip():
+        return item.value.strip()
+    return resolve_ollama_model("gismo")
+
+
+
+def _set_model_preference(db_path: str, model_name: str) -> None:
+    from gismo.memory.store import put_item as memory_put_item
+
+    model_name = model_name.strip()
+    if not model_name:
+        return
+    memory_put_item(
+        db_path,
+        namespace=_SETTINGS_NAMESPACE,
+        key=_MODEL_KEY,
+        kind="preference",
+        value=model_name,
+        tags=["llm", "model"],
+        confidence="high",
+        source="web-settings",
+        ttl_seconds=None,
+        actor="web-api",
+        policy_hash="web-settings",
+    )
+
+
+
+def get_model_options(db_path: str) -> list[str]:
+    options: list[str] = []
+    current = get_model_preference(db_path)
+    for candidate in [current] + _chat_model_candidates(current):
+        if candidate and candidate not in options:
+            options.append(candidate)
+    try:
+        completed = subprocess.run(
+            ["ollama", "list"],
+            capture_output=True,
+            text=True,
+            timeout=4,
+            check=False,
+        )
+        for line in (completed.stdout or "").splitlines()[1:]:
+            parts = line.split()
+            if not parts:
+                continue
+            model_name = parts[0].strip()
+            if model_name and model_name not in options:
+                options.append(model_name)
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    return options
+
+
+
 def get_settings(db_path: str) -> dict[str, Any]:
     from gismo.onboarding import get_operator_name
     from gismo.tts.prefs import get_voice
@@ -1514,8 +1720,11 @@ def get_settings(db_path: str) -> dict[str, Any]:
         "operator_name": get_operator_name(db_path) or "",
         "voice": get_voice(db_path),
         "voices": voices,
+        "model": get_model_preference(db_path),
+        "models": get_model_options(db_path),
         "theme": "Coming soon",
     }
+
 
 
 def save_settings(
@@ -1523,6 +1732,7 @@ def save_settings(
     *,
     operator_name: str | None = None,
     voice_id: str | None = None,
+    model_name: str | None = None,
 ) -> dict[str, Any]:
     from gismo.onboarding import set_operator_name
     from gismo.tts.prefs import set_voice
@@ -1532,7 +1742,10 @@ def save_settings(
         set_operator_name(db_path, name)
     if voice_id:
         set_voice(db_path, voice_id)
+    if model_name:
+        _set_model_preference(db_path, model_name)
     return get_settings(db_path)
+
 
 
 def _serialize_calendar_event(event: CalendarEvent) -> dict[str, Any]:

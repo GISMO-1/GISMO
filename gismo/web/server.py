@@ -132,6 +132,8 @@ def _make_handler(db_path: str) -> type[BaseHTTPRequestHandler]:
                     data = web_api.get_status(db_path)
                     data["db_path"] = db_path
                     _json_response(self, data)
+                elif path == "/api/ready":
+                    _json_response(self, web_api.get_readiness(db_path))
                 elif path == "/api/queue":
                     _json_response(self, web_api.get_queue(db_path))
                 elif path == "/api/queue/stats":
@@ -276,6 +278,7 @@ def _make_handler(db_path: str) -> type[BaseHTTPRequestHandler]:
                             db_path,
                             operator_name=body.get("operator_name"),
                             voice_id=body.get("voice_id"),
+                            model_name=body.get("model_name") or body.get("model"),
                         ),
                     )
                 elif path == "/api/tts/voices/set":

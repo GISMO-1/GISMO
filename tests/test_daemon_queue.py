@@ -3,6 +3,7 @@ import time
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+import uuid
 
 from gismo.core import daemon as daemon_module
 from gismo.core.models import QueueStatus
@@ -79,6 +80,34 @@ class DaemonQueueTest(unittest.TestCase):
             tool_calls = list(state_store.list_tool_calls(run.id))
             self.assertGreaterEqual(len(tasks), 1)
             self.assertGreaterEqual(len(tool_calls), 1)
+
+    def test_daemon_executes_calendar_add_command(self) -> None:
+        repo_tmp = Path(__file__).resolve().parents[1] / "tmp"
+        repo_tmp.mkdir(exist_ok=True)
+        db_path = repo_tmp / f"daemon-calendar-{uuid.uuid4().hex}.db"
+        try:
+            state_store = StateStore(str(db_path))
+            item = state_store.enqueue_command(
+                'calendar: add {"title":"Dinner","start_at":"2026-03-20T18:00:00","end_at":"2026-03-20T19:00:00"}'
+            )
+
+            daemon_module.run_daemon_loop(
+                state_store,
+                policy_path=self._policy_path(),
+                sleep_seconds=0.0,
+                once=True,
+            )
+
+            updated = state_store.get_queue_item(item.id)
+            assert updated is not None
+            self.assertEqual(updated.status, QueueStatus.SUCCEEDED)
+
+            events = state_store.list_calendar_events(limit=10)
+            self.assertEqual(len(events), 1)
+            self.assertEqual(events[0].title, "Dinner")
+        finally:
+            if db_path.exists():
+                db_path.unlink()
 
     def test_retry_behavior(self) -> None:
         flaky_tool = FlakyEchoTool()

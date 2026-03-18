@@ -34,6 +34,7 @@ gismo_state.db
 
 # Local run exports
 exports/
+tmp/
 
 # Model files (large binaries — store outside repo)
 models/

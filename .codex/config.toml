@@ -1,0 +1,13 @@
+model = "gpt-5.4"
+
+[agents]
+max_threads = 6
+max_depth = 1
+
+[mcp_servers.playwright]
+command = "npx"
+args = ["-y", "@anthropic/mcp-playwright"]
+env = { PLAYWRIGHT_HEADLESS = "false" }
+startup_timeout_sec = 30
+tool_timeout_sec = 60
+enabled = true

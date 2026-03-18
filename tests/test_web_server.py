@@ -136,6 +136,33 @@ class TestWebServerEndpoints(unittest.TestCase):
             data = self._request_json("/api/devices/scan")
         self.assertEqual(data[0]["brand"], "Tapo")
 
+    def test_calendar_crud_endpoints(self) -> None:
+        created = self._request_json(
+            "/api/calendar",
+            method="POST",
+            payload={
+                "title": "Dinner",
+                "start_at": "2026-03-20T18:00:00",
+                "end_at": "2026-03-20T19:00:00",
+            },
+        )
+        listed = self._request_json("/api/calendar?day=2026-03-20")
+        self.assertEqual(len(listed), 1)
+        self.assertEqual(listed[0]["id"], created["id"])
+
+        updated = self._request_json(
+            f"/api/calendar/{created['id']}",
+            method="PATCH",
+            payload={"title": "Late Dinner"},
+        )
+        self.assertEqual(updated["title"], "Late Dinner")
+
+        removed = self._request_json(
+            f"/api/calendar/{created['id']}",
+            method="DELETE",
+        )
+        self.assertTrue(removed["ok"])
+
     def test_chat_endpoint_returns_reply(self) -> None:
         with mock.patch.object(
             web_api,

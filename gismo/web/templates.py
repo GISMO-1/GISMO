@@ -48,9 +48,14 @@ body{background:var(--bg);color:var(--text);font-family:var(--font);font-size:13
 #op-badge span{color:var(--accent)}
 #top-actions{margin-left:auto;display:flex;align-items:center;gap:10px}
 .top-icon{width:32px;height:32px}
+#top-tabs{display:flex;align-items:center;gap:6px;flex-shrink:0}
+.shell-tab{padding:6px 12px;border-radius:14px;border:1px solid var(--border);background:transparent;color:var(--dim);font-family:var(--font);font-size:11px;cursor:pointer;transition:all .15s}
+.shell-tab:hover{border-color:var(--accent);color:var(--accent)}
+.shell-tab.active{background:var(--accent-dim);border-color:var(--accent-glow);color:var(--accent)}
 
 /* GRID */
 #grid{display:grid;grid-template-columns:260px 1fr 240px;flex:1;overflow:hidden;min-height:0}
+.app-view.hidden{display:none !important}
 
 /* PANEL BASE */
 .panel{background:var(--panel);display:flex;flex-direction:column;overflow:hidden;min-height:0}
@@ -205,6 +210,58 @@ body{background:var(--bg);color:var(--text);font-family:var(--font);font-size:13
 .field-note{font-size:11px;color:var(--dim)}
 @keyframes spin{to{transform:rotate(360deg)}}
 
+/* CALENDAR */
+#calendar-view{flex:1;min-height:0;background:var(--bg)}
+#calendar-shell{height:100%;display:flex;flex-direction:column;min-height:0}
+.cal-toolbar{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:18px 20px;border-bottom:1px solid var(--border);background:var(--panel)}
+.cal-month-label{font-size:24px;letter-spacing:1px;margin-top:6px}
+.cal-toolbar-actions{display:flex;align-items:center;gap:8px}
+.cal-nav-btn,.cal-primary-btn{padding:9px 12px;border-radius:8px;font-family:var(--font);font-size:11px;cursor:pointer}
+.cal-nav-btn{border:1px solid var(--border);background:transparent;color:var(--text)}
+.cal-nav-btn:hover{border-color:var(--accent);color:var(--accent)}
+.cal-primary-btn{border:none;background:var(--accent);color:var(--bg);font-weight:700}
+.calendar-body{display:grid;grid-template-columns:minmax(0,1fr) 320px;gap:18px;flex:1;min-height:0;padding:18px}
+.calendar-main,.calendar-side{background:var(--panel);border:1px solid var(--border);border-radius:16px;min-height:0}
+.calendar-main{display:flex;flex-direction:column;overflow:hidden}
+.calendar-side{display:flex;flex-direction:column;overflow:hidden}
+.cal-weekdays{display:grid;grid-template-columns:repeat(7,1fr);padding:12px 14px 0;gap:8px;color:var(--dim);font-size:10px;letter-spacing:1px;text-transform:uppercase}
+.cal-weekday{text-align:right;padding-right:4px}
+.cal-grid{display:grid;grid-template-columns:repeat(7,1fr);grid-auto-rows:minmax(106px,1fr);gap:8px;padding:14px;flex:1;min-height:0}
+.cal-day{border:1px solid var(--border);border-radius:14px;background:rgba(255,255,255,.02);padding:10px;display:flex;flex-direction:column;gap:8px;cursor:pointer;transition:border-color .15s,transform .1s,background .15s}
+.cal-day:hover{border-color:var(--accent);background:rgba(78,205,196,.04)}
+.cal-day.other{opacity:.45}
+.cal-day.today{box-shadow:0 0 0 1px rgba(78,205,196,.35) inset}
+.cal-day.selected{border-color:var(--accent);background:rgba(78,205,196,.08)}
+.cal-day-head{display:flex;align-items:center;justify-content:space-between}
+.cal-day-num{font-size:12px}
+.cal-day-badge{font-size:9px;color:var(--dim)}
+.cal-day-events{display:flex;flex-direction:column;gap:6px;min-height:0}
+.cal-pill{padding:5px 7px;border-radius:8px;font-size:10px;line-height:1.35;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;border:1px solid transparent}
+.cal-pill.event{background:rgba(96,165,250,.12);color:var(--blue);border-color:rgba(96,165,250,.2)}
+.cal-pill.reminder{background:rgba(78,205,196,.12);color:var(--accent);border-color:rgba(78,205,196,.2)}
+.cal-pill.focus{background:rgba(251,191,36,.12);color:var(--yellow);border-color:rgba(251,191,36,.2)}
+.cal-pill.personal{background:rgba(74,222,128,.12);color:var(--green);border-color:rgba(74,222,128,.2)}
+.cal-more{font-size:10px;color:var(--dim)}
+.cal-side-head{padding:16px 18px;border-bottom:1px solid var(--border)}
+.cal-side-date{font-size:18px;margin-top:6px}
+.cal-day-list{flex:1;overflow-y:auto;padding:14px 16px;display:flex;flex-direction:column;gap:10px;min-height:0}
+.cal-event-card{border:1px solid var(--border);border-radius:12px;padding:12px;background:var(--bg)}
+.cal-event-title{font-size:12px}
+.cal-event-meta{font-size:10px;color:var(--dim);margin-top:4px}
+.cal-event-desc{font-size:11px;color:var(--text);margin-top:8px;line-height:1.5;white-space:pre-wrap}
+.cal-side-actions{padding:14px 16px;border-top:1px solid var(--border);display:flex;gap:8px}
+.cal-empty{padding:24px 8px;color:var(--dim);font-size:11px;text-align:center}
+.cal-form-grid{display:flex;flex-direction:column;gap:12px}
+.cal-checks{display:flex;gap:18px;flex-wrap:wrap;font-size:11px;color:var(--dim)}
+.cal-checks label{display:flex;align-items:center;gap:6px}
+.cal-danger-btn{padding:9px 12px;border-radius:7px;border:1px solid rgba(248,113,113,.25);background:rgba(248,113,113,.08);color:var(--red);font-family:var(--font);font-size:12px;cursor:pointer}
+.cal-danger-btn[disabled]{opacity:.35;cursor:default}
+
+@media (max-width: 1100px){
+  #grid{grid-template-columns:220px 1fr 220px}
+  .calendar-body{grid-template-columns:1fr}
+}
+
 /* SCROLLBARS */
 ::-webkit-scrollbar{width:4px;height:4px}
 ::-webkit-scrollbar-track{background:transparent}
@@ -221,6 +278,10 @@ body{background:var(--bg);color:var(--text);font-family:var(--font);font-size:13
     <div class="pill-dot dot-red" id="s-dot"></div>
     <span id="s-txt">OFFLINE</span>
   </div>
+  <div id="top-tabs">
+    <button class="shell-tab active" id="tab-command" onclick="setActiveTab('command')">Command Center</button>
+    <button class="shell-tab" id="tab-calendar" onclick="setActiveTab('calendar')">Calendar</button>
+  </div>
   <input id="search" type="text" placeholder="Search commands, runs, memory…" oninput="onSearch(this.value)" />
   <div id="top-actions">
     <div id="op-badge">operator: <span id="op-name">—</span></div>
@@ -233,7 +294,7 @@ body{background:var(--bg);color:var(--text);font-family:var(--font);font-size:13
 </div>
 
 <!-- GRID -->
-<div id="grid">
+<div id="grid" class="app-view">
 
   <!-- LEFT: DEVICES + HEALTH -->
   <div class="panel" id="left-panel">
@@ -300,6 +361,48 @@ body{background:var(--bg);color:var(--text);font-family:var(--font);font-size:13
     </div>
   </div>
 
+
+</div>
+
+<div id="calendar-view" class="app-view hidden">
+  <div id="calendar-shell">
+    <div class="cal-toolbar">
+      <div>
+        <div class="sec-ttl">Local Calendar</div>
+        <div class="cal-month-label" id="cal-month-label">Calendar</div>
+      </div>
+      <div class="cal-toolbar-actions">
+        <button class="cal-nav-btn" onclick="changeCalendarMonth(-1)">Prev</button>
+        <button class="cal-nav-btn" onclick="jumpCalendarToday()">Today</button>
+        <button class="cal-nav-btn" onclick="changeCalendarMonth(1)">Next</button>
+        <button class="cal-primary-btn" onclick="openCalendarEditor()">+ Add Event</button>
+      </div>
+    </div>
+    <div class="calendar-body">
+      <div class="calendar-main">
+        <div class="cal-weekdays">
+          <div class="cal-weekday">Mon</div>
+          <div class="cal-weekday">Tue</div>
+          <div class="cal-weekday">Wed</div>
+          <div class="cal-weekday">Thu</div>
+          <div class="cal-weekday">Fri</div>
+          <div class="cal-weekday">Sat</div>
+          <div class="cal-weekday">Sun</div>
+        </div>
+        <div class="cal-grid" id="cal-grid"></div>
+      </div>
+      <div class="calendar-side">
+        <div class="cal-side-head">
+          <div class="sec-ttl">Day Detail</div>
+          <div class="cal-side-date" id="cal-selected-label">Today</div>
+        </div>
+        <div class="cal-day-list" id="cal-day-list"></div>
+        <div class="cal-side-actions">
+          <button class="cal-primary-btn" style="flex:1" onclick="openCalendarEditor()">Add Event</button>
+        </div>
+      </div>
+    </div>
+  </div>
 </div>
 
 <!-- ONBOARDING -->
@@ -349,6 +452,58 @@ body{background:var(--bg);color:var(--text);font-family:var(--font);font-size:13
   </div>
 </div>
 
+
+<!-- CALENDAR EDITOR -->
+<div class="overlay hidden" id="calendar-editor-overlay">
+  <div class="modal">
+    <div class="sm-ttl" id="calendar-editor-title">New Event</div>
+    <div class="cal-form-grid">
+      <div>
+        <div class="field-label">Title</div>
+        <input class="field-input" id="calendar-title" type="text" placeholder="Dinner with Sam" />
+      </div>
+      <div>
+        <div class="field-label">Description</div>
+        <textarea class="field-input" id="calendar-description" rows="3" placeholder="Anything you want GISMO to remember about it"></textarea>
+      </div>
+      <div>
+        <div class="field-label">Type</div>
+        <select class="field-input" id="calendar-event-type">
+          <option value="event">Event</option>
+          <option value="reminder">Reminder</option>
+          <option value="focus">Focus</option>
+          <option value="personal">Personal</option>
+        </select>
+      </div>
+      <div>
+        <div class="field-label">Status</div>
+        <select class="field-input" id="calendar-status">
+          <option value="scheduled">Scheduled</option>
+          <option value="done">Done</option>
+          <option value="cancelled">Cancelled</option>
+        </select>
+      </div>
+      <div>
+        <div class="field-label">Starts</div>
+        <input class="field-input" id="calendar-start" type="datetime-local" />
+      </div>
+      <div>
+        <div class="field-label">Ends</div>
+        <input class="field-input" id="calendar-end" type="datetime-local" />
+      </div>
+      <div class="cal-checks">
+        <label><input id="calendar-all-day" type="checkbox" /> All day</label>
+        <label><input id="calendar-requires-ack" type="checkbox" /> Needs acknowledgement</label>
+      </div>
+    </div>
+    <div class="modal-actions">
+      <button class="cal-danger-btn" id="calendar-delete-btn" onclick="deleteCalendarEvent()" disabled>Delete</button>
+      <button class="cancel-btn" onclick="closeCalendarEditor()">Cancel</button>
+      <button class="confirm-btn" onclick="saveCalendarEvent()">Save</button>
+    </div>
+  </div>
+</div>
+
 <!-- SETTINGS -->
 <div class="overlay hidden" id="settings-overlay">
   <div class="modal">
@@ -391,10 +546,19 @@ var lastScan      = [];
 var scanController = null;
 var pendingPlanId = null;
 var pendingPlanActions = null;
+var activeTab = 'command';
+var calendarCursor = new Date();
+calendarCursor.setDate(1);
+calendarCursor.setHours(12, 0, 0, 0);
+var calendarSelectedDay = dayKey(new Date());
+var calendarEvents = [];
+var editingCalendarId = null;
 
 // -- Boot --------------------------------------------------------------------
 async function init() {
   if ($('settings-btn')) $('settings-btn').onclick = openSettings;
+  if ($('tab-command')) $('tab-command').onclick = function() { setActiveTab('command'); };
+  if ($('tab-calendar')) $('tab-calendar').onclick = function() { setActiveTab('calendar'); };
   var ob = await get('/api/onboarding');
   if (!ob) {
     addMsg('gismo', 'Could not reach GISMO server. Is it running?');
@@ -408,11 +572,15 @@ async function init() {
   await refreshHealth();
   await refreshActivity();
   await refreshDevices();
+  await refreshCalendar();
   updateMicAvailability();
   setInterval(refreshStatus, 5000);
   setInterval(refreshHealth, 5000);
   setInterval(refreshActivity, 5000);
   setInterval(refreshDevices, 10000);
+  setInterval(function() {
+    if (activeTab === 'calendar') refreshCalendar();
+  }, 60000);
 }
 
 // -- Daemon status + queue stats ---------------------------------------------
@@ -502,6 +670,275 @@ async function refreshHealth() {
 function bar(k, pct, label) {
   $(k + '-v').textContent = label;
   $(k + '-b').style.width = pct + '%';
+}
+
+// -- Shell tabs ---------------------------------------------------------------
+function setActiveTab(name) {
+  activeTab = name === 'calendar' ? 'calendar' : 'command';
+  $('tab-command').classList.toggle('active', activeTab === 'command');
+  $('tab-calendar').classList.toggle('active', activeTab === 'calendar');
+  $('grid').classList.toggle('hidden', activeTab !== 'command');
+  $('calendar-view').classList.toggle('hidden', activeTab !== 'calendar');
+  $('search').placeholder = activeTab === 'calendar'
+    ? 'Search your day, events, reminders...'
+    : 'Search commands, runs, memory...';
+  if (activeTab === 'calendar') refreshCalendar();
+}
+
+// -- Calendar ----------------------------------------------------------------
+async function refreshCalendar() {
+  var range = calendarVisibleRange(calendarCursor);
+  var path = '/api/calendar?start=' + encodeURIComponent(range.start.toISOString())
+    + '&end=' + encodeURIComponent(range.end.toISOString()) + '&limit=800';
+  calendarEvents = await get(path) || [];
+  renderCalendar();
+  renderCalendarDay();
+}
+
+function calendarVisibleRange(monthDate) {
+  var first = new Date(monthDate.getFullYear(), monthDate.getMonth(), 1, 12, 0, 0, 0);
+  var start = startOfCalendarGrid(first);
+  var end = new Date(start);
+  end.setDate(end.getDate() + 41);
+  end.setHours(23, 59, 59, 999);
+  return {start: start, end: end};
+}
+
+function startOfCalendarGrid(dt) {
+  var first = new Date(dt.getFullYear(), dt.getMonth(), 1, 12, 0, 0, 0);
+  var day = (first.getDay() + 6) % 7;
+  first.setDate(first.getDate() - day);
+  return first;
+}
+
+function renderCalendar() {
+  $('cal-month-label').textContent = calendarCursor.toLocaleDateString([], {month: 'long', year: 'numeric'});
+  var start = startOfCalendarGrid(calendarCursor);
+  var today = dayKey(new Date());
+  var html = '';
+  for (var i = 0; i < 42; i++) {
+    var current = new Date(start);
+    current.setDate(start.getDate() + i);
+    var key = dayKey(current);
+    var isOther = current.getMonth() !== calendarCursor.getMonth();
+    var items = calendarEventsForDay(key);
+    var classes = ['cal-day'];
+    if (isOther) classes.push('other');
+    if (key === today) classes.push('today');
+    if (key === calendarSelectedDay) classes.push('selected');
+    html += '<button class="' + classes.join(' ') + ' js-cal-day" data-day="' + key + '">'
+      + '<div class="cal-day-head"><div class="cal-day-num">' + current.getDate() + '</div>'
+      + '<div class="cal-day-badge">' + (items.length ? items.length + ' planned' : '') + '</div></div>'
+      + '<div class="cal-day-events">' + renderCalendarPreview(items) + '</div></button>';
+  }
+  $('cal-grid').innerHTML = html;
+  bindCalendarActions();
+}
+
+function renderCalendarPreview(items) {
+  if (!items.length) return '';
+  return items.slice(0, 3).map(function(item) {
+    var type = esc(item.event_type || 'event');
+    var label = item.all_day ? item.title : (calendarTimeLabel(item.start_at) + ' ' + item.title);
+    return '<div class="cal-pill ' + type + '">' + esc(label) + '</div>';
+  }).join('') + (items.length > 3 ? '<div class="cal-more">+' + (items.length - 3) + ' more</div>' : '');
+}
+
+function selectCalendarDay(day) {
+  calendarSelectedDay = day;
+  renderCalendar();
+  renderCalendarDay();
+}
+
+function renderCalendarDay() {
+  var date = dateFromDayKey(calendarSelectedDay);
+  $('cal-selected-label').textContent = date.toLocaleDateString([], {weekday: 'long', month: 'long', day: 'numeric'});
+  var items = calendarEventsForDay(calendarSelectedDay);
+  if (!items.length) {
+    $('cal-day-list').innerHTML = '<div class="cal-empty">Nothing is booked for this day yet.</div>';
+    return;
+  }
+  $('cal-day-list').innerHTML = items.map(function(item) {
+    var meta = item.all_day ? 'All day' : calendarTimeLabel(item.start_at) + ' - ' + calendarTimeLabel(item.end_at);
+    return '<div class="cal-event-card">'
+      + '<div class="cal-event-title">' + esc(item.title) + '</div>'
+      + '<div class="cal-event-meta">' + esc(item.event_type || 'event') + ' / ' + esc(item.status || 'scheduled') + ' / ' + esc(meta) + '</div>'
+      + (item.description ? '<div class="cal-event-desc">' + esc(item.description) + '</div>' : '')
+      + '<div class="dev-actions" style="margin-top:10px"><button class="mini-btn js-cal-edit" data-event-id="' + esc(item.id) + '">Edit</button></div>'
+      + '</div>';
+  }).join('');
+  bindCalendarActions();
+}
+
+function bindCalendarActions() {
+  document.querySelectorAll('#cal-grid .js-cal-day').forEach(function(el) {
+    el.addEventListener('click', function() {
+      selectCalendarDay(el.dataset.day);
+    });
+  });
+  document.querySelectorAll('#cal-day-list .js-cal-edit').forEach(function(el) {
+    el.addEventListener('click', function() {
+      openCalendarEditor(el.dataset.eventId);
+    });
+  });
+}
+
+function calendarEventsForDay(day) {
+  return (calendarEvents || []).filter(function(item) {
+    var start = eventDayKey(item.start_at);
+    var end = eventDayKey(item.end_at || item.start_at);
+    return day >= start && day <= end;
+  }).sort(function(a, b) {
+    return String(a.start_at || '').localeCompare(String(b.start_at || ''));
+  });
+}
+
+function changeCalendarMonth(delta) {
+  calendarCursor = new Date(calendarCursor.getFullYear(), calendarCursor.getMonth() + delta, 1, 12, 0, 0, 0);
+  refreshCalendar();
+}
+
+function jumpCalendarToday() {
+  var now = new Date();
+  calendarCursor = new Date(now.getFullYear(), now.getMonth(), 1, 12, 0, 0, 0);
+  calendarSelectedDay = dayKey(now);
+  refreshCalendar();
+}
+
+function defaultCalendarTimes(day) {
+  var date = day ? dateFromDayKey(day) : new Date();
+  var start = new Date(date.getFullYear(), date.getMonth(), date.getDate(), 9, 0, 0, 0);
+  var end = new Date(start);
+  end.setHours(end.getHours() + 1);
+  return {start: start, end: end};
+}
+
+function openCalendarEditor(id) {
+  editingCalendarId = id || null;
+  var item = null;
+  if (editingCalendarId) {
+    item = (calendarEvents || []).find(function(entry) { return entry.id === editingCalendarId; }) || null;
+  }
+  if (!item) {
+    var base = defaultCalendarTimes(calendarSelectedDay);
+    item = {
+      title: '',
+      description: '',
+      event_type: 'event',
+      status: 'scheduled',
+      start_at: base.start.toISOString(),
+      end_at: base.end.toISOString(),
+      all_day: false,
+      requires_ack: false
+    };
+  }
+  $('calendar-editor-title').textContent = editingCalendarId ? 'Edit Event' : 'New Event';
+  $('calendar-title').value = item.title || '';
+  $('calendar-description').value = item.description || '';
+  $('calendar-event-type').value = item.event_type || 'event';
+  $('calendar-status').value = item.status || 'scheduled';
+  $('calendar-start').value = toLocalInputValue(item.start_at);
+  $('calendar-end').value = toLocalInputValue(item.end_at || item.start_at);
+  $('calendar-all-day').checked = !!item.all_day;
+  $('calendar-requires-ack').checked = !!item.requires_ack;
+  $('calendar-delete-btn').disabled = !editingCalendarId;
+  $('calendar-editor-overlay').classList.remove('hidden');
+  $('calendar-title').focus();
+}
+
+function closeCalendarEditor() {
+  $('calendar-editor-overlay').classList.add('hidden');
+  editingCalendarId = null;
+}
+
+async function saveCalendarEvent() {
+  var title = $('calendar-title').value.trim();
+  if (!title) {
+    $('calendar-title').focus();
+    return;
+  }
+  var allDay = $('calendar-all-day').checked;
+  var start = inputToIso($('calendar-start').value, allDay, false);
+  var end = inputToIso($('calendar-end').value || $('calendar-start').value, allDay, true);
+  var payload = {
+    title: title,
+    description: $('calendar-description').value.trim(),
+    event_type: $('calendar-event-type').value,
+    status: $('calendar-status').value,
+    start_at: start,
+    end_at: end,
+    all_day: allDay,
+    source: 'local',
+    requires_ack: $('calendar-requires-ack').checked,
+    metadata_json: {surface: 'calendar-tab'}
+  };
+  var saved = editingCalendarId
+    ? await patchJson('/api/calendar/' + encodeURIComponent(editingCalendarId), payload)
+    : await post('/api/calendar', payload);
+  if (!saved) {
+    addMsg('gismo', 'I could not save that calendar event right now.');
+    return;
+  }
+  calendarSelectedDay = eventDayKey(saved.start_at);
+  calendarCursor = new Date(dateFromDayKey(calendarSelectedDay).getFullYear(), dateFromDayKey(calendarSelectedDay).getMonth(), 1, 12, 0, 0, 0);
+  closeCalendarEditor();
+  await refreshCalendar();
+}
+
+async function deleteCalendarEvent() {
+  if (!editingCalendarId) return;
+  var removed = await deleteJson('/api/calendar/' + encodeURIComponent(editingCalendarId));
+  if (!removed) {
+    addMsg('gismo', 'I could not remove that calendar event right now.');
+    return;
+  }
+  closeCalendarEditor();
+  await refreshCalendar();
+}
+
+function toLocalInputValue(iso) {
+  if (!iso) return '';
+  var dt = new Date(iso);
+  if (isNaN(dt.getTime())) return '';
+  dt.setMinutes(dt.getMinutes() - dt.getTimezoneOffset());
+  return dt.toISOString().slice(0, 16);
+}
+
+function inputToIso(value, allDay, endOfDay) {
+  var dt = value ? new Date(value) : new Date();
+  if (allDay) {
+    if (endOfDay) {
+      dt.setHours(23, 59, 0, 0);
+    } else {
+      dt.setHours(0, 0, 0, 0);
+    }
+  }
+  return dt.toISOString();
+}
+
+function eventDayKey(iso) {
+  var dt = new Date(iso);
+  if (isNaN(dt.getTime())) return '';
+  return dayKey(dt);
+}
+
+function dayKey(dt) {
+  var year = dt.getFullYear();
+  var month = String(dt.getMonth() + 1).padStart(2, '0');
+  var day = String(dt.getDate()).padStart(2, '0');
+  return year + '-' + month + '-' + day;
+}
+
+function dateFromDayKey(value) {
+  var parts = String(value || '').split('-');
+  return new Date(Number(parts[0]), Number(parts[1] || 1) - 1, Number(parts[2] || 1), 12, 0, 0, 0);
+}
+
+function calendarTimeLabel(iso) {
+  if (!iso) return 'Time TBD';
+  var dt = new Date(iso);
+  if (isNaN(dt.getTime())) return 'Time TBD';
+  return dt.toLocaleTimeString([], {hour: 'numeric', minute: '2-digit'});
 }
 
 // -- Devices -----------------------------------------------------------------
@@ -650,7 +1087,7 @@ function closeViewer() {
 
 // ── 5. Activity feed ──────────────────────────────────────────────────────────
 async function refreshActivity() {
-  var items = await get('/api/queue') || [];
+  var items = await get('/api/activity') || [];
   var el = $('act-scroll');
   if (!items.length) {
     el.innerHTML = '<div style="padding:14px;color:var(--dim);font-size:11px;text-align:center">Waiting for activity…</div>';
@@ -658,12 +1095,12 @@ async function refreshActivity() {
   }
   el.innerHTML = items.slice(0, 10).map(function(item) {
     var status = item.status || 'QUEUED';
-    var color = status === 'SUCCEEDED' ? 'green'
+    var color = item.color || (status === 'SUCCEEDED' ? 'green'
       : status === 'FAILED' ? 'red'
       : status === 'IN_PROGRESS' ? 'yellow'
-      : 'gray';
-    var label = item.command_text || ('queue/' + String(item.id || '').slice(0, 8));
-    var timestamp = item.updated_at || item.created_at || item.started_at || item.finished_at;
+      : 'gray');
+    var label = item.label || item.command_text || ('queue/' + String(item.id || '').slice(0, 8));
+    var timestamp = item.timestamp || item.updated_at || item.created_at || item.started_at || item.finished_at;
     return '<div class="ev c-' + color + '">'
       + '<div class="ev-lbl">' + esc(label) + '</div>'
       + '<div class="ev-meta"><span>' + esc(statusLabel(status)) + '</span><span>' + esc(stamp(timestamp)) + '</span></div>'
@@ -1273,6 +1710,31 @@ async function post(path, body) {
 }
 
 // ── Start ─────────────────────────────────────────────────────────────────────
+
+async function patchJson(path, body) {
+  try {
+    var r = await fetch(path, {
+      method: 'PATCH',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(body)
+    });
+    if (!r.ok) return null;
+    return await r.json();
+  } catch (e) {
+    return null;
+  }
+}
+
+async function deleteJson(path) {
+  try {
+    var r = await fetch(path, {method: 'DELETE'});
+    if (!r.ok) return null;
+    return await r.json();
+  } catch (e) {
+    return null;
+  }
+}
+
 init();
 </script>
 </body>

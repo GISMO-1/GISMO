@@ -18,6 +18,7 @@ _DEVICE_STREAM_RE = re.compile(r"^/api/devices/([^/]+)/stream$")
 _RUN_ID_RE = re.compile(r"^/api/runs/([^/?]+)$")
 _PLAN_ID_RE = re.compile(r"^/api/plans/([^/]+)$")
 _PLAN_ACTION_RE = re.compile(r"^/api/plans/([^/]+)/(approve|reject)$")
+_CAL_EVENT_RE = re.compile(r"^/api/calendar/([^/]+)$")
 
 
 def _json_response(handler: BaseHTTPRequestHandler, data: Any, status: int = 200) -> None:
@@ -158,6 +159,24 @@ def _make_handler(db_path: str) -> type[BaseHTTPRequestHandler]:
                     _json_response(self, web_api.scan_devices(db_path))
                 elif path == "/api/activity":
                     _json_response(self, web_api.get_activity_feed(db_path))
+                elif path == "/api/calendar":
+                    from urllib.parse import parse_qs, urlparse
+                    qs = parse_qs(urlparse(self.path).query)
+                    _json_response(
+                        self,
+                        web_api.list_calendar_events(
+                            db_path,
+                            start=qs.get("start", [None])[0],
+                            end=qs.get("end", [None])[0],
+                            day=qs.get("day", [None])[0],
+                            limit=int(qs.get("limit", ["500"])[0]),
+                        ),
+                    )
+                elif m := _CAL_EVENT_RE.match(path):
+                    try:
+                        _json_response(self, web_api.get_calendar_event(db_path, m.group(1)))
+                    except ValueError as exc:
+                        _error(self, str(exc), 404)
                 elif path == "/api/briefing":
                     _json_response(self, web_api.get_briefing(db_path))
                 elif m := _DEVICE_STREAM_RE.match(path):
@@ -236,6 +255,12 @@ def _make_handler(db_path: str) -> type[BaseHTTPRequestHandler]:
                     _json_response(self, web_api.remove_device(db_path, device_id))
                 elif path == "/api/queue/purge-failed":
                     _json_response(self, web_api.purge_failed(db_path))
+                elif path == "/api/calendar":
+                    body = _read_json_body(self)
+                    try:
+                        _json_response(self, web_api.create_calendar_event(db_path, body), 201)
+                    except ValueError as exc:
+                        _error(self, str(exc), 400)
                 elif path == "/api/daemon/pause":
                     _json_response(self, web_api.set_daemon_paused(db_path, True))
                 elif path == "/api/daemon/resume":
@@ -319,7 +344,13 @@ def _make_handler(db_path: str) -> type[BaseHTTPRequestHandler]:
         def do_PATCH(self) -> None:
             path = self.path.split("?")[0]
             try:
-                if m := _PLAN_ID_RE.match(path):
+                if m := _CAL_EVENT_RE.match(path):
+                    body = _read_json_body(self)
+                    try:
+                        _json_response(self, web_api.update_calendar_event(db_path, m.group(1), body))
+                    except ValueError as exc:
+                        _error(self, str(exc), 400 if "not found" not in str(exc).lower() else 404)
+                elif m := _PLAN_ID_RE.match(path):
                     plan_id = m.group(1)
                     body = _read_json_body(self)
                     try:
@@ -332,6 +363,19 @@ def _make_handler(db_path: str) -> type[BaseHTTPRequestHandler]:
                         _json_response(self, result)
                     except ValueError as exc:
                         _error(self, str(exc), 400)
+                else:
+                    _error(self, "Not found", 404)
+            except Exception as exc:
+                _error(self, str(exc), 500)
+
+        def do_DELETE(self) -> None:
+            path = self.path.split("?")[0]
+            try:
+                if m := _CAL_EVENT_RE.match(path):
+                    try:
+                        _json_response(self, web_api.delete_calendar_event(db_path, m.group(1)))
+                    except ValueError as exc:
+                        _error(self, str(exc), 404)
                 else:
                     _error(self, "Not found", 404)
             except Exception as exc:

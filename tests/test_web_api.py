@@ -6,6 +6,7 @@ import shutil
 import tempfile
 import time
 import unittest
+from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -502,6 +503,84 @@ class TestDevicesAndSettings(unittest.TestCase):
             self.assertTrue(any("Front Door" in item["label"] for item in feed))
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
+
+
+class TestCalendar(unittest.TestCase):
+    def test_calendar_crud_roundtrip(self) -> None:
+        tmp = Path("tmp") / f"web-api-{uuid4().hex}"
+        tmp.mkdir(parents=True, exist_ok=False)
+        try:
+            db = _make_db(str(tmp))
+            created = web_api.create_calendar_event(
+                db,
+                {
+                    "title": "Dinner",
+                    "description": "With family",
+                    "event_type": "personal",
+                    "status": "scheduled",
+                    "start_at": "2026-03-20T18:00:00",
+                    "end_at": "2026-03-20T19:30:00",
+                    "all_day": False,
+                    "source": "local",
+                    "requires_ack": True,
+                    "metadata_json": {"room": "kitchen"},
+                },
+            )
+            listed = web_api.list_calendar_events(db, day="2026-03-20")
+            self.assertEqual(len(listed), 1)
+            self.assertEqual(listed[0]["title"], "Dinner")
+
+            updated = web_api.update_calendar_event(
+                db,
+                created["id"],
+                {"title": "Family dinner", "status": "done"},
+            )
+            self.assertEqual(updated["title"], "Family dinner")
+            self.assertEqual(updated["status"], "done")
+
+            removed = web_api.delete_calendar_event(db, created["id"])
+            self.assertTrue(removed["ok"])
+            self.assertEqual(web_api.list_calendar_events(db, day="2026-03-20"), [])
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_chat_can_add_calendar_event(self) -> None:
+        tmp = Path("tmp") / f"web-api-{uuid4().hex}"
+        tmp.mkdir(parents=True, exist_ok=False)
+        try:
+            db = _make_db(str(tmp))
+            with mock.patch.object(web_api, "_append_chat_record", return_value=None):
+                data = web_api.chat_message(db, "remind me tomorrow at 3", [])
+            events = web_api.list_calendar_events(db)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+        self.assertEqual(data["mode"], "reply")
+        self.assertEqual(data["classification"], "operational")
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["event_type"], "reminder")
+
+    def test_chat_can_read_calendar_today(self) -> None:
+        tmp = Path("tmp") / f"web-api-{uuid4().hex}"
+        tmp.mkdir(parents=True, exist_ok=False)
+        try:
+            db = _make_db(str(tmp))
+            today = datetime.now().date().isoformat()
+            web_api.create_calendar_event(
+                db,
+                {
+                    "title": "Check in",
+                    "start_at": today + "T09:00:00",
+                    "end_at": today + "T10:00:00",
+                },
+            )
+            with mock.patch.object(web_api, "_append_chat_record", return_value=None):
+                data = web_api.chat_message(db, "what is on my calendar today", [])
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+        self.assertEqual(data["mode"], "reply")
+        self.assertIn("Check in", data["reply"])
 
 
 if __name__ == "__main__":

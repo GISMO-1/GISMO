@@ -16,11 +16,11 @@ import sys
 import time
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError, as_completed
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from gismo.core.models import ConnectedDevice, QueueStatus
+from gismo.core.models import CalendarEvent, ConnectedDevice, QueueStatus
 from gismo.core.state import StateStore
 from gismo.memory.store import list_namespaces, list_items_for_snapshot
 
@@ -38,6 +38,37 @@ def _dt(dt: datetime | None) -> str | None:
 
 def _status_val(status: Any) -> str:
     return status.value if hasattr(status, "value") else str(status)
+
+
+def _local_tz() -> timezone:
+    return datetime.now().astimezone().tzinfo or timezone.utc
+
+
+def _coerce_calendar_dt(value: Any) -> datetime:
+    if isinstance(value, datetime):
+        dt = value
+    elif isinstance(value, str):
+        text = value.strip()
+        if not text:
+            raise ValueError("datetime value is required")
+        if text.endswith("Z"):
+            text = text[:-1] + "+00:00"
+        dt = datetime.fromisoformat(text)
+    else:
+        raise ValueError("datetime value is required")
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=_local_tz())
+    return dt.astimezone(timezone.utc)
+
+
+def _calendar_event_day_bounds(day_value: str) -> tuple[datetime, datetime]:
+    try:
+        day = datetime.fromisoformat(day_value).date()
+    except ValueError as exc:
+        raise ValueError("day must be YYYY-MM-DD") from exc
+    start = datetime(day.year, day.month, day.day, tzinfo=_local_tz()).astimezone(timezone.utc)
+    end = (start + timedelta(days=1)) - timedelta(microseconds=1)
+    return start, end
 
 
 # ── status / worker ────────────────────────────────────────────────────────
@@ -421,7 +452,7 @@ def _build_chat_system(db_path: str) -> str:
         "I am GISMO, a local-first, policy-controlled personal AI assistant built by Mike Burns. "
         "I run entirely on your hardware — no cloud services, no silent actions, and a full audit trail of everything I do. "
         f"The operator's name is {name}. Address them as {name} when appropriate. "
-        "My job is to help you manage tasks, queues, plans, runs, and memory on your own machine. "
+        "My job is to help you manage tasks, queues, plans, runs, memory, and your local calendar on your own machine. "
         "I speak directly and concisely. I do not output JSON unless you ask for it. "
         "I never take actions outside what your operator policy explicitly permits."
     )
@@ -438,6 +469,8 @@ _CHAT_INFORMATIONAL_RE = re.compile(
     r"^(who|what|when|where|why|how)\b|"
     r"\b(tell me|explain|joke|time|date|weather|status|who are you|what can you do)\b"
 )
+_CHAT_CALENDAR_READ_RE = re.compile(r"\b(calendar|agenda|schedule)\b")
+_CHAT_CALENDAR_CREATE_RE = re.compile(r"^(remind me|add an event|add event|schedule)\b", re.IGNORECASE)
 
 
 def _classify_chat_request(message: str) -> str:
@@ -548,6 +581,130 @@ def _request_chat_plan(
             state_store.close()
 
 
+def _format_event_time(value: str | None) -> str:
+    if not value:
+        return "later"
+    dt = _coerce_calendar_dt(value).astimezone(_local_tz())
+    return dt.strftime("%#I:%M %p") if sys.platform == "win32" else dt.strftime("%-I:%M %p")
+
+
+def _calendar_reply_for_day(db_path: str, day_value: str, *, label: str) -> str:
+    items = list_calendar_events(db_path, day=day_value)
+    if not items:
+        return f"Your calendar is clear {label}."
+    parts = []
+    for item in items[:6]:
+        if item["all_day"]:
+            parts.append(f"{item['title']} (all day)")
+        else:
+            parts.append(f"{item['title']} at {_format_event_time(item['start_at'])}")
+    extra = f" There are {len(items) - 6} more." if len(items) > 6 else ""
+    return f"On your calendar {label}: {_join_human(parts)}.{extra}"
+
+
+def _resolve_relative_day(token: str) -> datetime:
+    today = datetime.now(_local_tz()).date()
+    if token == "today":
+        target = today
+    elif token == "tomorrow":
+        target = today + timedelta(days=1)
+    else:
+        names = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
+        index = names.index(token)
+        delta = (index - today.weekday()) % 7
+        if delta == 0:
+            delta = 7
+        target = today + timedelta(days=delta)
+    return datetime(target.year, target.month, target.day, tzinfo=_local_tz())
+
+
+def _combine_day_and_time(day_start: datetime, time_token: str) -> datetime:
+    match = re.match(r"^\s*(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\s*$", time_token, re.IGNORECASE)
+    if not match:
+        raise ValueError("time is required")
+    hour = int(match.group(1))
+    minute = int(match.group(2) or 0)
+    meridiem = (match.group(3) or "").lower()
+    if meridiem == "pm" and hour < 12:
+        hour += 12
+    if meridiem == "am" and hour == 12:
+        hour = 0
+    if not meridiem and hour <= 7:
+        hour += 12
+    return day_start.replace(hour=hour % 24, minute=minute, second=0, microsecond=0)
+
+
+def _parse_calendar_chat_create(message: str) -> dict[str, Any] | None:
+    normalized = " ".join((message or "").strip().split())
+    lowered = normalized.lower()
+    match = re.search(
+        r"(?:remind me|add an event|add event|schedule)(?: to)?\s+(?P<title>.+?)\s+(?:on|for)?\s*(?P<day>tomorrow|today|monday|tuesday|wednesday|thursday|friday|saturday|sunday)(?:\s+at\s+(?P<time>[0-9]{1,2}(?::[0-9]{2})?\s*(?:am|pm)?))?$",
+        lowered,
+        re.IGNORECASE,
+    )
+    title = ""
+    day_token = ""
+    time_token = "9 AM"
+    if match:
+        title = normalized[match.start("title"):match.end("title")].strip(" .")
+        day_token = match.group("day").lower()
+        time_token = (match.group("time") or "9 AM").strip()
+    else:
+        fallback = re.search(
+            r"(?:remind me|add an event|add event|schedule)(?:\s+for)?\s+(?P<day>tomorrow|today|monday|tuesday|wednesday|thursday|friday|saturday|sunday)(?:\s+at\s+(?P<time>[0-9]{1,2}(?::[0-9]{2})?\s*(?:am|pm)?))?$",
+            lowered,
+            re.IGNORECASE,
+        )
+        if not fallback:
+            return None
+        day_token = fallback.group("day").lower()
+        time_token = (fallback.group("time") or "9 AM").strip()
+
+    title = re.sub(r"^(me to|me)\s+", "", title, flags=re.IGNORECASE).strip()
+    if not title:
+        title = "Reminder" if lowered.startswith("remind me") else "Event"
+    start_local = _combine_day_and_time(_resolve_relative_day(day_token), time_token)
+    return {
+        "title": title[:1].upper() + title[1:],
+        "description": "",
+        "event_type": "reminder" if lowered.startswith("remind me") else "event",
+        "status": "scheduled",
+        "start_at": start_local.isoformat(),
+        "end_at": (start_local + timedelta(hours=1)).isoformat(),
+        "all_day": False,
+        "source": "chat",
+        "source_ref": message,
+        "requires_ack": lowered.startswith("remind me"),
+        "metadata_json": {"created_by": "chat"},
+    }
+
+
+def _handle_calendar_chat(db_path: str, message: str) -> dict[str, Any] | None:
+    lowered = " ".join((message or "").strip().lower().split())
+    today = datetime.now(_local_tz()).date()
+    if re.search(r"\bwhat(?:'s| is)? on my calendar today\b", lowered) or re.search(r"\b(calendar|schedule|agenda) today\b", lowered):
+        reply = _calendar_reply_for_day(db_path, today.isoformat(), label="today")
+        _append_chat_record(message, reply)
+        return {"reply": reply, "mode": "reply", "classification": "informational"}
+    if re.search(r"\bwhat(?:'s| is)? on my calendar tomorrow\b", lowered) or re.search(r"\b(calendar|schedule|agenda) tomorrow\b", lowered):
+        reply = _calendar_reply_for_day(db_path, (today + timedelta(days=1)).isoformat(), label="tomorrow")
+        _append_chat_record(message, reply)
+        return {"reply": reply, "mode": "reply", "classification": "informational"}
+    if not _CHAT_CALENDAR_CREATE_RE.search(message or ""):
+        return None
+    payload = _parse_calendar_chat_create(message)
+    if payload is None:
+        reply = "I can add that to your calendar. Tell me the day and time, like tomorrow at 3 PM."
+        _append_chat_record(message, reply)
+        return {"reply": reply, "mode": "clarify", "classification": "ambiguous"}
+    event = create_calendar_event(db_path, payload)
+    local_start = _coerce_calendar_dt(event["start_at"]).astimezone(_local_tz())
+    when = local_start.strftime("%#I:%M %p on %A") if sys.platform == "win32" else local_start.strftime("%-I:%M %p on %A")
+    reply = f"Added {event['title']} to your calendar for {when}."
+    _append_chat_record(message, reply)
+    return {"reply": reply, "mode": "reply", "classification": "operational", "calendar_event": event}
+
+
 def chat_message(
     db_path: str,
     message: str,
@@ -555,6 +712,10 @@ def chat_message(
 ) -> dict[str, Any]:
     """Route chat requests into direct reply, clarification, or approval-ready plans."""
     from gismo.llm.ollama import ollama_freeform_chat, OllamaError
+
+    calendar_reply = _handle_calendar_chat(db_path, message)
+    if calendar_reply is not None:
+        return calendar_reply
 
     classification = _classify_chat_request(message)
 
@@ -1147,6 +1308,140 @@ def save_settings(
     return get_settings(db_path)
 
 
+def _serialize_calendar_event(event: CalendarEvent) -> dict[str, Any]:
+    return {
+        "id": event.id,
+        "title": event.title,
+        "description": event.description,
+        "event_type": event.event_type,
+        "status": event.status,
+        "start_at": _dt(event.start_at),
+        "end_at": _dt(event.end_at),
+        "all_day": bool(event.all_day),
+        "source": event.source,
+        "source_ref": event.source_ref,
+        "requires_ack": bool(event.requires_ack),
+        "metadata_json": event.metadata_json,
+        "created_at": _dt(event.created_at),
+        "updated_at": _dt(event.updated_at),
+    }
+
+
+def _calendar_event_from_payload(
+    payload: dict[str, Any],
+    *,
+    existing: CalendarEvent | None = None,
+) -> CalendarEvent:
+    title = str(payload.get("title") or (existing.title if existing else "")).strip()
+    if not title:
+        raise ValueError("title is required")
+
+    start_value = payload.get("start_at", existing.start_at if existing else None)
+    start_at = _coerce_calendar_dt(start_value)
+    end_value = payload.get("end_at", existing.end_at if existing else None)
+    end_at = _coerce_calendar_dt(end_value) if end_value else None
+    all_day = bool(payload.get("all_day", existing.all_day if existing else False))
+    if all_day and end_at is None:
+        end_at = start_at + timedelta(days=1) - timedelta(minutes=1)
+    if end_at is not None and end_at < start_at:
+        raise ValueError("end_at must be after start_at")
+
+    metadata = payload.get("metadata_json", existing.metadata_json if existing else {})
+    if metadata is None:
+        metadata = {}
+    if not isinstance(metadata, dict):
+        raise ValueError("metadata_json must be an object")
+
+    return CalendarEvent(
+        id=existing.id if existing else str(payload.get("id") or CalendarEvent(title=title, start_at=start_at).id),
+        title=title,
+        description=str(payload.get("description", existing.description if existing else "") or ""),
+        event_type=str(payload.get("event_type", existing.event_type if existing else "event") or "event"),
+        status=str(payload.get("status", existing.status if existing else "scheduled") or "scheduled"),
+        start_at=start_at,
+        end_at=end_at,
+        all_day=all_day,
+        source=str(payload.get("source", existing.source if existing else "local") or "local"),
+        source_ref=(
+            str(payload.get("source_ref")).strip()
+            if payload.get("source_ref") is not None
+            else existing.source_ref if existing else None
+        ),
+        requires_ack=bool(payload.get("requires_ack", existing.requires_ack if existing else False)),
+        metadata_json=metadata,
+        created_at=existing.created_at if existing else datetime.now(timezone.utc),
+    )
+
+
+def list_calendar_events(
+    db_path: str,
+    *,
+    start: str | None = None,
+    end: str | None = None,
+    day: str | None = None,
+    limit: int = 500,
+) -> list[dict[str, Any]]:
+    start_at = _coerce_calendar_dt(start) if start else None
+    end_at = _coerce_calendar_dt(end) if end else None
+    if day:
+        start_at, end_at = _calendar_event_day_bounds(day)
+    with StateStore(db_path) as store:
+        events = store.list_calendar_events(start_at=start_at, end_at=end_at, limit=limit)
+    return [_serialize_calendar_event(event) for event in events]
+
+
+def get_calendar_event(db_path: str, event_id: str) -> dict[str, Any]:
+    with StateStore(db_path) as store:
+        event = store.get_calendar_event(event_id)
+    if event is None:
+        raise ValueError(f"Calendar event not found: {event_id}")
+    return _serialize_calendar_event(event)
+
+
+def create_calendar_event(db_path: str, payload: dict[str, Any]) -> dict[str, Any]:
+    event = _calendar_event_from_payload(payload)
+    with StateStore(db_path) as store:
+        stored = store.upsert_calendar_event(event)
+        store.record_event(
+            actor="web",
+            event_type="calendar_created",
+            message=f"Added {stored.title}",
+            json_payload={"calendar_event_id": stored.id},
+        )
+    return _serialize_calendar_event(stored)
+
+
+def update_calendar_event(db_path: str, event_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    with StateStore(db_path) as store:
+        existing = store.get_calendar_event(event_id)
+        if existing is None:
+            raise ValueError(f"Calendar event not found: {event_id}")
+        stored = store.upsert_calendar_event(_calendar_event_from_payload(payload, existing=existing))
+        store.record_event(
+            actor="web",
+            event_type="calendar_updated",
+            message=f"Updated {stored.title}",
+            json_payload={"calendar_event_id": stored.id},
+        )
+    return _serialize_calendar_event(stored)
+
+
+def delete_calendar_event(db_path: str, event_id: str) -> dict[str, Any]:
+    with StateStore(db_path) as store:
+        event = store.get_calendar_event(event_id)
+        if event is None:
+            raise ValueError(f"Calendar event not found: {event_id}")
+        deleted = store.delete_calendar_event(event_id)
+        if deleted:
+            store.record_event(
+                actor="web",
+                event_type="calendar_deleted",
+                message=f"Removed {event.title}",
+                json_payload={"calendar_event_id": event_id},
+            )
+    return {"ok": deleted, "id": event_id}
+
+
 # ── Activity feed ──────────────────────────────────────────────────────────
 
 
@@ -1166,13 +1461,14 @@ def get_activity_feed(db_path: str, limit: int = 40) -> list[dict[str, Any]]:
         recent_events = store.list_events(limit=20)
 
     for event in recent_events:
-        if not str(event.event_type or "").startswith("device_"):
+        event_type = str(event.event_type or "")
+        if not (event_type.startswith("device_") or event_type.startswith("calendar_")):
             continue
         events.append({
-            "type": "device",
+            "type": "calendar" if event_type.startswith("calendar_") else "device",
             "label": event.message,
-            "status": "DEVICE",
-            "color": "teal",
+            "status": "CALENDAR" if event_type.startswith("calendar_") else "DEVICE",
+            "color": "blue" if event_type.startswith("calendar_") else "teal",
             "timestamp": _dt(event.ts),
         })
 

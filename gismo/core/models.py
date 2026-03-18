@@ -242,6 +242,24 @@ class ConnectedDevice:
 
 
 @dataclass
+class CalendarEvent:
+    title: str
+    start_at: datetime
+    event_type: str = "event"
+    status: str = "scheduled"
+    id: str = field(default_factory=lambda: str(uuid4()))
+    description: str = ""
+    end_at: Optional[datetime] = None
+    all_day: bool = False
+    source: str = "local"
+    source_ref: Optional[str] = None
+    requires_ack: bool = False
+    metadata_json: Dict[str, Any] = field(default_factory=dict)
+    created_at: datetime = field(default_factory=_utc_now)
+    updated_at: datetime = field(default_factory=_utc_now)
+
+
+@dataclass
 class DaemonHeartbeat:
     pid: int
     started_at: datetime

@@ -14,6 +14,7 @@ from gismo.core.models import (
     AgentSession,
     AgentSessionStatus,
     AgentRole,
+    CalendarEvent,
     DaemonHeartbeat,
     ConnectedDevice,
     Event,
@@ -324,6 +325,38 @@ class StateStore:
                         created_at TEXT NOT NULL,
                         updated_at TEXT NOT NULL
                     )
+                    """
+                )
+                cursor.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS calendar_events (
+                        id TEXT PRIMARY KEY,
+                        title TEXT NOT NULL,
+                        description TEXT NOT NULL DEFAULT '',
+                        event_type TEXT NOT NULL,
+                        status TEXT NOT NULL,
+                        start_at TEXT NOT NULL,
+                        end_at TEXT NULL,
+                        all_day INTEGER NOT NULL DEFAULT 0,
+                        source TEXT NOT NULL,
+                        source_ref TEXT NULL,
+                        requires_ack INTEGER NOT NULL DEFAULT 0,
+                        metadata_json TEXT NOT NULL DEFAULT '{}',
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL
+                    )
+                    """
+                )
+                cursor.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_calendar_events_start_at
+                    ON calendar_events (start_at)
+                    """
+                )
+                cursor.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_calendar_events_updated_at
+                    ON calendar_events (updated_at)
                     """
                 )
                 cursor.execute(
@@ -695,6 +728,101 @@ class StateStore:
             cursor = connection.execute(
                 "DELETE FROM devices WHERE id = ?",
                 (device_id,),
+            )
+            connection.commit()
+        return cursor.rowcount > 0
+
+    def upsert_calendar_event(self, event: CalendarEvent) -> CalendarEvent:
+        now = _utc_now().isoformat()
+        created_at = event.created_at.isoformat() if event.created_at else now
+        updated_at = now
+        with self._connection() as connection:
+            connection.execute(
+                """
+                INSERT INTO calendar_events (
+                    id, title, description, event_type, status, start_at, end_at,
+                    all_day, source, source_ref, requires_ack, metadata_json,
+                    created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    title = excluded.title,
+                    description = excluded.description,
+                    event_type = excluded.event_type,
+                    status = excluded.status,
+                    start_at = excluded.start_at,
+                    end_at = excluded.end_at,
+                    all_day = excluded.all_day,
+                    source = excluded.source,
+                    source_ref = excluded.source_ref,
+                    requires_ack = excluded.requires_ack,
+                    metadata_json = excluded.metadata_json,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    event.id,
+                    event.title,
+                    event.description,
+                    event.event_type,
+                    event.status,
+                    event.start_at.isoformat(),
+                    event.end_at.isoformat() if event.end_at else None,
+                    int(bool(event.all_day)),
+                    event.source,
+                    event.source_ref,
+                    int(bool(event.requires_ack)),
+                    json.dumps(event.metadata_json),
+                    created_at,
+                    updated_at,
+                ),
+            )
+            connection.commit()
+        stored = self.get_calendar_event(event.id)
+        if stored is None:
+            raise RuntimeError(f"Failed to store calendar event {event.id}")
+        return stored
+
+    def list_calendar_events(
+        self,
+        *,
+        start_at: Optional[datetime] = None,
+        end_at: Optional[datetime] = None,
+        limit: int = 500,
+    ) -> list[CalendarEvent]:
+        clauses: list[str] = []
+        params: list[object] = []
+        if start_at is not None:
+            clauses.append("COALESCE(end_at, start_at) >= ?")
+            params.append(start_at.isoformat())
+        if end_at is not None:
+            clauses.append("start_at <= ?")
+            params.append(end_at.isoformat())
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        with self._connection() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT * FROM calendar_events
+                {where}
+                ORDER BY start_at ASC, id ASC
+                LIMIT ?
+                """,
+                tuple(params + [limit]),
+            ).fetchall()
+        return [self._row_to_calendar_event(row) for row in rows]
+
+    def get_calendar_event(self, event_id: str) -> Optional[CalendarEvent]:
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM calendar_events WHERE id = ?",
+                (event_id,),
+            ).fetchone()
+        return self._row_to_calendar_event(row) if row else None
+
+    def delete_calendar_event(self, event_id: str) -> bool:
+        with self._connection() as connection:
+            cursor = connection.execute(
+                "DELETE FROM calendar_events WHERE id = ?",
+                (event_id,),
             )
             connection.commit()
         return cursor.rowcount > 0
@@ -2025,6 +2153,24 @@ class StateStore:
             brand=row["brand"],
             rtsp_url=row["rtsp_url"],
             snapshot_url=row["snapshot_url"],
+            metadata_json=json.loads(row["metadata_json"]) if row["metadata_json"] else {},
+            created_at=_parse_dt(row["created_at"]),
+            updated_at=_parse_dt(row["updated_at"]),
+        )
+
+    def _row_to_calendar_event(self, row: sqlite3.Row) -> CalendarEvent:
+        return CalendarEvent(
+            id=row["id"],
+            title=row["title"],
+            description=row["description"] or "",
+            event_type=row["event_type"],
+            status=row["status"],
+            start_at=_parse_dt(row["start_at"]),
+            end_at=_parse_dt(row["end_at"]) if row["end_at"] else None,
+            all_day=bool(row["all_day"]),
+            source=row["source"],
+            source_ref=row["source_ref"],
+            requires_ack=bool(row["requires_ack"]),
             metadata_json=json.loads(row["metadata_json"]) if row["metadata_json"] else {},
             created_at=_parse_dt(row["created_at"]),
             updated_at=_parse_dt(row["updated_at"]),

@@ -278,6 +278,110 @@ class TestOnboardingAndHealth(unittest.TestCase):
         self.assertIn("internet_latency_ms", data)
 
 
+class TestChatMessage(unittest.TestCase):
+    def test_informational_request_replies_directly(self) -> None:
+        tmp = Path("tmp") / f"web-api-{uuid4().hex}"
+        tmp.mkdir(parents=True, exist_ok=False)
+        try:
+            db = _make_db(str(tmp))
+            with mock.patch("gismo.llm.ollama.ollama_freeform_chat", return_value="Hello there"), mock.patch.object(
+                web_api,
+                "_append_chat_record",
+                return_value=None,
+            ):
+                data = web_api.chat_message(db, "who are you", [])
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+        self.assertEqual(data["mode"], "reply")
+        self.assertEqual(data["classification"], "informational")
+        self.assertEqual(data["reply"], "Hello there")
+
+    def test_ambiguous_request_asks_for_clarification(self) -> None:
+        tmp = Path("tmp") / f"web-api-{uuid4().hex}"
+        tmp.mkdir(parents=True, exist_ok=False)
+        try:
+            db = _make_db(str(tmp))
+            with mock.patch("gismo.llm.ollama.ollama_freeform_chat") as chat_mock, mock.patch.object(
+                web_api,
+                "_append_chat_record",
+                return_value=None,
+            ):
+                data = web_api.chat_message(db, "can you help me with something", [])
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+        self.assertEqual(data["mode"], "clarify")
+        self.assertEqual(data["classification"], "ambiguous")
+        chat_mock.assert_not_called()
+
+    def test_operational_request_creates_pending_plan(self) -> None:
+        plan = {
+            "intent": "operate",
+            "actions": [
+                {
+                    "type": "enqueue",
+                    "command": "echo: scanning devices",
+                    "timeout_seconds": 30,
+                    "retries": 0,
+                    "why": "scan your network for devices",
+                    "risk": "low",
+                }
+            ],
+            "notes": [],
+        }
+        risk = {"risk_level": "LOW", "risk_flags": [], "rationale": ["safe"]}
+        explain = {"summary": "intent=operate actions=1"}
+
+        tmp = Path("tmp") / f"web-api-{uuid4().hex}"
+        tmp.mkdir(parents=True, exist_ok=False)
+        try:
+            db = _make_db(str(tmp))
+            with mock.patch.object(web_api, "_request_chat_plan", return_value=(plan, risk, explain)), mock.patch.object(
+                web_api,
+                "_append_chat_record",
+                return_value=None,
+            ):
+                data = web_api.chat_message(db, "scan for devices", [])
+            with StateStore(db) as store:
+                pending = store.list_pending_plans()
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+        self.assertEqual(data["mode"], "plan")
+        self.assertEqual(data["classification"], "operational")
+        self.assertEqual(len(pending), 1)
+        self.assertEqual(pending[0].user_text, "scan for devices")
+        self.assertEqual(data["plan_steps"], ["Scan your network for devices"])
+
+    def test_request_chat_plan_includes_saved_device_context(self) -> None:
+        tmp = Path("tmp") / f"web-api-{uuid4().hex}"
+        tmp.mkdir(parents=True, exist_ok=False)
+        captured: dict[str, object] = {}
+
+        def _fake_request(
+            db_path: str,
+            user_text: str,
+            **kwargs: object,
+        ) -> tuple[dict, object, object, object, object, object]:
+            captured["db_path"] = db_path
+            captured["user_text"] = user_text
+            fake_risk = SimpleNamespace(risk_level="LOW", risk_flags=[], rationale=[])
+            fake_explain = SimpleNamespace(to_dict=lambda: {"summary": "ok"})
+            return {"intent": "operate", "actions": [], "notes": []}, fake_risk, fake_explain, None, None, {}
+
+        try:
+            db = _make_db(str(tmp))
+            web_api.add_device(db, "192.168.1.25", "Front Door", "camera", "Tapo", open_ports=[554])
+            with mock.patch("gismo.cli.main._request_llm_plan", side_effect=_fake_request):
+                web_api._request_chat_plan(db, "check the cameras")
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+        planner_text = str(captured["user_text"])
+        self.assertIn("Saved devices:", planner_text)
+        self.assertIn("Front Door", planner_text)
+        self.assertIn("device: check cameras", planner_text)
+
+
 class TestDevicesAndSettings(unittest.TestCase):
     def test_scan_devices_times_out_and_returns_partial_results(self) -> None:
         tmp = Path("tmp") / f"web-api-{uuid4().hex}"
@@ -326,6 +430,9 @@ class TestDevicesAndSettings(unittest.TestCase):
             listed = web_api.list_devices(db)
             self.assertEqual(len(listed), 1)
             self.assertEqual(listed[0]["ip"], "192.168.1.25")
+            self.assertIn("check", listed[0]["actions"])
+            self.assertIn("view", listed[0]["actions"])
+            self.assertFalse(listed[0]["needs_setup"])
 
             with mock.patch("gismo.web.api.shutil.which", return_value=None):
                 payload = web_api.get_device_stream_payload(db, added["id"])
@@ -355,6 +462,44 @@ class TestDevicesAndSettings(unittest.TestCase):
             )
             self.assertEqual(updated["operator_name"], "Mike")
             self.assertEqual(updated["voice"], voice_id)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_light_device_flags_setup_need(self) -> None:
+        tmp = Path("tmp") / f"web-api-{uuid4().hex}"
+        tmp.mkdir(parents=True, exist_ok=False)
+        try:
+            db = _make_db(str(tmp))
+            web_api.add_device(
+                db,
+                "192.168.1.40",
+                "Kitchen Lamp",
+                "light",
+                "FEIT",
+                open_ports=[6668],
+            )
+            listed = web_api.list_devices(db)
+            self.assertEqual(len(listed), 1)
+            self.assertIn("turn_on", listed[0]["actions"])
+            self.assertTrue(listed[0]["needs_setup"])
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_activity_feed_includes_device_events(self) -> None:
+        tmp = Path("tmp") / f"web-api-{uuid4().hex}"
+        tmp.mkdir(parents=True, exist_ok=False)
+        try:
+            db = _make_db(str(tmp))
+            with StateStore(db) as store:
+                store.record_event(
+                    actor="worker",
+                    event_type="device_check",
+                    message="I checked Front Door. Offline: Front Door.",
+                    json_payload={"target": "front door"},
+                )
+            feed = web_api.get_activity_feed(db)
+            self.assertTrue(any(item["type"] == "device" for item in feed))
+            self.assertTrue(any("Front Door" in item["label"] for item in feed))
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 

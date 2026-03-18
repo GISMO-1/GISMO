@@ -43,6 +43,13 @@ def run_operator_plan(
 
 
 class OperatorShellTest(unittest.TestCase):
+    def test_device_command_parsing(self) -> None:
+        plan = parse_command("device: turn on kitchen lights")
+        self.assertEqual(plan["mode"], "single")
+        self.assertEqual(plan["steps"][0]["tool_name"], "device_control")
+        self.assertEqual(plan["steps"][0]["input_json"]["action"], "turn_on")
+        self.assertEqual(plan["steps"][0]["input_json"]["target"], "kitchen lights")
+
     def test_shell_command_policy_gating(self) -> None:
         plan = parse_command("shell: echo hello")
         tools = required_tools(plan)

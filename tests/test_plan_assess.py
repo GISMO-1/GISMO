@@ -36,6 +36,12 @@ class PlanRiskTest(unittest.TestCase):
         self.assertIn("memory_modify", risk.risk_flags)
         self.assertNotIn("writes", risk.risk_flags)
 
+    def test_device_power_action_is_high_risk(self) -> None:
+        actions = [{"type": "enqueue", "command": "device: turn on kitchen lights"}]
+        risk = classify_plan_risk(actions)
+        self.assertEqual(risk.risk_level, "HIGH")
+        self.assertIn("writes", risk.risk_flags)
+
 
 if __name__ == "__main__":
     unittest.main()

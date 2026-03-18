@@ -1,5 +1,5 @@
 {
-  "allowed_tools": ["echo", "read_file", "list_dir", "memory.read"],
+  "allowed_tools": ["echo", "read_file", "list_dir", "memory.read", "device_control"],
   "fs": { "base_dir": "." },
   "memory": {
     "allow": {

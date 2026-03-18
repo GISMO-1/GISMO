@@ -116,6 +116,16 @@ body{background:var(--bg);color:var(--text);font-family:var(--font);font-size:13
 .bbl-g{background:var(--panel);border:1px solid var(--border)}
 .bbl-u{background:var(--accent-dim);border:1px solid var(--accent-glow)}
 .msg-ts{font-size:10px;color:var(--dim);margin-top:4px}
+.chat-plan-list{display:flex;flex-direction:column;gap:6px;margin-top:10px}
+.chat-plan-step{font-size:12px;color:var(--text);padding-left:14px;position:relative}
+.chat-plan-step:before{content:'>';position:absolute;left:0;color:var(--accent)}
+.chat-plan-note{font-size:11px;color:var(--dim);margin-top:10px}
+.chat-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}
+.chat-action-btn{padding:7px 11px;border-radius:8px;border:1px solid var(--border);background:transparent;color:var(--text);font-family:var(--font);font-size:11px;cursor:pointer}
+.chat-action-btn:hover{border-color:var(--accent);color:var(--accent)}
+.chat-action-btn[disabled]{opacity:.45;cursor:default;border-color:var(--border);color:var(--dim)}
+.chat-action-primary{background:var(--accent);border-color:var(--accent);color:var(--bg);font-weight:700}
+.chat-action-primary:hover{color:var(--bg);opacity:.9}
 .typing-dots{display:flex;gap:4px;padding:2px 0}
 .td{width:7px;height:7px;border-radius:50%;background:var(--dim);animation:tdp 1.2s infinite}
 .td:nth-child(2){animation-delay:.2s}.td:nth-child(3){animation-delay:.4s}
@@ -379,6 +389,8 @@ var ttsEnabled    = true;   // operator can toggle via mic mute concept
 var currentAudio  = null;
 var lastScan      = [];
 var scanController = null;
+var pendingPlanId = null;
+var pendingPlanActions = null;
 
 // -- Boot --------------------------------------------------------------------
 async function init() {
@@ -660,32 +672,126 @@ async function refreshActivity() {
 }
 
 // ── 1. Chat bubbles ───────────────────────────────────────────────────────────
-function addMsg(role, text) {
+function createMsgShell(role) {
   var feed = $('chat-feed');
   var now  = new Date().toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'});
   var isG  = (role === 'gismo');
   var div  = document.createElement('div');
+  var av   = document.createElement('div');
+  var body = document.createElement('div');
+  var ts   = document.createElement('div');
+
   div.className = 'msg msg-' + role;
-  div.innerHTML =
-    '<div class="msg-av ' + (isG ? 'av-g' : 'av-u') + '">' + (isG ? 'AI' : 'ME') + '</div>'
-    + '<div class="msg-body">'
-    + '<div class="bubble ' + (isG ? 'bbl-g' : 'bbl-u') + '">' + esc(text) + '</div>'
-    + '<div class="msg-ts">' + now + '</div>'
-    + '</div>';
+  av.className = 'msg-av ' + (isG ? 'av-g' : 'av-u');
+  av.textContent = isG ? 'AI' : 'ME';
+  body.className = 'msg-body';
+  ts.className = 'msg-ts';
+  ts.textContent = now;
+
+  div.appendChild(av);
+  div.appendChild(body);
   feed.appendChild(div);
-  feed.scrollTop = feed.scrollHeight;
-  return div;
+  return {root: div, body: body, ts: ts, bubbleClass: 'bubble ' + (isG ? 'bbl-g' : 'bbl-u')};
 }
 
-function addTyping() {
+function finalizeMsg(shell) {
+  shell.body.appendChild(shell.ts);
   var feed = $('chat-feed');
-  var div  = document.createElement('div');
-  div.className = 'msg msg-gismo';
-  div.id = 'typing-msg';
-  div.innerHTML = '<div class="msg-av av-g">AI</div>'
-    + '<div class="msg-body"><div class="bubble bbl-g">...</div></div>';
-  feed.appendChild(div);
   feed.scrollTop = feed.scrollHeight;
+  return shell.root;
+}
+
+function addMsg(role, text) {
+  var shell = createMsgShell(role);
+  var bubble = document.createElement('div');
+  bubble.className = shell.bubbleClass;
+  bubble.textContent = text;
+  shell.body.appendChild(bubble);
+  return finalizeMsg(shell);
+}
+
+function setMsgText(msgEl, text) {
+  if (!msgEl) return;
+  var bubble = msgEl.querySelector('.bubble');
+  if (bubble) bubble.textContent = text;
+}
+
+function addPlanMsg(data) {
+  if (pendingPlanActions) disablePendingPlanButtons();
+
+  var shell = createMsgShell('gismo');
+  var bubble = document.createElement('div');
+  bubble.className = shell.bubbleClass;
+
+  var summary = document.createElement('div');
+  summary.textContent = data.reply || 'I have a plan ready. Proceed?';
+  bubble.appendChild(summary);
+
+  var steps = Array.isArray(data.plan_steps) ? data.plan_steps : [];
+  if (steps.length) {
+    var list = document.createElement('div');
+    list.className = 'chat-plan-list';
+    steps.forEach(function(step) {
+      var row = document.createElement('div');
+      row.className = 'chat-plan-step';
+      row.textContent = step;
+      list.appendChild(row);
+    });
+    bubble.appendChild(list);
+  }
+
+  var notes = Array.isArray(data.plan_notes) ? data.plan_notes : [];
+  if (notes.length) {
+    var note = document.createElement('div');
+    note.className = 'chat-plan-note';
+    note.textContent = notes[0];
+    bubble.appendChild(note);
+  }
+
+  var actions = document.createElement('div');
+  actions.className = 'chat-actions';
+
+  var approve = document.createElement('button');
+  approve.className = 'chat-action-btn chat-action-primary';
+  approve.textContent = 'Proceed';
+  approve.onclick = function() { submitPendingPlanDecision('approve', 'Proceed'); };
+
+  var reject = document.createElement('button');
+  reject.className = 'chat-action-btn';
+  reject.textContent = 'Cancel';
+  reject.onclick = function() { submitPendingPlanDecision('reject', 'Cancel'); };
+
+  actions.appendChild(approve);
+  actions.appendChild(reject);
+  bubble.appendChild(actions);
+  shell.body.appendChild(bubble);
+
+  pendingPlanId = data.plan_id || null;
+  pendingPlanActions = actions;
+  return finalizeMsg(shell);
+}
+
+function addTyping(label) {
+  var shell = createMsgShell('gismo');
+  var bubble = document.createElement('div');
+  bubble.className = shell.bubbleClass;
+  bubble.textContent = label || '...';
+  shell.root.id = 'typing-msg';
+  shell.body.appendChild(bubble);
+  finalizeMsg(shell);
+}
+
+function disablePendingPlanButtons() {
+  if (!pendingPlanActions) return;
+  pendingPlanActions.querySelectorAll('button').forEach(function(btn) {
+    btn.disabled = true;
+  });
+}
+
+function clearPendingPlan() {
+  disablePendingPlanButtons();
+  pendingPlanId = null;
+  pendingPlanActions = null;
 }
 
 function removeTyping() {
@@ -703,6 +809,149 @@ function autoResize(el) {
 }
 
 // ── 1. Chat ─────────────────────────────────────────────────────────────────
+function planDecisionFor(msg) {
+  var text = String(msg || '').trim().toLowerCase();
+  if (/^(yes|y|ok|okay|sure|go ahead|proceed|do it)$/i.test(text)) return 'approve';
+  if (/^(no|n|cancel|stop|never mind|dont|don't)$/i.test(text)) return 'reject';
+  return null;
+}
+
+function summarizePayload(payload) {
+  if (!payload) return '';
+  if (typeof payload === 'string') return payload.trim();
+  if (Array.isArray(payload)) return payload.map(summarizePayload).filter(Boolean).join(' ');
+  if (payload.summary) return summarizePayload(payload.summary);
+  if (payload.note) return summarizePayload(payload.note);
+  if (payload.message) return summarizePayload(payload.message);
+  if (payload.stdout) return summarizePayload(payload.stdout);
+  if (payload.output) return summarizePayload(payload.output);
+  if (payload.echo && payload.echo.message) return summarizePayload(payload.echo.message);
+  if (payload.echo && typeof payload.echo === 'object') return summarizePayload(payload.echo);
+  try { return JSON.stringify(payload); } catch (e) { return ''; }
+}
+
+function summarizeRunDetail(detail) {
+  if (!detail || !Array.isArray(detail.tasks)) return '';
+  var failures = [];
+  var successes = [];
+  detail.tasks.forEach(function(task) {
+    if (task.status === 'FAILED' && task.error) failures.push(task.error);
+    if (task.status === 'SUCCEEDED') {
+      var text = summarizePayload(task.output);
+      if (text) successes.push(text);
+    }
+  });
+  if (failures.length) return 'I hit a problem: ' + failures[0];
+  if (successes.length) return successes.join(' ');
+  if (detail.metadata && detail.metadata.command) return String(detail.metadata.command);
+  return '';
+}
+
+function sleep(ms) {
+  return new Promise(function(resolve) { setTimeout(resolve, ms); });
+}
+
+async function waitForExecution(enqueuedIds, workingMsg) {
+  var deadline = Date.now() + 120000;
+  while (Date.now() < deadline) {
+    var queue = await get('/api/queue') || [];
+    var runs = await get('/api/runs') || [];
+    var items = enqueuedIds.map(function(id) {
+      return queue.find(function(item) { return item.id === id; }) || null;
+    }).filter(Boolean);
+
+    if (items.length === enqueuedIds.length) {
+      var failed = items.find(function(item) {
+        return item.status === 'FAILED' || item.status === 'CANCELLED';
+      });
+      if (failed) {
+        var failText = 'I could not finish that: ' + (failed.last_error || statusLabel(failed.status) + '.');
+        setMsgText(workingMsg, failText);
+        return failText;
+      }
+      var allDone = items.every(function(item) { return item.status === 'SUCCEEDED'; });
+      if (allDone) {
+        var relatedRuns = runs.filter(function(run) {
+          return enqueuedIds.indexOf(run.queue_item_id) >= 0;
+        });
+        var summaries = [];
+        for (var i = 0; i < relatedRuns.length; i++) {
+          var detail = await get('/api/runs/' + encodeURIComponent(relatedRuns[i].id));
+          var summary = summarizeRunDetail(detail);
+          if (summary && summaries.indexOf(summary) < 0) summaries.push(summary);
+        }
+        var doneText = summaries.length ? ('Done. ' + summaries.join(' ')) : 'Done.';
+        setMsgText(workingMsg, doneText);
+        return doneText;
+      }
+    }
+
+    await refreshStatus();
+    await refreshActivity();
+    await sleep(1500);
+  }
+
+  var queuedText = 'I queued that work. You can follow the progress in Activity.';
+  setMsgText(workingMsg, queuedText);
+  return queuedText;
+}
+
+async function submitPendingPlanDecision(decision, userText) {
+  if (!pendingPlanId) return;
+
+  var planId = pendingPlanId;
+  clearPendingPlan();
+  $('send-btn').disabled = true;
+
+  try {
+    if (decision === 'reject') {
+      if (userText) {
+        addMsg('user', userText);
+        chatHistory.push({role: 'user', content: userText});
+      }
+      await post('/api/plans/' + encodeURIComponent(planId) + '/reject', {reason: 'Cancelled in chat'});
+      var rejectReply = "Okay. I won't do that.";
+      addMsg('gismo', rejectReply);
+      chatHistory.push({role: 'assistant', content: rejectReply});
+      return;
+    }
+
+    if (userText) {
+      addMsg('user', userText);
+      chatHistory.push({role: 'user', content: userText});
+    }
+    var approval = await post('/api/plans/' + encodeURIComponent(planId) + '/approve', {});
+    if (!approval) {
+      var failReply = 'I could not start that work right now.';
+      addMsg('gismo', failReply);
+      chatHistory.push({role: 'assistant', content: failReply});
+      return;
+    }
+
+    var workingMsg = addMsg('gismo', 'Working...');
+    var finalReply = await waitForExecution(approval.enqueued_ids || [], workingMsg);
+    chatHistory.push({role: 'assistant', content: finalReply});
+    speakText(finalReply);
+  } finally {
+    $('send-btn').disabled = false;
+    $('chat-input').focus();
+    refreshStatus();
+    refreshActivity();
+  }
+}
+
+async function handleChatResponse(data) {
+  var reply = data.reply || '';
+  if (data.mode === 'plan' && data.plan_id) {
+    addPlanMsg(data);
+    chatHistory.push({role: 'assistant', content: reply});
+    return;
+  }
+  addMsg('gismo', reply || 'I am not sure how to help with that yet.');
+  chatHistory.push({role: 'assistant', content: reply || 'I am not sure how to help with that yet.'});
+  speakText(reply || '');
+}
+
 async function sendChat() {
   var input = $('chat-input');
   var msg = input.value.trim();
@@ -714,9 +963,16 @@ async function sendChat() {
   addMsg('user', msg);
   chatHistory.push({role: 'user', content: msg});
 
+  var planDecision = pendingPlanId ? planDecisionFor(msg) : null;
+  if (planDecision) {
+    await submitPendingPlanDecision(planDecision, null);
+    input.focus();
+    return;
+  }
+
   var sendBtn = $('send-btn');
   sendBtn.disabled = true;
-  addTyping();
+  addTyping('Planning...');
 
   try {
     var res = await fetch('/api/chat', {
@@ -730,9 +986,7 @@ async function sendChat() {
     if (!res.ok) {
       addMsg('gismo', 'GISMO: ' + (data.error || 'Request failed.'));
     } else {
-      addMsg('gismo', data.reply || '');
-      chatHistory.push({role: 'assistant', content: data.reply || ''});
-      speakText(data.reply || '');
+      await handleChatResponse(data);
       refreshActivity();
     }
   } catch (err) {

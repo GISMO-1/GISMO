@@ -10,19 +10,54 @@ __pycache__/
 .venv/
 venv/
 ENV/
-.env/
+.env
+.env.*
 .pytest_cache/
 .mypy_cache/
 .coverage
-htmlcov/
 .coverage.*
+htmlcov/
 
 dist/
 build/
 
-# SQLite
+# SQLite / local DB
 *.db
 gismo_state.db
+
+# GISMO Local State (DO NOT COMMIT)
+data/
+state/
+runtime/
+
+# Operator identity / personalization
+operator.json
+operator_profile.json
+operator/
+profiles/
+
+# Secrets / credentials
+secrets.json
+credentials.json
+tokens.json
+
+# Devices / network
+devices.json
+devices_local.json
+network_scan.json
+
+# Voice / embeddings
+voice/
+embeddings/
+
+# Logs / activity
+logs/
+runs/
+activity/
+
+# Codex / MCP config
+.codex/
+mcp/
 
 # Editors
 .DS_Store
@@ -36,7 +71,11 @@ gismo_state.db
 exports/
 tmp/
 
-# Model files (large binaries — store outside repo)
+# Model files (large binaries)
 models/
 *.gguf
 *.bin
+
+# Keep example templates
+!*.example.json
+!*.template.json

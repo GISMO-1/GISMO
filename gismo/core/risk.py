@@ -53,6 +53,10 @@ _SUPERVISOR_PATTERNS = (
     r"\bsupervise\s+(up|down)\b",
     r"\brecover\b",
 )
+_DEVICE_MUTATION_PATTERNS = (
+    r"^device:\s*(turn|switch|power)\s+(on|off)\b",
+    r"^device:\s*(lock|unlock|open|close)\b",
+)
 
 
 def classify_plan_risk(actions: Iterable[dict[str, object]]) -> PlanRisk:
@@ -83,6 +87,9 @@ def classify_plan_risk(actions: Iterable[dict[str, object]]) -> PlanRisk:
 
         if _matches_supervisor_lifecycle(command_lower):
             risk_flags.add("supervisor_lifecycle")
+
+        if _matches_device_mutation(command_lower):
+            risk_flags.add("writes")
 
     ordered_flags = _order_flags(risk_flags)
     risk_level = _resolve_risk_level(ordered_flags)
@@ -136,6 +143,8 @@ def _infer_tools_from_command(command: str) -> list[str]:
         return ["write_note"]
     if lower.startswith("shell:") or lower.startswith("run_shell:"):
         return ["run_shell"]
+    if lower.startswith("device:"):
+        return ["device_control"]
     if lower.startswith("graph:"):
         remainder = trimmed.split(":", 1)[1].strip()
         if not remainder:
@@ -162,6 +171,10 @@ def _matches_memory_mutation(command_lower: str) -> bool:
 
 def _matches_supervisor_lifecycle(command_lower: str) -> bool:
     return any(re.search(pattern, command_lower) for pattern in _SUPERVISOR_PATTERNS)
+
+
+def _matches_device_mutation(command_lower: str) -> bool:
+    return any(re.search(pattern, command_lower) for pattern in _DEVICE_MUTATION_PATTERNS)
 
 
 def infer_tools_from_command(command: str) -> list[str]:

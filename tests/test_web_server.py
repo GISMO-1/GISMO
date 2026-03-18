@@ -137,7 +137,11 @@ class TestWebServerEndpoints(unittest.TestCase):
         self.assertEqual(data[0]["brand"], "Tapo")
 
     def test_chat_endpoint_returns_reply(self) -> None:
-        with mock.patch.object(web_api, "chat_message", return_value={"reply": "hello"}) as chat_mock:
+        with mock.patch.object(
+            web_api,
+            "chat_message",
+            return_value={"reply": "hello", "mode": "reply", "classification": "informational"},
+        ) as chat_mock:
             data = self._request_json(
                 "/api/chat",
                 method="POST",
@@ -148,7 +152,7 @@ class TestWebServerEndpoints(unittest.TestCase):
             "hi",
             [{"role": "user", "content": "earlier"}],
         )
-        self.assertEqual(data, {"reply": "hello"})
+        self.assertEqual(data["reply"], "hello")
 
     def test_tts_preview_endpoint(self) -> None:
         with mock.patch.object(web_api, "tts_preview", return_value=b"wav") as preview_mock:

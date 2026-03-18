@@ -150,11 +150,14 @@ def get_runs(db_path: str, limit: int = 50) -> list[dict[str, Any]]:
         else:
             run_status = "pending"
 
+        metadata = run.metadata_json if isinstance(run.metadata_json, dict) else {}
         result.append({
             "id": run.id,
             "label": run.label or "",
             "status": run_status,
             "created_at": _dt(run.created_at),
+            "queue_item_id": metadata.get("queue_item_id"),
+            "command": metadata.get("command"),
             "task_total": total,
             "task_succeeded": succ,
             "task_failed": fail,
@@ -184,6 +187,7 @@ def get_run_detail(db_path: str, run_id: str) -> dict[str, Any]:
                 "status": _status_val(t.status),
                 "created_at": _dt(t.created_at),
                 "updated_at": _dt(t.updated_at),
+                "output": t.output_json,
                 "error": t.error,
                 "failure_type": _status_val(t.failure_type),
             }
@@ -423,22 +427,211 @@ def _build_chat_system(db_path: str) -> str:
     )
 
 
+_CHAT_AMBIGUOUS_RE = re.compile(
+    r"\b(can you help me|help me with something|not sure|maybe later|what should we do)\b"
+)
+_CHAT_OPERATIONAL_RE = re.compile(
+    r"\b(turn on|turn off|check|scan|lock|unlock|open|close|start|stop|run|queue|save|write|remember|"
+    r"set up|set|pause|resume|look for|find|show me|monitor|connect|remove|add)\b"
+)
+_CHAT_INFORMATIONAL_RE = re.compile(
+    r"^(who|what|when|where|why|how)\b|"
+    r"\b(tell me|explain|joke|time|date|weather|status|who are you|what can you do)\b"
+)
+
+
+def _classify_chat_request(message: str) -> str:
+    text = " ".join((message or "").strip().lower().split())
+    if not text:
+        return "ambiguous"
+    if _CHAT_AMBIGUOUS_RE.search(text):
+        return "ambiguous"
+    if _CHAT_OPERATIONAL_RE.search(text):
+        return "operational"
+    if _CHAT_INFORMATIONAL_RE.search(text) or text.endswith("?"):
+        return "informational"
+    if len(text.split()) <= 3:
+        return "ambiguous"
+    return "informational"
+
+
+def _coerce_text_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(item).strip() for item in value if str(item).strip()]
+
+
+def _chat_action_label(action: dict[str, Any]) -> str:
+    why = str(action.get("why") or "").strip()
+    if why:
+        return why
+    command = str(action.get("command") or "").strip()
+    for prefix in ("echo:", "note:", "shell:", "device:", "graph:"):
+        if command.lower().startswith(prefix):
+            return command[len(prefix):].strip()
+    return command
+
+
+def _join_human(items: list[str]) -> str:
+    if not items:
+        return ""
+    if len(items) == 1:
+        return items[0]
+    if len(items) == 2:
+        return f"{items[0]} and {items[1]}"
+    return ", ".join(items[:-1]) + f", and {items[-1]}"
+
+
+def _format_plan_reply(plan: dict[str, Any], risk: dict[str, Any]) -> tuple[str, list[str]]:
+    actions = [
+        action
+        for action in plan.get("actions", [])
+        if action.get("type") == "enqueue" and str(action.get("command") or "").strip()
+    ]
+    steps = [_chat_action_label(action) for action in actions]
+    steps = [step[:1].upper() + step[1:] if step else step for step in steps if step]
+    if not steps:
+        return ("I need a little more detail before I act. What would you like me to do?", [])
+
+    fragments = [step[:1].lower() + step[1:] if step else step for step in steps]
+    reply = f"I'll {_join_human(fragments)}. Proceed?"
+    if risk.get("risk_level") in {"MEDIUM", "HIGH"}:
+        reply = f"{reply} This needs your approval before I start."
+    return reply, steps
+
+
+def _request_chat_plan(
+    db_path: str,
+    message: str,
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    from gismo.cli.main import _request_llm_plan
+
+    planner_message = (
+        "The operator is explicitly asking GISMO to carry this out if approved. "
+        "For connected-device work, prefer GISMO device commands such as "
+        "\"device: scan\", \"device: list\", \"device: check cameras\", "
+        "\"device: check front door camera\", \"device: turn on kitchen lights\", "
+        "or \"device: turn off bedroom lamp\" when appropriate.\n\n"
+        f"{_planner_device_context(db_path)}\n\n"
+        f"Request: {message}"
+    )
+    state_store = None
+    try:
+        plan, risk, explain_payload, _policy_summary, state_store, _payload = _request_llm_plan(
+            db_path,
+            planner_message,
+            model="gismo",
+            host=None,
+            timeout_s=None,
+            enqueue=True,
+            dry_run=False,
+            max_actions=5,
+            explain=False,
+            debug=True,
+            actor="web-chat",
+            non_interactive=True,
+            policy_path=None,
+            json_output=True,
+            record_event=True,
+        )
+        return (
+            plan,
+            {
+                "risk_level": risk.risk_level,
+                "risk_flags": list(risk.risk_flags),
+                "rationale": list(risk.rationale),
+            },
+            explain_payload.to_dict(),
+        )
+    finally:
+        if state_store is not None:
+            state_store.close()
+
+
 def chat_message(
     db_path: str,
     message: str,
     history: list[dict[str, str]],
 ) -> dict[str, Any]:
-    """Send a message to the local LLM and return the reply."""
+    """Route chat requests into direct reply, clarification, or approval-ready plans."""
     from gismo.llm.ollama import ollama_freeform_chat, OllamaError
 
-    messages = list(history) + [{"role": "user", "content": message}]
+    classification = _classify_chat_request(message)
+
+    if classification == "ambiguous":
+        reply = "I can help. Tell me exactly what you'd like me to do, or ask a direct question."
+        _append_chat_record(message, reply)
+        return {
+            "reply": reply,
+            "mode": "clarify",
+            "classification": classification,
+        }
+
+    if classification == "informational":
+        messages = list(history) + [{"role": "user", "content": message}]
+        try:
+            reply = ollama_freeform_chat(messages, system=_build_chat_system(db_path), model="gismo")
+        except OllamaError as exc:
+            raise RuntimeError(str(exc)) from exc
+        reply = _clean_reply(reply)
+        _append_chat_record(message, reply)
+        return {
+            "reply": reply,
+            "mode": "reply",
+            "classification": classification,
+        }
+
     try:
-        reply = ollama_freeform_chat(messages, system=_build_chat_system(db_path), model="gismo")
+        plan, risk, explain_json = _request_chat_plan(db_path, message)
     except OllamaError as exc:
         raise RuntimeError(str(exc)) from exc
-    reply = _clean_reply(reply)
+    except ValueError as exc:
+        raise RuntimeError(str(exc)) from exc
+    except SystemExit as exc:
+        raise RuntimeError("Planning failed.") from exc
+
+    actions = [
+        action
+        for action in plan.get("actions", [])
+        if action.get("type") == "enqueue" and str(action.get("command") or "").strip()
+    ]
+    if not actions:
+        notes = _coerce_text_list(plan.get("notes"))
+        reply = notes[0] if notes else "I need a little more detail before I act. What would you like me to do?"
+        _append_chat_record(message, reply)
+        return {
+            "reply": reply,
+            "mode": "clarify",
+            "classification": "ambiguous",
+        }
+
+    with StateStore(db_path) as store:
+        pending = store.create_pending_plan(
+            intent=str(plan.get("intent") or "operate"),
+            plan_json=plan,
+            risk_level=str(risk.get("risk_level") or "LOW"),
+            risk_json={
+                "risk_level": str(risk.get("risk_level") or "LOW"),
+                "risk_flags": list(risk.get("risk_flags") or []),
+                "rationale": list(risk.get("rationale") or []),
+            },
+            explain_json=explain_json,
+            user_text=message,
+            actor="web-chat",
+        )
+
+    reply, steps = _format_plan_reply(plan, risk)
     _append_chat_record(message, reply)
-    return {"reply": reply}
+    return {
+        "reply": reply,
+        "mode": "plan",
+        "classification": classification,
+        "plan_id": pending.id,
+        "plan_steps": steps,
+        "plan_notes": _coerce_text_list(plan.get("notes")),
+        "risk_level": str(risk.get("risk_level") or "LOW"),
+        "risk_flags": list(risk.get("risk_flags") or []),
+    }
 
 
 # ── Onboarding ──────────────────────────────────────────────────────────────
@@ -496,6 +689,56 @@ def get_system_health() -> dict[str, Any]:
 _IP_RE = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
 
 
+def _device_actions(device: ConnectedDevice) -> list[str]:
+    actions = ["check"]
+    device_type = (device.device_type or "").lower()
+    if "camera" in device_type:
+        actions.append("view")
+    if _device_supports_power(device):
+        actions.extend(["turn_on", "turn_off"])
+    return actions
+
+
+def _device_supports_power(device: ConnectedDevice) -> bool:
+    meta = device.metadata_json if isinstance(device.metadata_json, dict) else {}
+    text = " ".join(
+        str(value).lower()
+        for value in (
+            device.device_type,
+            device.brand,
+            device.hostname or "",
+            meta.get("label", ""),
+        )
+    )
+    return any(token in text for token in ("light", "lamp", "bulb", "tuya", "feit"))
+
+
+def _device_power_ready(device: ConnectedDevice) -> bool:
+    if not _device_supports_power(device):
+        return False
+    meta = device.metadata_json if isinstance(device.metadata_json, dict) else {}
+    return bool(str(meta.get("device_id") or meta.get("dev_id") or "").strip()) and bool(
+        str(meta.get("local_key") or "").strip()
+    )
+
+
+def _planner_device_context(db_path: str) -> str:
+    devices = _list_device_models(db_path)
+    if not devices:
+        return "Saved devices: none."
+    lines = []
+    for device in devices[:12]:
+        actions = ", ".join(_device_actions(device))
+        power_hint = ""
+        if _device_supports_power(device) and not _device_power_ready(device):
+            power_hint = " (power control needs more setup)"
+        lines.append(
+            f"- {_device_name(device.hostname, device.brand, device.device_type, device.ip)} "
+            f"[{device.brand} {device.device_type} at {device.ip}; saved; actions: {actions}{power_hint}]"
+        )
+    return "Saved devices:\n" + "\n".join(lines)
+
+
 def _serialize_device(device: ConnectedDevice, *, status: str | None = None) -> dict[str, Any]:
     label = device.hostname or device.metadata_json.get("label") or f"{device.brand} {device.device_type}"
     stream_url = f"/api/devices/{device.id}/stream" if "camera" in device.device_type else None
@@ -511,6 +754,8 @@ def _serialize_device(device: ConnectedDevice, *, status: str | None = None) -> 
         "snapshot_url": device.snapshot_url,
         "thumbnail_url": stream_url,
         "stream_url": stream_url,
+        "actions": _device_actions(device),
+        "needs_setup": _device_supports_power(device) and not _device_power_ready(device),
         "created_at": _dt(device.created_at),
         "updated_at": _dt(device.updated_at),
         "metadata": device.metadata_json,
@@ -764,6 +1009,18 @@ def add_device(
 ) -> dict[str, Any]:
     with StateStore(db_path) as store:
         existing = next((device for device in store.list_devices() if device.ip == ip), None)
+        existing_meta = dict(existing.metadata_json) if existing and isinstance(existing.metadata_json, dict) else {}
+        merged_meta = {
+            **existing_meta,
+            "label": _device_name(hostname, brand, device_type, ip),
+            "open_ports": open_ports or existing_meta.get("open_ports") or [],
+        }
+        device_type_lower = (device_type or "").lower()
+        brand_lower = (brand or "").lower()
+        if "camera" in device_type_lower:
+            merged_meta.setdefault("controller", "camera")
+        elif any(token in f"{brand_lower} {device_type_lower}" for token in ("tuya", "feit", "light", "lamp", "bulb")):
+            merged_meta.setdefault("controller", "tuya")
         device = ConnectedDevice(
             id=existing.id if existing else ConnectedDevice(ip=ip, device_type=device_type, brand=brand).id,
             ip=ip,
@@ -772,10 +1029,7 @@ def add_device(
             brand=brand,
             rtsp_url=rtsp_url,
             snapshot_url=snapshot_url,
-            metadata_json={
-                "label": _device_name(hostname, brand, device_type, ip),
-                "open_ports": open_ports or [],
-            },
+            metadata_json=merged_meta,
             created_at=existing.created_at if existing else datetime.now(timezone.utc),
         )
         stored = store.upsert_device(device)
@@ -907,6 +1161,20 @@ def get_activity_feed(db_path: str, limit: int = 40) -> list[dict[str, Any]]:
     _R_COLORS = {"succeeded": "green", "failed": "red", "running": "teal", "pending": "blue"}
 
     events: list[dict[str, Any]] = []
+
+    with StateStore(db_path) as store:
+        recent_events = store.list_events(limit=20)
+
+    for event in recent_events:
+        if not str(event.event_type or "").startswith("device_"):
+            continue
+        events.append({
+            "type": "device",
+            "label": event.message,
+            "status": "DEVICE",
+            "color": "teal",
+            "timestamp": _dt(event.ts),
+        })
 
     for item in get_queue(db_path, limit=25):
         st = item["status"]

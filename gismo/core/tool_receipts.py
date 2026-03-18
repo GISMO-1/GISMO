@@ -54,6 +54,7 @@ def tool_kind_for_name(tool_name: str) -> str:
         "list_dir": "fs",
         "echo": "builtin",
         "write_note": "state",
+        "device_control": "device",
     }
     return mapping.get(tool_name, "tool")
 

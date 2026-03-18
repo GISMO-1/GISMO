@@ -33,7 +33,7 @@ def parse_command(command: str) -> Dict[str, Any]:
 
     trimmed = command.strip()
 
-    single_match = re.match(r"(?i)^(echo|note|shell|run_shell)\s*:\s*(.+)$", trimmed)
+    single_match = re.match(r"(?i)^(echo|note|shell|run_shell|device)\s*:\s*(.+)$", trimmed)
     if single_match:
         verb = single_match.group(1).lower()
         payload = single_match.group(2).strip()
@@ -64,7 +64,7 @@ def parse_command(command: str) -> Dict[str, Any]:
             steps.append(_build_step(verb, payload))
         return {"mode": "graph", "steps": [step.to_dict() for step in steps]}
 
-    raise ValueError("Unsupported command. Use echo:, note:, shell:, or graph:.")
+    raise ValueError("Unsupported command. Use echo:, note:, shell:, device:, or graph:.")
 
 
 def required_tools(plan: Dict[str, Any]) -> Set[str]:
@@ -117,6 +117,13 @@ def _build_step(verb: str, payload: str) -> OperatorStep:
             input_json={"command": command},
             title=f"Shell: {rendered}",
         )
+    if verb == "device":
+        parsed = _parse_device_command(payload)
+        return OperatorStep(
+            tool_name="device_control",
+            input_json=parsed["input_json"],
+            title=parsed["title"],
+        )
     raise ValueError(f"Unsupported verb '{verb}'")
 
 
@@ -128,3 +135,57 @@ def _parse_shell_command(payload: str) -> list[str]:
     if not command:
         raise ValueError("shell command requires at least one token")
     return command
+
+
+def _parse_device_command(payload: str) -> Dict[str, Any]:
+    text = " ".join(payload.strip().split())
+    if not text:
+        raise ValueError("device command requires text after ':'")
+
+    lowered = text.lower()
+    if lowered in {"scan", "scan devices", "scan network", "scan for devices"}:
+        return {
+            "title": "Devices: Scan network",
+            "input_json": {"request": text, "action": "scan", "target": "network"},
+        }
+    if lowered in {"list", "list devices", "show devices", "show connected devices"}:
+        return {
+            "title": "Devices: List connected devices",
+            "input_json": {"request": text, "action": "list", "target": "devices"},
+        }
+
+    power_match = re.match(r"(?i)^(turn|switch|power)\s+(on|off)\s+(.+)$", text)
+    if power_match:
+        state = power_match.group(2).lower()
+        target = _normalize_device_target(power_match.group(3))
+        if not target:
+            raise ValueError("device power command requires a target")
+        verb = "on" if state == "on" else "off"
+        return {
+            "title": f"Devices: Turn {verb} {target}",
+            "input_json": {
+                "request": text,
+                "action": "turn_on" if state == "on" else "turn_off",
+                "target": target,
+            },
+        }
+
+    check_match = re.match(r"(?i)^(check|show|status(?:\s+of)?)\s+(.+)$", text)
+    if check_match:
+        target = _normalize_device_target(check_match.group(2))
+        if not target:
+            raise ValueError("device check command requires a target")
+        return {
+            "title": f"Devices: Check {target}",
+            "input_json": {"request": text, "action": "check", "target": target},
+        }
+
+    raise ValueError(
+        "Unsupported device command. Use scan, list, check ..., turn on ..., or turn off ...."
+    )
+
+
+def _normalize_device_target(text: str) -> str:
+    target = " ".join(text.strip().split())
+    target = re.sub(r"^(the|my)\s+", "", target, flags=re.IGNORECASE)
+    return target

@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import ipaddress
 import json
+import logging
+import os
 import re
 import shutil
 import socket
@@ -23,6 +25,8 @@ from typing import Any
 from gismo.core.models import CalendarEvent, ConnectedDevice, QueueStatus
 from gismo.core.state import StateStore
 from gismo.memory.store import list_namespaces, list_items_for_snapshot
+
+LOGGER = logging.getLogger(__name__)
 
 
 # ── helpers ────────────────────────────────────────────────────────────────
@@ -471,12 +475,51 @@ _CHAT_INFORMATIONAL_RE = re.compile(
 )
 _CHAT_CALENDAR_READ_RE = re.compile(r"\b(calendar|agenda|schedule)\b")
 _CHAT_CALENDAR_CREATE_RE = re.compile(r"^(remind me|add an event|add event|schedule)\b", re.IGNORECASE)
+_CHAT_UPCOMING_RE = re.compile(r"\b(what(?:'s| is)? coming up|coming up)\b", re.IGNORECASE)
+_MONTH_NAME_TO_NUM = {
+    "january": 1,
+    "february": 2,
+    "march": 3,
+    "april": 4,
+    "may": 5,
+    "june": 6,
+    "july": 7,
+    "august": 8,
+    "september": 9,
+    "october": 10,
+    "november": 11,
+    "december": 12,
+}
+_CHAT_MODEL_ERROR_REPLY = "I hit a temporary problem and could not answer that right now. Please try again in a moment."
+_CHAT_PLAN_ERROR_REPLY = "I hit a temporary problem and could not start that right now. Please try again in a moment."
+
+
+def _is_system_query(text: str) -> bool:
+    if not text:
+        return False
+    if _CHAT_CALENDAR_CREATE_RE.search(text):
+        return True
+    if re.search(r"\bwhat do i have today\b", text):
+        return True
+    if re.search(r"\bwhat do i have tomorrow\b", text):
+        return True
+    if re.search(r"\bwhat do i have in (january|february|march|april|may|june|july|august|september|october|november|december)\b", text):
+        return True
+    if _CHAT_UPCOMING_RE.search(text):
+        return True
+    if re.search(r"\bwhat(?:'s| is)? on my calendar today\b", text) or re.search(r"\b(calendar|schedule|agenda) today\b", text):
+        return True
+    if re.search(r"\bwhat(?:'s| is)? on my calendar tomorrow\b", text) or re.search(r"\b(calendar|schedule|agenda) tomorrow\b", text):
+        return True
+    return False
 
 
 def _classify_chat_request(message: str) -> str:
     text = " ".join((message or "").strip().lower().split())
     if not text:
         return "ambiguous"
+    if _is_system_query(text):
+        return "system_query"
     if _CHAT_AMBIGUOUS_RE.search(text):
         return "ambiguous"
     if _CHAT_OPERATIONAL_RE.search(text):
@@ -548,37 +591,117 @@ def _request_chat_plan(
         f"{_planner_device_context(db_path)}\n\n"
         f"Request: {message}"
     )
-    state_store = None
+    last_error: BaseException | None = None
+    for model in _chat_model_candidates("gismo"):
+        state_store = None
+        try:
+            plan, risk, explain_payload, _policy_summary, state_store, _payload = _request_llm_plan(
+                db_path,
+                planner_message,
+                model=model,
+                host=None,
+                timeout_s=None,
+                enqueue=True,
+                dry_run=False,
+                max_actions=5,
+                explain=False,
+                debug=True,
+                actor="web-chat",
+                non_interactive=True,
+                policy_path=None,
+                json_output=True,
+                record_event=True,
+            )
+            return (
+                plan,
+                {
+                    "risk_level": risk.risk_level,
+                    "risk_flags": list(risk.risk_flags),
+                    "rationale": list(risk.rationale),
+                },
+                explain_payload.to_dict(),
+            )
+        except (MemoryError, SystemExit, Exception) as exc:
+            last_error = exc
+            _log_chat_failure(
+                db_path,
+                stage="planner",
+                exc=exc,
+                model=model,
+                user_message=message,
+            )
+        finally:
+            if state_store is not None:
+                state_store.close()
+    raise RuntimeError(_CHAT_PLAN_ERROR_REPLY) from last_error
+
+
+def _chat_model_candidates(primary_model: str) -> list[str]:
+    configured = [
+        item.strip()
+        for item in (os.getenv("GISMO_OLLAMA_FALLBACK_MODEL") or "").split(",")
+        if item.strip()
+    ]
+    defaults = ["llama3.2:3b", "qwen2.5:3b", "phi3:mini", "tinyllama"]
+    result: list[str] = []
+    for candidate in [primary_model] + configured + defaults:
+        if candidate and candidate not in result:
+            result.append(candidate)
+    return result
+
+
+def _log_chat_failure(
+    db_path: str,
+    *,
+    stage: str,
+    exc: BaseException,
+    model: str | None = None,
+    user_message: str | None = None,
+) -> None:
+    LOGGER.exception("chat_%s_failed model=%s", stage, model, exc_info=(type(exc), exc, exc.__traceback__))
     try:
-        plan, risk, explain_payload, _policy_summary, state_store, _payload = _request_llm_plan(
-            db_path,
-            planner_message,
-            model="gismo",
-            host=None,
-            timeout_s=None,
-            enqueue=True,
-            dry_run=False,
-            max_actions=5,
-            explain=False,
-            debug=True,
-            actor="web-chat",
-            non_interactive=True,
-            policy_path=None,
-            json_output=True,
-            record_event=True,
-        )
-        return (
-            plan,
-            {
-                "risk_level": risk.risk_level,
-                "risk_flags": list(risk.risk_flags),
-                "rationale": list(risk.rationale),
-            },
-            explain_payload.to_dict(),
-        )
-    finally:
-        if state_store is not None:
-            state_store.close()
+        with StateStore(db_path) as store:
+            store.record_event(
+                actor="web-chat",
+                event_type="chat_error",
+                message=f"{stage} failed",
+                json_payload={
+                    "stage": stage,
+                    "model": model,
+                    "error_type": type(exc).__name__,
+                    "error": str(exc),
+                    "message": (user_message or "")[:500],
+                },
+            )
+    except Exception:
+        pass
+
+
+def _run_freeform_chat_with_fallback(
+    db_path: str,
+    *,
+    messages: list[dict[str, str]],
+    system: str,
+) -> str:
+    from gismo.llm.ollama import ollama_freeform_chat
+
+    last_error: BaseException | None = None
+    for model in _chat_model_candidates("gismo"):
+        try:
+            reply = _clean_reply(ollama_freeform_chat(messages, system=system, model=model))
+            if reply:
+                return reply
+            raise RuntimeError("LLM reply was empty")
+        except (MemoryError, Exception) as exc:
+            last_error = exc
+            _log_chat_failure(
+                db_path,
+                stage="reply",
+                exc=exc,
+                model=model,
+                user_message=messages[-1]["content"] if messages else None,
+            )
+    return _CHAT_MODEL_ERROR_REPLY
 
 
 def _format_event_time(value: str | None) -> str:
@@ -600,6 +723,71 @@ def _calendar_reply_for_day(db_path: str, day_value: str, *, label: str) -> str:
             parts.append(f"{item['title']} at {_format_event_time(item['start_at'])}")
     extra = f" There are {len(items) - 6} more." if len(items) > 6 else ""
     return f"On your calendar {label}: {_join_human(parts)}.{extra}"
+
+
+def _calendar_reply_for_range(
+    db_path: str,
+    start_at: datetime,
+    end_at: datetime,
+    *,
+    label: str,
+) -> str:
+    items = list_calendar_events(
+        db_path,
+        start=start_at.isoformat(),
+        end=end_at.isoformat(),
+        limit=200,
+    )
+    if not items:
+        return f"You do not have anything on your calendar {label}."
+
+    parts = []
+    for item in items[:8]:
+        start_local = _coerce_calendar_dt(item["start_at"]).astimezone(_local_tz())
+        if item["all_day"]:
+            parts.append(f"{item['title']} on {start_local.strftime('%A, %B %d')}")
+        else:
+            parts.append(
+                f"{item['title']} on {start_local.strftime('%A, %B %d')} at {_format_event_time(item['start_at'])}"
+            )
+    extra = f" There are {len(items) - 8} more." if len(items) > 8 else ""
+    return f"On your calendar {label}: {_join_human(parts)}.{extra}"
+
+
+def _calendar_reply_for_upcoming(db_path: str) -> str:
+    now_local = datetime.now(_local_tz())
+    items = list_calendar_events(
+        db_path,
+        start=now_local.isoformat(),
+        end=(now_local + timedelta(days=30)).isoformat(),
+        limit=8,
+    )
+    if not items:
+        return "Nothing is coming up on your calendar."
+
+    parts = []
+    for item in items[:6]:
+        start_local = _coerce_calendar_dt(item["start_at"]).astimezone(_local_tz())
+        if item["all_day"]:
+            parts.append(f"{item['title']} on {start_local.strftime('%A')}")
+        else:
+            parts.append(f"{item['title']} on {start_local.strftime('%A')} at {_format_event_time(item['start_at'])}")
+    extra = f" There are {len(items) - 6} more after that." if len(items) > 6 else ""
+    return f"Coming up: {_join_human(parts)}.{extra}"
+
+
+def _month_bounds_for_query(month_name: str) -> tuple[datetime, datetime, str]:
+    now_local = datetime.now(_local_tz())
+    month_num = _MONTH_NAME_TO_NUM[month_name.lower()]
+    year = now_local.year
+    if month_num < now_local.month:
+        year += 1
+    start = datetime(year, month_num, 1, tzinfo=_local_tz())
+    if month_num == 12:
+        end = datetime(year + 1, 1, 1, tzinfo=_local_tz()) - timedelta(microseconds=1)
+    else:
+        end = datetime(year, month_num + 1, 1, tzinfo=_local_tz()) - timedelta(microseconds=1)
+    return start, end, start.strftime("%B")
 
 
 def _resolve_relative_day(token: str) -> datetime:
@@ -679,17 +867,39 @@ def _parse_calendar_chat_create(message: str) -> dict[str, Any] | None:
     }
 
 
-def _handle_calendar_chat(db_path: str, message: str) -> dict[str, Any] | None:
+def _handle_system_query(db_path: str, message: str) -> dict[str, Any] | None:
     lowered = " ".join((message or "").strip().lower().split())
     today = datetime.now(_local_tz()).date()
+    if re.search(r"\bwhat do i have today\b", lowered):
+        reply = _calendar_reply_for_day(db_path, today.isoformat(), label="today")
+        _append_chat_record(message, reply)
+        return {"reply": reply, "mode": "reply", "classification": "system_query"}
+    if re.search(r"\bwhat do i have tomorrow\b", lowered):
+        reply = _calendar_reply_for_day(db_path, (today + timedelta(days=1)).isoformat(), label="tomorrow")
+        _append_chat_record(message, reply)
+        return {"reply": reply, "mode": "reply", "classification": "system_query"}
+    month_match = re.search(
+        r"\bwhat do i have in (?P<month>january|february|march|april|may|june|july|august|september|october|november|december)\b",
+        lowered,
+        re.IGNORECASE,
+    )
+    if month_match:
+        start_at, end_at, month_label = _month_bounds_for_query(str(month_match.group("month")))
+        reply = _calendar_reply_for_range(db_path, start_at, end_at, label=f"in {month_label}")
+        _append_chat_record(message, reply)
+        return {"reply": reply, "mode": "reply", "classification": "system_query"}
+    if _CHAT_UPCOMING_RE.search(lowered):
+        reply = _calendar_reply_for_upcoming(db_path)
+        _append_chat_record(message, reply)
+        return {"reply": reply, "mode": "reply", "classification": "system_query"}
     if re.search(r"\bwhat(?:'s| is)? on my calendar today\b", lowered) or re.search(r"\b(calendar|schedule|agenda) today\b", lowered):
         reply = _calendar_reply_for_day(db_path, today.isoformat(), label="today")
         _append_chat_record(message, reply)
-        return {"reply": reply, "mode": "reply", "classification": "informational"}
+        return {"reply": reply, "mode": "reply", "classification": "system_query"}
     if re.search(r"\bwhat(?:'s| is)? on my calendar tomorrow\b", lowered) or re.search(r"\b(calendar|schedule|agenda) tomorrow\b", lowered):
         reply = _calendar_reply_for_day(db_path, (today + timedelta(days=1)).isoformat(), label="tomorrow")
         _append_chat_record(message, reply)
-        return {"reply": reply, "mode": "reply", "classification": "informational"}
+        return {"reply": reply, "mode": "reply", "classification": "system_query"}
     if not _CHAT_CALENDAR_CREATE_RE.search(message or ""):
         return None
     payload = _parse_calendar_chat_create(message)
@@ -702,7 +912,7 @@ def _handle_calendar_chat(db_path: str, message: str) -> dict[str, Any] | None:
     when = local_start.strftime("%#I:%M %p on %A") if sys.platform == "win32" else local_start.strftime("%-I:%M %p on %A")
     reply = f"Added {event['title']} to your calendar for {when}."
     _append_chat_record(message, reply)
-    return {"reply": reply, "mode": "reply", "classification": "operational", "calendar_event": event}
+    return {"reply": reply, "mode": "reply", "classification": "system_query", "calendar_event": event}
 
 
 def chat_message(
@@ -711,88 +921,105 @@ def chat_message(
     history: list[dict[str, str]],
 ) -> dict[str, Any]:
     """Route chat requests into direct reply, clarification, or approval-ready plans."""
-    from gismo.llm.ollama import ollama_freeform_chat, OllamaError
+    classification = "informational"
+    try:
+        classification = _classify_chat_request(message)
 
-    calendar_reply = _handle_calendar_chat(db_path, message)
-    if calendar_reply is not None:
-        return calendar_reply
+        if classification == "system_query":
+            system_reply = _handle_system_query(db_path, message)
+            if system_reply is not None:
+                return system_reply
+            reply = "I can help with your calendar. Try asking what you have today, what is coming up, or ask me to add an event."
+            _append_chat_record(message, reply)
+            return {
+                "reply": reply,
+                "mode": "clarify",
+                "classification": "ambiguous",
+            }
 
-    classification = _classify_chat_request(message)
+        if classification == "ambiguous":
+            reply = "I can help. Tell me exactly what you'd like me to do, or ask a direct question."
+            _append_chat_record(message, reply)
+            return {
+                "reply": reply,
+                "mode": "clarify",
+                "classification": classification,
+            }
 
-    if classification == "ambiguous":
-        reply = "I can help. Tell me exactly what you'd like me to do, or ask a direct question."
+        if classification == "informational":
+            messages = list(history) + [{"role": "user", "content": message}]
+            reply = _run_freeform_chat_with_fallback(
+                db_path,
+                messages=messages,
+                system=_build_chat_system(db_path),
+            )
+            _append_chat_record(message, reply)
+            return {
+                "reply": reply,
+                "mode": "reply",
+                "classification": classification,
+            }
+
+        plan, risk, explain_json = _request_chat_plan(db_path, message)
+
+        actions = [
+            action
+            for action in plan.get("actions", [])
+            if action.get("type") == "enqueue" and str(action.get("command") or "").strip()
+        ]
+        if not actions:
+            notes = _coerce_text_list(plan.get("notes"))
+            reply = notes[0] if notes else "I need a little more detail before I act. What would you like me to do?"
+            _append_chat_record(message, reply)
+            return {
+                "reply": reply,
+                "mode": "clarify",
+                "classification": "ambiguous",
+            }
+
+        with StateStore(db_path) as store:
+            pending = store.create_pending_plan(
+                intent=str(plan.get("intent") or "operate"),
+                plan_json=plan,
+                risk_level=str(risk.get("risk_level") or "LOW"),
+                risk_json={
+                    "risk_level": str(risk.get("risk_level") or "LOW"),
+                    "risk_flags": list(risk.get("risk_flags") or []),
+                    "rationale": list(risk.get("rationale") or []),
+                },
+                explain_json=explain_json,
+                user_text=message,
+                actor="web-chat",
+            )
+
+        reply, steps = _format_plan_reply(plan, risk)
         _append_chat_record(message, reply)
         return {
             "reply": reply,
-            "mode": "clarify",
+            "mode": "plan",
             "classification": classification,
+            "plan_id": pending.id,
+            "plan_steps": steps,
+            "plan_notes": _coerce_text_list(plan.get("notes")),
+            "risk_level": str(risk.get("risk_level") or "LOW"),
+            "risk_flags": list(risk.get("risk_flags") or []),
         }
-
-    if classification == "informational":
-        messages = list(history) + [{"role": "user", "content": message}]
-        try:
-            reply = ollama_freeform_chat(messages, system=_build_chat_system(db_path), model="gismo")
-        except OllamaError as exc:
-            raise RuntimeError(str(exc)) from exc
-        reply = _clean_reply(reply)
+    except Exception as exc:
+        if str(exc) not in {_CHAT_MODEL_ERROR_REPLY, _CHAT_PLAN_ERROR_REPLY}:
+            _log_chat_failure(
+                db_path,
+                stage="chat_message",
+                exc=exc,
+                model=None,
+                user_message=message,
+            )
+        reply = _CHAT_PLAN_ERROR_REPLY if classification == "operational" else _CHAT_MODEL_ERROR_REPLY
         _append_chat_record(message, reply)
         return {
             "reply": reply,
             "mode": "reply",
-            "classification": classification,
+            "classification": classification if classification in {"informational", "operational", "system_query"} else "informational",
         }
-
-    try:
-        plan, risk, explain_json = _request_chat_plan(db_path, message)
-    except OllamaError as exc:
-        raise RuntimeError(str(exc)) from exc
-    except ValueError as exc:
-        raise RuntimeError(str(exc)) from exc
-    except SystemExit as exc:
-        raise RuntimeError("Planning failed.") from exc
-
-    actions = [
-        action
-        for action in plan.get("actions", [])
-        if action.get("type") == "enqueue" and str(action.get("command") or "").strip()
-    ]
-    if not actions:
-        notes = _coerce_text_list(plan.get("notes"))
-        reply = notes[0] if notes else "I need a little more detail before I act. What would you like me to do?"
-        _append_chat_record(message, reply)
-        return {
-            "reply": reply,
-            "mode": "clarify",
-            "classification": "ambiguous",
-        }
-
-    with StateStore(db_path) as store:
-        pending = store.create_pending_plan(
-            intent=str(plan.get("intent") or "operate"),
-            plan_json=plan,
-            risk_level=str(risk.get("risk_level") or "LOW"),
-            risk_json={
-                "risk_level": str(risk.get("risk_level") or "LOW"),
-                "risk_flags": list(risk.get("risk_flags") or []),
-                "rationale": list(risk.get("rationale") or []),
-            },
-            explain_json=explain_json,
-            user_text=message,
-            actor="web-chat",
-        )
-
-    reply, steps = _format_plan_reply(plan, risk)
-    _append_chat_record(message, reply)
-    return {
-        "reply": reply,
-        "mode": "plan",
-        "classification": classification,
-        "plan_id": pending.id,
-        "plan_steps": steps,
-        "plan_notes": _coerce_text_list(plan.get("notes")),
-        "risk_level": str(risk.get("risk_level") or "LOW"),
-        "risk_flags": list(risk.get("risk_flags") or []),
-    }
 
 
 # ── Onboarding ──────────────────────────────────────────────────────────────

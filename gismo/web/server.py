@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 import subprocess
 import threading
@@ -12,6 +13,8 @@ from typing import Any
 from gismo.core.background_worker import ensure_background_worker
 from gismo.web import api as web_api
 from gismo.web.templates import HTML
+
+LOGGER = logging.getLogger(__name__)
 
 _ITEM_ID_RE = re.compile(r"^/api/queue/([^/]+)/cancel$")
 _DEVICE_STREAM_RE = re.compile(r"^/api/devices/([^/]+)/stream$")
@@ -335,11 +338,13 @@ def _make_handler(db_path: str) -> type[BaseHTTPRequestHandler]:
                     try:
                         _json_response(self, web_api.chat_message(db_path, message, history))
                     except RuntimeError as exc:
-                        _error(self, str(exc), 503)
+                        LOGGER.exception("chat_endpoint_failed", exc_info=(type(exc), exc, exc.__traceback__))
+                        _error(self, "GISMO could not answer that right now. Please try again in a moment.", 503)
                 else:
                     _error(self, "Not found", 404)
             except Exception as exc:
-                _error(self, str(exc), 500)
+                LOGGER.exception("web_post_failed", exc_info=(type(exc), exc, exc.__traceback__))
+                _error(self, "Request failed.", 500)
 
         def do_PATCH(self) -> None:
             path = self.path.split("?")[0]

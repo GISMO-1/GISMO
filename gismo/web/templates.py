@@ -1421,7 +1421,7 @@ async function sendChat() {
     removeTyping();
 
     if (!res.ok) {
-      addMsg('gismo', 'GISMO: ' + (data.error || 'Request failed.'));
+      addMsg('gismo', 'I hit a temporary problem and could not answer that right now. Please try again in a moment.');
     } else {
       await handleChatResponse(data);
       refreshActivity();
@@ -1429,7 +1429,6 @@ async function sendChat() {
   } catch (err) {
     removeTyping();
     addMsg('gismo', 'Could not reach the server. Check that GISMO is running.');
-    console.error('sendChat error:', err);
   }
 
   sendBtn.disabled = false;

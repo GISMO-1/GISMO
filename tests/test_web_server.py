@@ -6,6 +6,7 @@ import tempfile
 import threading
 import unittest
 import urllib.request
+import urllib.error
 from pathlib import Path
 from unittest import mock
 from uuid import uuid4
@@ -180,6 +181,27 @@ class TestWebServerEndpoints(unittest.TestCase):
             [{"role": "user", "content": "earlier"}],
         )
         self.assertEqual(data["reply"], "hello")
+
+    def test_chat_endpoint_hides_runtime_errors(self) -> None:
+        with mock.patch.object(
+            web_api,
+            "chat_message",
+            side_effect=RuntimeError("Ollama failed with a raw stack trace"),
+        ):
+            request = urllib.request.Request(
+                f"{self.base_url}/api/chat",
+                data=json.dumps({"message": "hi", "history": []}).encode("utf-8"),
+                method="POST",
+                headers={"Content-Type": "application/json"},
+            )
+            with self.assertRaises(urllib.error.HTTPError) as ctx:
+                urllib.request.urlopen(request, timeout=5)
+
+        self.assertEqual(ctx.exception.code, 503)
+        body = json.loads(ctx.exception.read().decode("utf-8"))
+        ctx.exception.close()
+        self.assertEqual(body["error"], "GISMO could not answer that right now. Please try again in a moment.")
+        self.assertNotIn("ollama", body["error"].lower())
 
     def test_tts_preview_endpoint(self) -> None:
         with mock.patch.object(web_api, "tts_preview", return_value=b"wav") as preview_mock:

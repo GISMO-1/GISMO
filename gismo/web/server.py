@@ -154,6 +154,8 @@ def _make_handler(db_path: str) -> type[BaseHTTPRequestHandler]:
                     _json_response(self, web_api.get_onboarding_status(db_path))
                 elif path == "/api/settings":
                     _json_response(self, web_api.get_settings(db_path))
+                elif path == "/api/models/health":
+                    _json_response(self, web_api.get_models_health(db_path))
                 elif path == "/api/health":
                     _json_response(self, web_api.get_system_health())
                 elif path == "/api/devices":
@@ -272,15 +274,23 @@ def _make_handler(db_path: str) -> type[BaseHTTPRequestHandler]:
                     _json_response(self, web_api.set_daemon_paused(db_path, False))
                 elif path == "/api/settings":
                     body = _read_json_body(self)
-                    _json_response(
-                        self,
-                        web_api.save_settings(
-                            db_path,
-                            operator_name=body.get("operator_name"),
-                            voice_id=body.get("voice_id"),
-                            model_name=body.get("model_name") or body.get("model"),
-                        ),
-                    )
+                    try:
+                        _json_response(
+                            self,
+                            web_api.save_settings(
+                                db_path,
+                                operator_name=body.get("operator_name"),
+                                voice_id=body.get("voice_id") or body.get("voice"),
+                                model_name=body.get("model_name") or body.get("model"),
+                                primary_assistant_model=body.get("primary_assistant_model"),
+                                planner_model=body.get("planner_model"),
+                                helper_model=body.get("helper_model"),
+                                allow_identity_fallback=body.get("allow_identity_fallback"),
+                                performance_mode=body.get("performance_mode"),
+                            ),
+                        )
+                    except ValueError as exc:
+                        _error(self, str(exc), 400)
                 elif path == "/api/tts/voices/set":
                     body = _read_json_body(self)
                     voice_id = body.get("voice", "")

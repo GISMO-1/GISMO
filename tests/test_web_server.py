@@ -112,12 +112,57 @@ class TestWebServerEndpoints(unittest.TestCase):
         self.assertIn("operator_name", data)
 
     def test_settings_endpoint_shape(self) -> None:
-        data = self._request_json("/api/settings")
+        with mock.patch.object(
+            web_api,
+            "get_settings",
+            return_value={
+                "operator_name": "Mike",
+                "voice": "af_sky",
+                "voices": [{"id": "af_sky"}],
+                "model": "gismo:latest",
+                "models": ["gismo:latest"],
+                "model_policy": {"primary_assistant_model": "gismo:latest"},
+                "model_health": {"degraded_mode": {"active": False}},
+            },
+        ):
+            data = self._request_json("/api/settings")
         self.assertIn("operator_name", data)
         self.assertIn("voice", data)
         self.assertIn("voices", data)
         self.assertIn("model", data)
         self.assertIn("models", data)
+        self.assertIn("model_policy", data)
+        self.assertIn("model_health", data)
+
+    def test_models_health_endpoint_shape(self) -> None:
+        with mock.patch.object(
+            web_api,
+            "get_models_health",
+            return_value={
+                "installed_models": ["gismo:latest"],
+                "policy": {"primary_assistant_model": "gismo:latest"},
+                "degraded_mode": {"active": False, "reason": None},
+            },
+        ):
+            data = self._request_json("/api/models/health")
+        self.assertIn("installed_models", data)
+        self.assertIn("policy", data)
+        self.assertIn("degraded_mode", data)
+
+    def test_settings_endpoint_rejects_missing_model_cleanly(self) -> None:
+        request = urllib.request.Request(
+            f"{self.base_url}/api/settings",
+            data=json.dumps({"primary_assistant_model": "missing-model"}).encode("utf-8"),
+            method="POST",
+            headers={"Content-Type": "application/json"},
+        )
+        with mock.patch.object(web_api, "save_settings", side_effect=ValueError("Model is not installed: missing-model")):
+            with self.assertRaises(urllib.error.HTTPError) as ctx:
+                urllib.request.urlopen(request, timeout=5)
+        self.assertEqual(ctx.exception.code, 400)
+        body = json.loads(ctx.exception.read().decode("utf-8"))
+        ctx.exception.close()
+        self.assertEqual(body["error"], "Model is not installed: missing-model")
 
     def test_devices_add_list_remove(self) -> None:
         added = self._request_json(

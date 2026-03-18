@@ -285,7 +285,7 @@ class TestOnboardingAndHealth(unittest.TestCase):
 
 
 class TestChatMessage(unittest.TestCase):
-    def test_system_query_calendar_today_bypasses_llm(self) -> None:
+    def test_deterministic_calendar_today_bypasses_llm(self) -> None:
         tmp = Path("tmp") / f"web-api-{uuid4().hex}"
         tmp.mkdir(parents=True, exist_ok=False)
         try:
@@ -309,11 +309,11 @@ class TestChatMessage(unittest.TestCase):
             shutil.rmtree(tmp, ignore_errors=True)
 
         self.assertEqual(data["mode"], "reply")
-        self.assertEqual(data["classification"], "system_query")
+        self.assertEqual(data["classification"], "deterministic_query")
         self.assertIn("Check in", data["reply"])
         chat_mock.assert_not_called()
 
-    def test_system_query_calendar_month_bypasses_llm(self) -> None:
+    def test_deterministic_calendar_month_bypasses_llm(self) -> None:
         tmp = Path("tmp") / f"web-api-{uuid4().hex}"
         tmp.mkdir(parents=True, exist_ok=False)
         try:
@@ -335,11 +335,11 @@ class TestChatMessage(unittest.TestCase):
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 
-        self.assertEqual(data["classification"], "system_query")
+        self.assertEqual(data["classification"], "deterministic_query")
         self.assertIn("Dinner", data["reply"])
         chat_mock.assert_not_called()
 
-    def test_system_query_upcoming_bypasses_llm(self) -> None:
+    def test_deterministic_upcoming_bypasses_llm(self) -> None:
         tmp = Path("tmp") / f"web-api-{uuid4().hex}"
         tmp.mkdir(parents=True, exist_ok=False)
         try:
@@ -362,16 +362,63 @@ class TestChatMessage(unittest.TestCase):
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 
-        self.assertEqual(data["classification"], "system_query")
+        self.assertEqual(data["classification"], "deterministic_query")
         self.assertIn("Dentist", data["reply"])
         chat_mock.assert_not_called()
 
-    def test_informational_request_replies_directly(self) -> None:
+    def test_deterministic_device_query_bypasses_llm(self) -> None:
         tmp = Path("tmp") / f"web-api-{uuid4().hex}"
         tmp.mkdir(parents=True, exist_ok=False)
         try:
             db = _make_db(str(tmp))
-            with mock.patch("gismo.llm.ollama.ollama_freeform_chat", return_value="Hello there"), mock.patch.object(
+            web_api.add_device(db, "192.168.1.9", "Kitchen Lamp", "light", "Tuya")
+            with mock.patch("gismo.llm.ollama.ollama_freeform_chat") as chat_mock, mock.patch.object(
+                web_api,
+                "_append_chat_record",
+                return_value=None,
+            ):
+                data = web_api.chat_message(db, "what devices are connected", [])
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+        self.assertEqual(data["classification"], "deterministic_query")
+        self.assertIn("Kitchen Lamp", data["reply"])
+        chat_mock.assert_not_called()
+
+    def test_deterministic_model_query_bypasses_llm(self) -> None:
+        tmp = Path("tmp") / f"web-api-{uuid4().hex}"
+        tmp.mkdir(parents=True, exist_ok=False)
+        try:
+            db = _make_db(str(tmp))
+            with mock.patch.object(web_api, "get_settings", return_value={"voice": "af_sky", "model_policy": {"primary_assistant_model": "gismo:latest"}}), mock.patch(
+                "gismo.llm.ollama.ollama_freeform_chat"
+            ) as chat_mock, mock.patch.object(
+                web_api,
+                "_append_chat_record",
+                return_value=None,
+            ):
+                data = web_api.chat_message(db, "what model are you using", [])
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+        self.assertEqual(data["classification"], "deterministic_query")
+        self.assertIn("gismo:latest", data["reply"])
+        chat_mock.assert_not_called()
+
+    def test_conversational_request_replies_directly(self) -> None:
+        tmp = Path("tmp") / f"web-api-{uuid4().hex}"
+        tmp.mkdir(parents=True, exist_ok=False)
+        try:
+            db = _make_db(str(tmp))
+            route = SimpleNamespace(
+                degraded=False,
+                candidate_models=["gismo:latest"],
+                capability=SimpleNamespace(history_messages=8, assistant_timeout_s=90),
+                policy=SimpleNamespace(allow_identity_fallback=False),
+            )
+            with mock.patch.object(web_api, "resolve_model_route", return_value=route), mock.patch(
+                "gismo.llm.ollama.ollama_freeform_chat", return_value="Hello there"
+            ), mock.patch.object(
                 web_api,
                 "_append_chat_record",
                 return_value=None,
@@ -380,15 +427,21 @@ class TestChatMessage(unittest.TestCase):
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
         self.assertEqual(data["mode"], "reply")
-        self.assertEqual(data["classification"], "informational")
+        self.assertEqual(data["classification"], "conversational_request")
         self.assertEqual(data["reply"], "Hello there")
 
-    def test_informational_request_uses_fallback_model(self) -> None:
+    def test_conversational_request_uses_explicit_identity_fallback(self) -> None:
         tmp = Path("tmp") / f"web-api-{uuid4().hex}"
         tmp.mkdir(parents=True, exist_ok=False)
         try:
             db = _make_db(str(tmp))
-            with mock.patch.object(web_api, "_chat_model_candidates", return_value=["gismo", "tinyllama"]), mock.patch(
+            route = SimpleNamespace(
+                degraded=False,
+                candidate_models=["gismo:latest", "tinyllama"],
+                capability=SimpleNamespace(history_messages=8, assistant_timeout_s=90),
+                policy=SimpleNamespace(allow_identity_fallback=True),
+            )
+            with mock.patch.object(web_api, "resolve_model_route", return_value=route), mock.patch(
                 "gismo.llm.ollama.ollama_freeform_chat",
                 side_effect=[OllamaError("model blew up"), "Fallback answer"],
             ) as chat_mock, mock.patch.object(
@@ -402,15 +455,21 @@ class TestChatMessage(unittest.TestCase):
 
         self.assertEqual(data["reply"], "Fallback answer")
         self.assertEqual(chat_mock.call_count, 2)
-        self.assertEqual(chat_mock.call_args_list[0].kwargs["model"], "gismo")
+        self.assertEqual(chat_mock.call_args_list[0].kwargs["model"], "gismo:latest")
         self.assertEqual(chat_mock.call_args_list[1].kwargs["model"], "tinyllama")
 
-    def test_informational_request_returns_friendly_message_when_models_fail(self) -> None:
+    def test_conversational_request_returns_degraded_message_when_fallback_is_disabled(self) -> None:
         tmp = Path("tmp") / f"web-api-{uuid4().hex}"
         tmp.mkdir(parents=True, exist_ok=False)
         try:
             db = _make_db(str(tmp))
-            with mock.patch.object(web_api, "_chat_model_candidates", return_value=["gismo", "tinyllama"]), mock.patch(
+            route = SimpleNamespace(
+                degraded=False,
+                candidate_models=["gismo:latest", "tinyllama"],
+                capability=SimpleNamespace(history_messages=8, assistant_timeout_s=90),
+                policy=SimpleNamespace(allow_identity_fallback=False),
+            )
+            with mock.patch.object(web_api, "resolve_model_route", return_value=route), mock.patch(
                 "gismo.llm.ollama.ollama_freeform_chat",
                 side_effect=[OllamaError("out of memory"), OllamaError("stack trace raw detail")],
             ), mock.patch.object(
@@ -422,10 +481,34 @@ class TestChatMessage(unittest.TestCase):
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 
-        self.assertEqual(data["classification"], "informational")
+        self.assertEqual(data["classification"], "conversational_request")
         self.assertEqual(data["reply"], web_api._CHAT_MODEL_ERROR_REPLY)
-        self.assertNotIn("memory", data["reply"].lower())
         self.assertNotIn("stack trace", data["reply"].lower())
+
+    def test_conversational_request_skips_llm_when_no_installed_model_is_available(self) -> None:
+        tmp = Path("tmp") / f"web-api-{uuid4().hex}"
+        tmp.mkdir(parents=True, exist_ok=False)
+        try:
+            db = _make_db(str(tmp))
+            route = SimpleNamespace(
+                degraded=True,
+                candidate_models=[],
+                capability=SimpleNamespace(history_messages=4, assistant_timeout_s=45),
+                policy=SimpleNamespace(allow_identity_fallback=False),
+            )
+            with mock.patch.object(web_api, "resolve_model_route", return_value=route), mock.patch(
+                "gismo.llm.ollama.ollama_freeform_chat"
+            ) as chat_mock, mock.patch.object(
+                web_api,
+                "_append_chat_record",
+                return_value=None,
+            ):
+                data = web_api.chat_message(db, "who are you", [])
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+        self.assertEqual(data["reply"], web_api._CHAT_MODEL_ERROR_REPLY)
+        chat_mock.assert_not_called()
 
     def test_ambiguous_request_asks_for_clarification(self) -> None:
         tmp = Path("tmp") / f"web-api-{uuid4().hex}"
@@ -441,7 +524,7 @@ class TestChatMessage(unittest.TestCase):
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
         self.assertEqual(data["mode"], "clarify")
-        self.assertEqual(data["classification"], "ambiguous")
+        self.assertEqual(data["classification"], "ambiguous_request")
         chat_mock.assert_not_called()
 
     def test_operational_request_creates_pending_plan(self) -> None:
@@ -478,7 +561,7 @@ class TestChatMessage(unittest.TestCase):
             shutil.rmtree(tmp, ignore_errors=True)
 
         self.assertEqual(data["mode"], "plan")
-        self.assertEqual(data["classification"], "operational")
+        self.assertEqual(data["classification"], "operational_request")
         self.assertEqual(len(pending), 1)
         self.assertEqual(pending[0].user_text, "scan for devices")
         self.assertEqual(data["plan_steps"], ["Scan your network for devices"])
@@ -520,7 +603,14 @@ class TestChatMessage(unittest.TestCase):
         try:
             db = _make_db(str(tmp))
             web_api.add_device(db, "192.168.1.25", "Front Door", "camera", "Tapo", open_ports=[554])
-            with mock.patch("gismo.cli.main._request_llm_plan", side_effect=_fake_request):
+            route = SimpleNamespace(
+                degraded=False,
+                candidate_models=["gismo:latest"],
+                capability=SimpleNamespace(planner_timeout_s=75),
+            )
+            with mock.patch.object(web_api, "resolve_model_route", return_value=route), mock.patch(
+                "gismo.cli.main._request_llm_plan", side_effect=_fake_request
+            ):
                 web_api._request_chat_plan(db, "check the cameras")
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
@@ -600,21 +690,52 @@ class TestDevicesAndSettings(unittest.TestCase):
         tmp.mkdir(parents=True, exist_ok=False)
         try:
             db = _make_db(str(tmp))
-            current = web_api.get_settings(db)
-            self.assertIn("voices", current)
-            self.assertIn("model", current)
-            self.assertIn("models", current)
-            voice_id = current["voices"][0]["id"]
+            fake_models = {
+                "installed_models": ["gismo:latest", "tinyllama"],
+                "loaded_models": ["gismo:latest"],
+                "policy": {
+                    "primary_assistant_model": "gismo:latest",
+                    "planner_model": "gismo:latest",
+                    "helper_model": "",
+                    "allow_identity_fallback": False,
+                    "performance_mode": "auto",
+                },
+                "assistant_route": {},
+                "planner_route": {},
+                "degraded_mode": {"active": False, "reason": None},
+                "issues": [],
+                "runtime_failures": {},
+                "ollama_available": True,
+            }
+            with mock.patch("gismo.llm.model_policy.discover_models", return_value={"installed_models": ["gismo:latest", "tinyllama"], "loaded_models": ["gismo:latest"], "ollama_available": True}), mock.patch.object(
+                web_api,
+                "get_model_policy_health",
+                return_value=fake_models,
+            ):
+                current = web_api.get_settings(db)
+                self.assertIn("voices", current)
+                self.assertIn("model", current)
+                self.assertIn("models", current)
+                self.assertIn("model_policy", current)
+                voice_id = current["voices"][0]["id"]
 
-            updated = web_api.save_settings(
-                db,
-                operator_name="Mike",
-                voice_id=voice_id,
-                model_name="tinyllama",
-            )
+                updated = web_api.save_settings(
+                    db,
+                    operator_name="Mike",
+                    voice_id=voice_id,
+                    primary_assistant_model="gismo:latest",
+                    planner_model="tinyllama",
+                    helper_model="tinyllama",
+                    allow_identity_fallback=True,
+                    performance_mode="balanced",
+                )
             self.assertEqual(updated["operator_name"], "Mike")
             self.assertEqual(updated["voice"], voice_id)
-            self.assertEqual(updated["model"], "tinyllama")
+            self.assertEqual(updated["model"], "gismo:latest")
+            self.assertEqual(updated["model_policy"]["planner_model"], "tinyllama")
+            self.assertEqual(updated["model_policy"]["helper_model"], "tinyllama")
+            self.assertTrue(updated["model_policy"]["allow_identity_fallback"])
+            self.assertEqual(updated["model_policy"]["performance_mode"], "balanced")
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 
@@ -710,9 +831,26 @@ class TestCalendar(unittest.TestCase):
             shutil.rmtree(tmp, ignore_errors=True)
 
         self.assertEqual(data["mode"], "plan")
-        self.assertEqual(data["classification"], "operational")
+        self.assertEqual(data["classification"], "operational_request")
         self.assertEqual(len(pending), 1)
         self.assertEqual(events, [])
+
+    def test_chat_can_plan_calendar_delete_range(self) -> None:
+        tmp = Path("tmp") / f"web-api-{uuid4().hex}"
+        tmp.mkdir(parents=True, exist_ok=False)
+        try:
+            db = _make_db(str(tmp))
+            with mock.patch.object(web_api, "_append_chat_record", return_value=None):
+                data = web_api.chat_message(db, "delete calendar events from March 27 through April 1", [])
+            with StateStore(db) as store:
+                pending = store.list_pending_plans()
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+        self.assertEqual(data["mode"], "plan")
+        self.assertEqual(data["classification"], "operational_request")
+        self.assertEqual(len(pending), 1)
+        self.assertIn("calendar: delete_range", pending[0].plan_json["actions"][0]["command"])
 
     def test_chat_can_read_calendar_today(self) -> None:
         tmp = Path("tmp") / f"web-api-{uuid4().hex}"
@@ -734,6 +872,7 @@ class TestCalendar(unittest.TestCase):
             shutil.rmtree(tmp, ignore_errors=True)
 
         self.assertEqual(data["mode"], "reply")
+        self.assertEqual(data["classification"], "deterministic_query")
         self.assertIn("Check in", data["reply"])
 
 

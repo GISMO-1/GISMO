@@ -9,7 +9,6 @@ from __future__ import annotations
 import ipaddress
 import json
 import logging
-import os
 import re
 import shutil
 import socket
@@ -24,6 +23,15 @@ from typing import Any
 
 from gismo.core.models import CalendarEvent, ConnectedDevice, QueueStatus
 from gismo.core.state import StateStore
+from gismo.llm.model_policy import (
+    DEFAULT_PRIMARY_ASSISTANT_MODEL,
+    discover_models,
+    get_model_health as get_model_policy_health,
+    load_model_policy,
+    record_model_result,
+    resolve_model_route,
+    save_model_policy,
+)
 from gismo.memory.store import list_namespaces, list_items_for_snapshot
 
 LOGGER = logging.getLogger(__name__)
@@ -486,28 +494,32 @@ def _build_chat_system(db_path: str) -> str:
 
     name = get_operator_name(db_path) or "Operator"
     return (
-        "I am GISMO, a local-first, policy-controlled personal AI assistant built by Mike Burns. "
-        "I run entirely on your hardware — no cloud services, no silent actions, and a full audit trail of everything I do. "
+        "I am GISMO, a local-first personal AI assistant built by Mike Burns. "
+        "I run on your own hardware and speak clearly, calmly, and directly. "
         f"The operator's name is {name}. Address them as {name} when appropriate. "
-        "My job is to help you manage tasks, queues, plans, runs, memory, and your local calendar on your own machine. "
+        "My job is to help with your calendar, devices, tasks, and local information. "
         "I speak directly and concisely. I do not output JSON unless you ask for it. "
-        "I never take actions outside what your operator policy explicitly permits."
+        "I do not pretend work is complete until it really is."
     )
 
 
 _CHAT_AMBIGUOUS_RE = re.compile(
-    r"\b(can you help me|help me with something|not sure|maybe later|what should we do)\b"
+    r"\b(can you help me|help me with something|not sure|maybe later|what should we do|fix this|do something)\b"
 )
 _CHAT_OPERATIONAL_RE = re.compile(
     r"\b(turn on|turn off|check|scan|lock|unlock|open|close|start|stop|run|queue|save|write|remember|"
-    r"set up|set|pause|resume|look for|find|show me|monitor|connect|remove|add|remind me|schedule)\b"
+    r"set up|set|pause|resume|look for|find|show me|monitor|connect|remove|add|delete|remind me|schedule)\b"
 )
-_CHAT_INFORMATIONAL_RE = re.compile(
+_CHAT_CONVERSATIONAL_RE = re.compile(
     r"^(who|what|when|where|why|how)\b|"
-    r"\b(tell me|explain|joke|time|date|weather|status|who are you|what can you do)\b"
+    r"\b(tell me|explain|joke|time|date|weather|who are you|what can you do|what else can you do|summarize|help me think)\b"
 )
 _CHAT_CALENDAR_READ_RE = re.compile(r"\b(calendar|agenda|schedule)\b")
 _CHAT_CALENDAR_CREATE_RE = re.compile(r"^(remind me|add an event|add event|schedule)\b", re.IGNORECASE)
+_CHAT_CALENDAR_DELETE_RANGE_RE = re.compile(
+    r"\bdelete (?:calendar )?(?:events?|reminders?) from (?P<start>[a-z]+(?: \d{1,2})?) (?:through|to|until) (?P<end>[a-z]+(?: \d{1,2})?)\b",
+    re.IGNORECASE,
+)
 _CHAT_UPCOMING_RE = re.compile(r"\b(what(?:'s| is)? coming up|coming up)\b", re.IGNORECASE)
 _MONTH_NAME_TO_NUM = {
     "january": 1,
@@ -523,43 +535,88 @@ _MONTH_NAME_TO_NUM = {
     "november": 11,
     "december": 12,
 }
-_CHAT_MODEL_ERROR_REPLY = "I hit a temporary problem and could not answer that right now. Please try again in a moment."
+_CHAT_MODEL_ERROR_REPLY = "GISMO's main voice is not available right now. I can still help with your calendar, devices, settings, and status."
 _CHAT_PLAN_ERROR_REPLY = "I hit a temporary problem and could not start that right now. Please try again in a moment."
 
+def _normalized_text(message: str) -> str:
+    return " ".join((message or "").strip().lower().split())
 
-def _is_system_query(text: str) -> bool:
+
+def _deterministic_query_kind(text: str) -> tuple[str, str, float] | None:
     if not text:
-        return False
-    if re.search(r"\bwhat do i have today\b", text):
-        return True
-    if re.search(r"\bwhat do i have tomorrow\b", text):
-        return True
-    if re.search(r"\bwhat do i have in (january|february|march|april|may|june|july|august|september|october|november|december)\b", text):
-        return True
-    if _CHAT_UPCOMING_RE.search(text):
-        return True
-    if re.search(r"\bwhat(?:'s| is)? on my calendar today\b", text) or re.search(r"\b(calendar|schedule|agenda) today\b", text):
-        return True
-    if re.search(r"\bwhat(?:'s| is)? on my calendar tomorrow\b", text) or re.search(r"\b(calendar|schedule|agenda) tomorrow\b", text):
-        return True
-    return False
+        return None
+    if (
+        re.search(r"\bwhat do i have today\b", text)
+        or re.search(r"\bwhat do i have tomorrow\b", text)
+        or re.search(r"\bwhat do i have in (january|february|march|april|may|june|july|august|september|october|november|december)\b", text)
+        or _CHAT_UPCOMING_RE.search(text)
+        or re.search(r"\bwhat(?:'s| is)? on my calendar today\b", text)
+        or re.search(r"\bwhat(?:'s| is)? on my calendar tomorrow\b", text)
+        or re.search(r"\bwhat(?:'s| is)? on my (calendar|schedule|agenda)\b", text)
+        or re.search(r"\bwhat do i have on my calendar\b", text)
+    ):
+        return ("calendar", "Calendar request can be answered from local calendar state.", 0.98)
+    if re.search(r"\bwhat (?:devices|device) (?:are|is) connected\b", text) or re.search(r"\bconnected devices\b", text):
+        return ("devices", "Connected devices are already tracked locally.", 0.98)
+    if re.search(r"\bwhat(?:'s| is)? my status\b", text) or re.search(r"\b(system status|status report|how are things)\b", text):
+        return ("status", "Current status is already available from local runtime state.", 0.96)
+    if re.search(r"\bwhat(?:'s| is)? in memory\b", text) or re.search(r"\bshow memory\b", text):
+        return ("memory", "Memory contents are stored locally and do not require the assistant model.", 0.96)
+    if (
+        re.search(r"\bwhat (?:voice|model) am i using\b", text)
+        or re.search(r"\bwhat (?:voice|model) are you using\b", text)
+        or re.search(r"\bwhich (?:voice|model) (?:am i|are you) using\b", text)
+    ):
+        return ("settings", "Current voice and model settings are available locally.", 0.98)
+    if re.search(r"\bwhat(?:'s| is)? my name\b", text) or re.search(r"\bwho am i\b", text):
+        return ("operator", "Operator information is stored locally.", 0.94)
+    if re.search(r"\bwhat(?:'s| is)? (?:going on|happened recently|recent activity)\b", text) or re.search(r"\bactivity\b", text):
+        return ("activity", "Recent activity is already stored in local state.", 0.9)
+    return None
 
 
-def _classify_chat_request(message: str) -> str:
-    text = " ".join((message or "").strip().lower().split())
+def classify_chat_request(message: str) -> dict[str, Any]:
+    text = _normalized_text(message)
     if not text:
-        return "ambiguous"
-    if _is_system_query(text):
-        return "system_query"
-    if _CHAT_AMBIGUOUS_RE.search(text):
-        return "ambiguous"
-    if _CHAT_OPERATIONAL_RE.search(text):
-        return "operational"
-    if _CHAT_INFORMATIONAL_RE.search(text) or text.endswith("?"):
-        return "informational"
-    if len(text.split()) <= 3:
-        return "ambiguous"
-    return "informational"
+        return {"kind": "ambiguous_request", "confidence": 0.2, "reason": "The message was empty."}
+
+    deterministic = _deterministic_query_kind(text)
+    if deterministic is not None:
+        query_kind, reason, confidence = deterministic
+        return {
+            "kind": "deterministic_query",
+            "confidence": confidence,
+            "reason": reason,
+            "query_kind": query_kind,
+            "text": text,
+        }
+    if _CHAT_CALENDAR_CREATE_RE.search(text) or _CHAT_CALENDAR_DELETE_RANGE_RE.search(text) or _CHAT_OPERATIONAL_RE.search(text):
+        return {
+            "kind": "operational_request",
+            "confidence": 0.92,
+            "reason": "The request asks GISMO to take an action.",
+            "text": text,
+        }
+    if _CHAT_CONVERSATIONAL_RE.search(text) or text.endswith("?"):
+        return {
+            "kind": "conversational_request",
+            "confidence": 0.84,
+            "reason": "The request is asking for a conversational reply.",
+            "text": text,
+        }
+    if _CHAT_AMBIGUOUS_RE.search(text) or len(text.split()) <= 3:
+        return {
+            "kind": "ambiguous_request",
+            "confidence": 0.72,
+            "reason": "The request is too open-ended to act on safely.",
+            "text": text,
+        }
+    return {
+        "kind": "ambiguous_request",
+        "confidence": 0.55,
+        "reason": "GISMO needs a more specific request before acting.",
+        "text": text,
+    }
 
 
 def _coerce_text_list(value: Any) -> list[str]:
@@ -573,7 +630,7 @@ def _chat_action_label(action: dict[str, Any]) -> str:
     if why:
         return why
     command = str(action.get("command") or "").strip()
-    for prefix in ("echo:", "note:", "shell:", "device:", "graph:"):
+    for prefix in ("echo:", "note:", "shell:", "device:", "calendar:", "graph:"):
         if command.lower().startswith(prefix):
             return command[len(prefix):].strip()
     return command
@@ -610,8 +667,6 @@ def _format_plan_reply(plan: dict[str, Any], risk: dict[str, Any]) -> tuple[str,
 def _request_chat_plan(
     db_path: str,
     message: str,
-    *,
-    primary_model: str | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
     from gismo.cli.main import _request_llm_plan
 
@@ -624,8 +679,11 @@ def _request_chat_plan(
         f"{_planner_device_context(db_path)}\n\n"
         f"Request: {message}"
     )
+    route = resolve_model_route(db_path, purpose="planner")
+    if route.degraded or not route.candidate_models:
+        raise RuntimeError(_CHAT_PLAN_ERROR_REPLY)
     last_error: BaseException | None = None
-    for model in _chat_model_candidates(primary_model or get_model_preference(db_path)):
+    for model in route.candidate_models:
         state_store = None
         try:
             plan, risk, explain_payload, _policy_summary, state_store, _payload = _request_llm_plan(
@@ -633,7 +691,7 @@ def _request_chat_plan(
                 planner_message,
                 model=model,
                 host=None,
-                timeout_s=None,
+                timeout_s=route.capability.planner_timeout_s,
                 enqueue=True,
                 dry_run=False,
                 max_actions=5,
@@ -645,6 +703,7 @@ def _request_chat_plan(
                 json_output=True,
                 record_event=True,
             )
+            record_model_result(purpose="planner", model=model, success=True)
             return (
                 plan,
                 {
@@ -656,6 +715,7 @@ def _request_chat_plan(
             )
         except (MemoryError, SystemExit, Exception) as exc:
             last_error = exc
+            record_model_result(purpose="planner", model=model, success=False, error=exc)
             _log_chat_failure(
                 db_path,
                 stage="planner",
@@ -667,20 +727,6 @@ def _request_chat_plan(
             if state_store is not None:
                 state_store.close()
     raise RuntimeError(_CHAT_PLAN_ERROR_REPLY) from last_error
-
-
-def _chat_model_candidates(primary_model: str) -> list[str]:
-    configured = [
-        item.strip()
-        for item in (os.getenv("GISMO_OLLAMA_FALLBACK_MODEL") or "").split(",")
-        if item.strip()
-    ]
-    defaults = ["llama3.2:3b", "qwen2.5:3b", "phi3:mini", "tinyllama"]
-    result: list[str] = []
-    for candidate in [primary_model] + configured + defaults:
-        if candidate and candidate not in result:
-            result.append(candidate)
-    return result
 
 
 def _log_chat_failure(
@@ -715,19 +761,30 @@ def _run_freeform_chat_with_fallback(
     *,
     messages: list[dict[str, str]],
     system: str,
-    primary_model: str | None = None,
 ) -> str:
     from gismo.llm.ollama import ollama_freeform_chat
 
+    route = resolve_model_route(db_path, purpose="assistant_reply")
+    if route.degraded or not route.candidate_models:
+        return _CHAT_MODEL_ERROR_REPLY
     last_error: BaseException | None = None
-    for model in _chat_model_candidates(primary_model or get_model_preference(db_path)):
+    for model in route.candidate_models:
         try:
-            reply = _clean_reply(ollama_freeform_chat(messages, system=system, model=model))
+            reply = _clean_reply(
+                ollama_freeform_chat(
+                    messages,
+                    system=system,
+                    model=model,
+                    timeout_s=route.capability.assistant_timeout_s,
+                )
+            )
             if reply:
+                record_model_result(purpose="assistant_reply", model=model, success=True)
                 return reply
             raise RuntimeError("LLM reply was empty")
         except (MemoryError, Exception) as exc:
             last_error = exc
+            record_model_result(purpose="assistant_reply", model=model, success=False, error=exc)
             _log_chat_failure(
                 db_path,
                 stage="reply",
@@ -735,6 +792,8 @@ def _run_freeform_chat_with_fallback(
                 model=model,
                 user_message=messages[-1]["content"] if messages else None,
             )
+            if not route.policy.allow_identity_fallback:
+                break
     return _CHAT_MODEL_ERROR_REPLY
 
 
@@ -901,14 +960,58 @@ def _parse_calendar_chat_create(message: str) -> dict[str, Any] | None:
     }
 
 
+def _parse_month_day_token(token: str) -> datetime:
+    cleaned = " ".join(token.strip().lower().split())
+    now_local = datetime.now(_local_tz())
+    month_names = "|".join(_MONTH_NAME_TO_NUM.keys())
+    match = re.match(rf"^(?P<month>{month_names})\s+(?P<day>\d{{1,2}})$", cleaned, re.IGNORECASE)
+    if not match:
+        raise ValueError("date must look like March 27")
+    month_num = _MONTH_NAME_TO_NUM[str(match.group("month")).lower()]
+    day_num = int(str(match.group("day")))
+    year = now_local.year
+    try:
+        parsed = datetime(year, month_num, day_num, tzinfo=_local_tz())
+    except ValueError as exc:
+        raise ValueError("invalid calendar date") from exc
+    if parsed.date() < now_local.date() and month_num < now_local.month:
+        parsed = parsed.replace(year=year + 1)
+    return parsed
+
+
+def _parse_calendar_chat_delete_range(message: str) -> dict[str, Any] | None:
+    match = _CHAT_CALENDAR_DELETE_RANGE_RE.search(message or "")
+    if not match:
+        return None
+    start_local = _parse_month_day_token(str(match.group("start")))
+    end_local = _parse_month_day_token(str(match.group("end")))
+    if end_local < start_local:
+        end_local = end_local.replace(year=end_local.year + 1)
+    end_local = end_local.replace(hour=23, minute=59, second=59, microsecond=999999)
+    return {
+        "start_at": start_local.isoformat(),
+        "end_at": end_local.isoformat(),
+        "match_text": "",
+    }
+
+
 def _build_calendar_enqueue_plan(message: str) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]] | None:
     from gismo.core.risk import classify_plan_risk
 
-    payload = _parse_calendar_chat_create(message)
-    if payload is None:
-        return None
-    command = "calendar: add " + json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
-    why = f"add {payload['title']} to your calendar"
+    delete_payload = _parse_calendar_chat_delete_range(message)
+    if delete_payload is not None:
+        command = "calendar: delete_range " + json.dumps(delete_payload, ensure_ascii=False, separators=(",", ":"))
+        why = "remove calendar events in the requested date range"
+        intent = "calendar_delete_range"
+        summary = "calendar_delete_range"
+    else:
+        payload = _parse_calendar_chat_create(message)
+        if payload is None:
+            return None
+        command = "calendar: add " + json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+        why = f"add {payload['title']} to your calendar"
+        intent = "calendar_update"
+        summary = "calendar_add"
     actions = [
         {
             "type": "enqueue",
@@ -922,51 +1025,161 @@ def _build_calendar_enqueue_plan(message: str) -> tuple[dict[str, Any], dict[str
     risk = classify_plan_risk(actions).to_dict()
     return (
         {
-            "intent": "calendar_update",
+            "intent": intent,
             "assumptions": ["Operator requested a local calendar change."],
             "actions": actions,
             "notes": [],
             "memory_suggestions": [],
         },
         risk,
-        {"summary": "calendar_add"},
+        {"summary": summary},
     )
 
 
-def _handle_system_query(db_path: str, message: str) -> dict[str, Any] | None:
-    lowered = " ".join((message or "").strip().lower().split())
+def _activity_summary_reply(db_path: str) -> str:
+    items = get_activity_feed(db_path, limit=5)
+    if not items:
+        return "Nothing recent has happened yet."
+    parts = []
+    for item in items[:4]:
+        label = str(item.get("label") or "").strip() or "Activity"
+        status = str(item.get("status") or "").strip().lower()
+        parts.append(f"{label} ({status})")
+    return f"Recent activity: {_join_human(parts)}."
+
+
+def _device_summary_reply(db_path: str) -> str:
+    devices = list_devices(db_path)
+    if not devices:
+        return "You do not have any connected devices yet."
+    names = [str(device.get("name") or device.get("hostname") or device.get("ip")) for device in devices[:6]]
+    extra = f" There are {len(devices) - 6} more." if len(devices) > 6 else ""
+    return f"Connected devices: {_join_human(names)}.{extra}"
+
+
+def _status_summary_reply(db_path: str) -> str:
+    status = get_status(db_path)
+    health = get_system_health()
+    queue = (status.get("queue") or {}).get("by_status", {})
+    gismo = status.get("gismo") or {}
+    cpu = round(float(health.get("cpu_percent") or 0))
+    ram = round(float(health.get("virtual_memory") or 0))
+    lan = "connected" if health.get("lan_connected") else "offline"
+    internet = "online" if health.get("internet_connected") else "offline"
+    if gismo.get("working"):
+        state_text = "GISMO is working right now."
+    elif gismo.get("ready"):
+        state_text = "GISMO is ready."
+    else:
+        state_text = "GISMO is still getting ready."
+    return (
+        f"{state_text} Queue: {queue.get('QUEUED', 0)} queued, {queue.get('IN_PROGRESS', 0)} running, "
+        f"{queue.get('FAILED', 0)} failed. CPU {cpu}% and RAM {ram}%. Network is {lan}; internet is {internet}."
+    )
+
+
+def _memory_summary_reply(db_path: str) -> str:
+    memory = get_memory(db_path)
+    namespaces = memory.get("namespaces") or []
+    if not namespaces:
+        return "Memory is empty right now."
+    top = sorted(namespaces, key=lambda item: int(item.get("item_count") or 0), reverse=True)[:4]
+    parts = [f"{entry['namespace']} ({entry['item_count']})" for entry in top]
+    return f"Memory currently includes {_join_human(parts)}."
+
+
+def _settings_summary_reply(db_path: str, text: str) -> tuple[str, dict[str, Any]]:
+    from gismo.tts.prefs import get_voice
+
+    policy = load_model_policy(db_path).to_dict()
+    if "voice" in text:
+        voice_id = get_voice(db_path) or "default"
+        return (f"Your current voice is {voice_id}.", {"voice": voice_id})
+    primary_model = policy.get("primary_assistant_model") or DEFAULT_PRIMARY_ASSISTANT_MODEL
+    return (f"I am set to use {primary_model} for my main replies.", {"primary_assistant_model": primary_model})
+
+
+def _operator_summary_reply(db_path: str) -> str:
+    from gismo.onboarding import get_operator_name
+
+    name = get_operator_name(db_path) or "Operator"
+    return f"You are {name}."
+
+
+def _handle_deterministic_query(db_path: str, message: str) -> dict[str, Any] | None:
+    lowered = _normalized_text(message)
     today = datetime.now(_local_tz()).date()
-    if re.search(r"\bwhat do i have today\b", lowered):
-        reply = _calendar_reply_for_day(db_path, today.isoformat(), label="today")
-        _append_chat_record(message, reply)
-        return {"reply": reply, "mode": "reply", "classification": "system_query"}
-    if re.search(r"\bwhat do i have tomorrow\b", lowered):
-        reply = _calendar_reply_for_day(db_path, (today + timedelta(days=1)).isoformat(), label="tomorrow")
-        _append_chat_record(message, reply)
-        return {"reply": reply, "mode": "reply", "classification": "system_query"}
-    month_match = re.search(
-        r"\bwhat do i have in (?P<month>january|february|march|april|may|june|july|august|september|october|november|december)\b",
-        lowered,
-        re.IGNORECASE,
-    )
-    if month_match:
-        start_at, end_at, month_label = _month_bounds_for_query(str(month_match.group("month")))
-        reply = _calendar_reply_for_range(db_path, start_at, end_at, label=f"in {month_label}")
-        _append_chat_record(message, reply)
-        return {"reply": reply, "mode": "reply", "classification": "system_query"}
-    if _CHAT_UPCOMING_RE.search(lowered):
-        reply = _calendar_reply_for_upcoming(db_path)
-        _append_chat_record(message, reply)
-        return {"reply": reply, "mode": "reply", "classification": "system_query"}
-    if re.search(r"\bwhat(?:'s| is)? on my calendar today\b", lowered) or re.search(r"\b(calendar|schedule|agenda) today\b", lowered):
-        reply = _calendar_reply_for_day(db_path, today.isoformat(), label="today")
-        _append_chat_record(message, reply)
-        return {"reply": reply, "mode": "reply", "classification": "system_query"}
-    if re.search(r"\bwhat(?:'s| is)? on my calendar tomorrow\b", lowered) or re.search(r"\b(calendar|schedule|agenda) tomorrow\b", lowered):
-        reply = _calendar_reply_for_day(db_path, (today + timedelta(days=1)).isoformat(), label="tomorrow")
-        _append_chat_record(message, reply)
-        return {"reply": reply, "mode": "reply", "classification": "system_query"}
-    return None
+    query = _deterministic_query_kind(lowered)
+    if query is None:
+        return None
+    query_kind = query[0]
+    data: dict[str, Any] = {}
+    if query_kind == "calendar":
+        if re.search(r"\bwhat do i have today\b", lowered) or re.search(r"\bwhat(?:'s| is)? on my calendar today\b", lowered) or re.search(r"\b(calendar|schedule|agenda) today\b", lowered):
+            reply = _calendar_reply_for_day(db_path, today.isoformat(), label="today")
+            data = {"events": list_calendar_events(db_path, day=today.isoformat())}
+        elif re.search(r"\bwhat do i have tomorrow\b", lowered) or re.search(r"\bwhat(?:'s| is)? on my calendar tomorrow\b", lowered) or re.search(r"\b(calendar|schedule|agenda) tomorrow\b", lowered):
+            target = (today + timedelta(days=1)).isoformat()
+            reply = _calendar_reply_for_day(db_path, target, label="tomorrow")
+            data = {"events": list_calendar_events(db_path, day=target)}
+        else:
+            month_match = re.search(
+                r"\bwhat do i have in (?P<month>january|february|march|april|may|june|july|august|september|october|november|december)\b",
+                lowered,
+                re.IGNORECASE,
+            )
+            if month_match:
+                start_at, end_at, month_label = _month_bounds_for_query(str(month_match.group("month")))
+                reply = _calendar_reply_for_range(db_path, start_at, end_at, label=f"in {month_label}")
+                data = {
+                    "events": list_calendar_events(db_path, start=start_at.isoformat(), end=end_at.isoformat()),
+                    "label": month_label,
+                }
+            elif _CHAT_UPCOMING_RE.search(lowered):
+                reply = _calendar_reply_for_upcoming(db_path)
+                now_local = datetime.now(_local_tz())
+                data = {
+                    "events": list_calendar_events(
+                        db_path,
+                        start=now_local.isoformat(),
+                        end=(now_local + timedelta(days=30)).isoformat(),
+                        limit=8,
+                    )
+                }
+            else:
+                reply = _calendar_reply_for_upcoming(db_path)
+                data = {"events": []}
+    elif query_kind == "devices":
+        data = {"devices": list_devices(db_path)}
+        reply = _device_summary_reply(db_path)
+    elif query_kind == "status":
+        data = {"status": get_status(db_path), "health": get_system_health()}
+        reply = _status_summary_reply(db_path)
+    elif query_kind == "memory":
+        data = get_memory(db_path)
+        reply = _memory_summary_reply(db_path)
+    elif query_kind == "settings":
+        reply, data = _settings_summary_reply(db_path, lowered)
+    elif query_kind == "operator":
+        reply = _operator_summary_reply(db_path)
+        data = {"operator_name": reply.removeprefix("You are ").removesuffix(".")}
+    elif query_kind == "activity":
+        data = {"activity": get_activity_feed(db_path, limit=8)}
+        reply = _activity_summary_reply(db_path)
+    else:
+        return None
+    _append_chat_record(message, reply)
+    return {
+        "reply": reply,
+        "mode": "reply",
+        "classification": "deterministic_query",
+        "classification_detail": {
+            "kind": "deterministic_query",
+            "confidence": query[2],
+            "reason": query[1],
+        },
+        "data": data,
+    }
 
 
 def chat_message(
@@ -975,55 +1188,55 @@ def chat_message(
     history: list[dict[str, str]],
 ) -> dict[str, Any]:
     """Route chat requests into direct reply, clarification, or approval-ready plans."""
-    classification = "informational"
+    classification = {"kind": "ambiguous_request", "confidence": 0.0, "reason": "Unclassified."}
     try:
-        classification = _classify_chat_request(message)
+        classification = classify_chat_request(message)
 
-        if classification == "system_query":
-            system_reply = _handle_system_query(db_path, message)
-            if system_reply is not None:
-                return system_reply
+        if classification["kind"] == "deterministic_query":
+            deterministic_reply = _handle_deterministic_query(db_path, message)
+            if deterministic_reply is not None:
+                return deterministic_reply
             reply = "I can help with your calendar. Try asking what you have today, what is coming up, or ask me to add an event."
             _append_chat_record(message, reply)
             return {
                 "reply": reply,
                 "mode": "clarify",
-                "classification": "ambiguous",
+                "classification": "ambiguous_request",
+                "classification_detail": classification,
             }
 
-        if classification == "ambiguous":
+        if classification["kind"] == "ambiguous_request":
             reply = "I can help. Tell me exactly what you'd like me to do, or ask a direct question."
             _append_chat_record(message, reply)
             return {
                 "reply": reply,
                 "mode": "clarify",
-                "classification": classification,
+                "classification": classification["kind"],
+                "classification_detail": classification,
             }
 
-        if classification == "informational":
-            messages = list(history) + [{"role": "user", "content": message}]
+        if classification["kind"] == "conversational_request":
+            route = resolve_model_route(db_path, purpose="assistant_reply")
+            history_limit = route.capability.history_messages if not route.degraded else 6
+            messages = list(history)[-history_limit:] + [{"role": "user", "content": message}]
             reply = _run_freeform_chat_with_fallback(
                 db_path,
                 messages=messages,
                 system=_build_chat_system(db_path),
-                primary_model=get_model_preference(db_path),
             )
             _append_chat_record(message, reply)
             return {
                 "reply": reply,
                 "mode": "reply",
-                "classification": classification,
+                "classification": classification["kind"],
+                "classification_detail": classification,
             }
 
         calendar_plan = _build_calendar_enqueue_plan(message)
         if calendar_plan is not None:
             plan, risk, explain_json = calendar_plan
         else:
-            plan, risk, explain_json = _request_chat_plan(
-                db_path,
-                message,
-                primary_model=get_model_preference(db_path),
-            )
+            plan, risk, explain_json = _request_chat_plan(db_path, message)
 
         actions = [
             action
@@ -1037,7 +1250,8 @@ def chat_message(
             return {
                 "reply": reply,
                 "mode": "clarify",
-                "classification": "ambiguous",
+                "classification": "ambiguous_request",
+                "classification_detail": classification,
             }
 
         with StateStore(db_path) as store:
@@ -1060,7 +1274,8 @@ def chat_message(
         return {
             "reply": reply,
             "mode": "plan",
-            "classification": classification,
+            "classification": classification["kind"],
+            "classification_detail": classification,
             "plan_id": pending.id,
             "plan_steps": steps,
             "plan_notes": _coerce_text_list(plan.get("notes")),
@@ -1076,12 +1291,13 @@ def chat_message(
                 model=None,
                 user_message=message,
             )
-        reply = _CHAT_PLAN_ERROR_REPLY if classification == "operational" else _CHAT_MODEL_ERROR_REPLY
+        reply = _CHAT_PLAN_ERROR_REPLY if classification.get("kind") == "operational_request" else _CHAT_MODEL_ERROR_REPLY
         _append_chat_record(message, reply)
         return {
             "reply": reply,
             "mode": "reply",
-            "classification": classification if classification in {"informational", "operational", "system_query"} else "informational",
+            "classification": classification["kind"] if classification["kind"] in {"deterministic_query", "conversational_request", "operational_request"} else "conversational_request",
+            "classification_detail": classification,
         }
 
 
@@ -1636,75 +1852,13 @@ def get_device_stream_payload(db_path: str, device_id: str) -> dict[str, Any]:
 # ── Settings ───────────────────────────────────────────────────────────────
 
 
-_SETTINGS_NAMESPACE = "gismo:settings"
-_MODEL_KEY = "llm.model"
-
-
-
 def get_model_preference(db_path: str) -> str:
-    from gismo.llm.ollama import resolve_ollama_model
-    from gismo.memory.store import get_item as memory_get_item
-
-    item = memory_get_item(
-        db_path,
-        namespace=_SETTINGS_NAMESPACE,
-        key=_MODEL_KEY,
-        include_tombstoned=False,
-        actor="web-api",
-        policy_hash="web-settings",
-    )
-    if item is not None and isinstance(item.value, str) and item.value.strip():
-        return item.value.strip()
-    return resolve_ollama_model("gismo")
+    return load_model_policy(db_path).primary_assistant_model
 
 
 
-def _set_model_preference(db_path: str, model_name: str) -> None:
-    from gismo.memory.store import put_item as memory_put_item
-
-    model_name = model_name.strip()
-    if not model_name:
-        return
-    memory_put_item(
-        db_path,
-        namespace=_SETTINGS_NAMESPACE,
-        key=_MODEL_KEY,
-        kind="preference",
-        value=model_name,
-        tags=["llm", "model"],
-        confidence="high",
-        source="web-settings",
-        ttl_seconds=None,
-        actor="web-api",
-        policy_hash="web-settings",
-    )
-
-
-
-def get_model_options(db_path: str) -> list[str]:
-    options: list[str] = []
-    current = get_model_preference(db_path)
-    for candidate in [current] + _chat_model_candidates(current):
-        if candidate and candidate not in options:
-            options.append(candidate)
-    try:
-        completed = subprocess.run(
-            ["ollama", "list"],
-            capture_output=True,
-            text=True,
-            timeout=4,
-            check=False,
-        )
-        for line in (completed.stdout or "").splitlines()[1:]:
-            parts = line.split()
-            if not parts:
-                continue
-            model_name = parts[0].strip()
-            if model_name and model_name not in options:
-                options.append(model_name)
-    except (OSError, subprocess.TimeoutExpired):
-        pass
-    return options
+def get_model_options(_db_path: str) -> list[str]:
+    return list(discover_models().get("installed_models") or [])
 
 
 
@@ -1716,15 +1870,22 @@ def get_settings(db_path: str) -> dict[str, Any]:
         voice for voice in get_voices(db_path)["voices"]
         if voice.get("engine") == "kokoro"
     ]
+    policy = load_model_policy(db_path)
+    model_health = get_model_policy_health(db_path)
     return {
         "operator_name": get_operator_name(db_path) or "",
         "voice": get_voice(db_path),
         "voices": voices,
-        "model": get_model_preference(db_path),
-        "models": get_model_options(db_path),
+        "model": policy.primary_assistant_model,
+        "models": model_health.get("installed_models") or [],
+        "model_policy": policy.to_dict(),
+        "model_health": model_health,
         "theme": "Coming soon",
     }
 
+
+def get_models_health(db_path: str) -> dict[str, Any]:
+    return get_model_policy_health(db_path)
 
 
 def save_settings(
@@ -1733,6 +1894,11 @@ def save_settings(
     operator_name: str | None = None,
     voice_id: str | None = None,
     model_name: str | None = None,
+    primary_assistant_model: str | None = None,
+    planner_model: str | None = None,
+    helper_model: str | None = None,
+    allow_identity_fallback: bool | None = None,
+    performance_mode: str | None = None,
 ) -> dict[str, Any]:
     from gismo.onboarding import set_operator_name
     from gismo.tts.prefs import set_voice
@@ -1742,8 +1908,14 @@ def save_settings(
         set_operator_name(db_path, name)
     if voice_id:
         set_voice(db_path, voice_id)
-    if model_name:
-        _set_model_preference(db_path, model_name)
+    save_model_policy(
+        db_path,
+        primary_assistant_model=primary_assistant_model or model_name,
+        planner_model=planner_model,
+        helper_model=helper_model,
+        allow_identity_fallback=allow_identity_fallback,
+        performance_mode=performance_mode,
+    )
     return get_settings(db_path)
 
 

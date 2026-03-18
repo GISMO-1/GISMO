@@ -631,9 +631,39 @@ body{background:var(--bg);color:var(--text);font-family:var(--font);font-size:13
         </div>
       </div>
       <div>
-        <div class="field-label">Model</div>
+        <div class="field-label">Primary Assistant Model</div>
         <select class="field-input" id="settings-model"></select>
-        <div class="field-note">Pick the local model GISMO should try first.</div>
+        <div class="field-note">This is GISMO's main speaking voice.</div>
+      </div>
+      <div>
+        <div class="field-label">Planner Model</div>
+        <select class="field-input" id="settings-planner-model"></select>
+        <div class="field-note">Used for planning work before GISMO starts it.</div>
+      </div>
+      <div>
+        <div class="field-label">Helper Model</div>
+        <select class="field-input" id="settings-helper-model"></select>
+        <div class="field-note">Optional. Used only for background helper work.</div>
+      </div>
+      <div>
+        <div class="field-label">Allow Identity Fallback</div>
+        <label class="field-note" style="display:flex;align-items:center;gap:8px">
+          <input id="settings-allow-fallback" type="checkbox" />
+          Let GISMO fall back to another installed model if its main voice is unavailable
+        </label>
+      </div>
+      <div>
+        <div class="field-label">Performance Mode</div>
+        <select class="field-input" id="settings-performance-mode">
+          <option value="auto">Auto</option>
+          <option value="prefer_quality">Prefer quality</option>
+          <option value="balanced">Balanced</option>
+          <option value="prefer_responsiveness">Prefer responsiveness</option>
+        </select>
+      </div>
+      <div>
+        <div class="field-label">Model Health</div>
+        <div class="field-note" id="settings-model-health">Checking your local models…</div>
       </div>
       <div>
         <div class="field-label">Theme</div>
@@ -1839,6 +1869,43 @@ function setOp(name) {
   $('op-name').textContent = name || '\u2014';
 }
 
+function fillSelect(id, options, selectedValue, emptyLabel) {
+  var values = Array.isArray(options) ? options.slice() : [];
+  if (selectedValue && values.indexOf(selectedValue) < 0) {
+    values.unshift(selectedValue);
+  }
+  if (emptyLabel != null) {
+    values.unshift('');
+  }
+  $(id).innerHTML = values.map(function(value) {
+    var label = value || emptyLabel || '';
+    if (value && value === selectedValue && Array.isArray(options) && options.indexOf(value) < 0) {
+      label = value + ' (not installed)';
+    }
+    var selected = value === (selectedValue || '') ? ' selected' : '';
+    return '<option value="' + esc(value) + '"' + selected + '>' + esc(label) + '</option>';
+  }).join('');
+}
+
+function describeModelHealth(data) {
+  if (!data) return 'Model status is unavailable right now.';
+  var degraded = data.degraded_mode || {};
+  var policy = data.policy || {};
+  var installed = data.installed_models || [];
+  var issues = data.issues || [];
+  if (degraded.active) {
+    return degraded.reason || 'GISMO is in a reduced mode right now.';
+  }
+  if (issues.length) {
+    return issues[0];
+  }
+  if (!installed.length) {
+    return 'No local models were found yet.';
+  }
+  var helper = policy.helper_model ? ' Helper ready.' : ' No helper model selected.';
+  return 'Installed models: ' + installed.length + '. Main voice: ' + (policy.primary_assistant_model || 'Not set') + '.' + helper;
+}
+
 async function openSettings(section) {
   $('settings-overlay').classList.remove('hidden');
   var data = await get('/api/settings');
@@ -1851,10 +1918,14 @@ async function openSettings(section) {
     var selected = voice.id === data.voice ? ' selected' : '';
     return '<option value="' + esc(voice.id) + '"' + selected + '>' + esc(voice.name) + ' / ' + esc(voice.lang) + '</option>';
   }).join('');
-  $('settings-model').innerHTML = (data.models || []).map(function(model) {
-    var selected = model === data.model ? ' selected' : '';
-    return '<option value="' + esc(model) + '"' + selected + '>' + esc(model) + '</option>';
-  }).join('');
+  var policy = data.model_policy || {};
+  var models = data.models || [];
+  fillSelect('settings-model', models, policy.primary_assistant_model || data.model || '', null);
+  fillSelect('settings-planner-model', models, policy.planner_model || data.model || '', null);
+  fillSelect('settings-helper-model', models, policy.helper_model || '', 'None');
+  $('settings-allow-fallback').checked = !!policy.allow_identity_fallback;
+  $('settings-performance-mode').value = policy.performance_mode || 'auto';
+  $('settings-model-health').textContent = describeModelHealth(data.model_health);
   if (section === 'voice') $('settings-voice').focus();
   else if (section === 'model') $('settings-model').focus();
   else $('settings-name').focus();
@@ -1884,14 +1955,31 @@ async function previewSettingsVoice() {
 }
 
 async function saveSettings() {
-  var data = await post('/api/settings', {
-    operator_name: $('settings-name').value.trim(),
-    voice_id: $('settings-voice').value,
-    model_name: $('settings-model').value
-  });
-  if (!data) return;
-  setOp(data.operator_name);
-  closeSettings();
+  try {
+    var response = await fetch('/api/settings', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        operator_name: $('settings-name').value.trim(),
+        voice_id: $('settings-voice').value,
+        primary_assistant_model: $('settings-model').value,
+        planner_model: $('settings-planner-model').value,
+        helper_model: $('settings-helper-model').value,
+        allow_identity_fallback: $('settings-allow-fallback').checked,
+        performance_mode: $('settings-performance-mode').value
+      })
+    });
+    var data = null;
+    try { data = await response.json(); } catch (e) {}
+    if (!response.ok) {
+      addMsg('gismo', (data && data.error) ? data.error : 'Could not save those settings right now.');
+      return;
+    }
+    setOp(data.operator_name);
+    closeSettings();
+  } catch (e) {
+    addMsg('gismo', 'Could not save those settings right now.');
+  }
 }
 
 // ── Search (placeholder) ──────────────────────────────────────────────────────

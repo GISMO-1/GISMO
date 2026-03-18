@@ -1,220 +1,205 @@
 # GISMO
 
+
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-lightgrey.svg)]()
 [![GitHub Stars](https://img.shields.io/github/stars/GISMO-1/GISMO?style=social)](https://github.com/GISMO-1/GISMO/stargazers)
 
-**General Intelligent System for Multiflow Operations**
+**Your personal AI that runs on your hardware.**
 
-A local-first, policy-controlled personal AI that runs entirely on your hardware. No cloud. No silent actions. Full audit trail. Yours.
+GISMO (General Intelligent System for Multiflow Operations) is a local-first personal AI assistant that lives on your computer. It manages your tasks, controls your connected devices, speaks to you by voice, and keeps everything completely private. No cloud. No subscription. No company listening in.
 
-Built by [Mike Burns](https://x.com/GISMO_ai).
-
----
-
-## What is GISMO?
-
-GISMO is an autonomous AI orchestration system designed to plan, execute, and manage tasks on your own machine — privately, transparently, and under your complete control.
-
-Every AI assistant you use today runs on someone else's server. Your data passes through their infrastructure. You don't own it.
-
-GISMO is different. It runs locally using [Ollama](https://ollama.com) for its language model, stores everything in a local SQLite database, and gates every action through an explicit operator policy. Nothing happens without your permission. Nothing happens silently.
-
-**Core philosophy: Policy before power.**
+Built by Mike Burns. Open source. Free forever.
 
 ---
 
-## Features
+## What can GISMO do?
 
-**Local LLM Brain** — Ollama integration, model-agnostic, zero cloud dependency. GISMO includes a fine-tuned model identity with its own Modelfile.
-
-**Durable Task Engine** — Queue, daemon, state machine, resume-safe execution with retry handling and failure retention.
-
-**Full Audit Trail** — Every decision, plan, and action logged in tamper-evident JSONL format with cryptographic receipts.
-
-**Deterministic Risk Classification** — Every plan rated LOW / MEDIUM / HIGH before anything executes. No surprises.
-
-**Policy-Gated Everything** — Deny by default. Shell commands blocked unless explicitly allowlisted. Confirmation gates for anything above LOW risk.
-
-**Persistent Memory** — SQLite-backed memory with namespaces, profiles, retention rules, snapshots, and tamper detection. Operator-controlled writes only.
-
-**Interactive Plan Approval** — Defer plans for review. Inspect, edit, approve, or reject individual actions before execution via CLI or web UI.
-
-**Web Dashboard** — Local browser UI at `127.0.0.1:7800` with Queue, Runs, Memory, Plans, Chat, and Settings tabs. Zero external web framework dependencies.
-
-**Terminal Dashboard (TUI)** — Live terminal interface with queue, runs, and daemon status. Auto-refreshes every 3 seconds.
-
-**Chat Interface** — Talk to GISMO through the web UI. GISMO responds using the local LLM and speaks responses aloud.
-
-**Text-to-Speech** — 5 selectable voices via piper-tts. Models download on first use. Voice preference stored in memory. Configurable in web Settings.
-
-**Leashed Autonomy** — Agent loop that iterates toward goals under strict guardrails. Plans, enqueues, and executes only through the same policy gates as everything else.
-
-**Windows-First** — Built for Windows as the primary platform. Also runs on Linux and macOS.
+- **Talk to you** — chat by text or voice, get briefings, ask questions
+- **Control your devices** — smart lights, cameras, sensors, thermostats (expanding)
+- **Manage your tasks** — plan, queue, schedule, and track anything
+- **Remember things** — persistent memory that learns your preferences over time
+- **Monitor your home** — camera feeds, system health, activity alerts
+- **Work offline** — runs entirely on your machine, no internet required
+- **Speak aloud** — 11 high-quality voices powered by Kokoro TTS
 
 ---
 
 ## Quick Start
 
-**Prerequisites:** Python 3.11+, [Ollama](https://ollama.com) installed and running.
+### Requirements
+- Python 3.11+
+- Windows 10/11 (primary), Linux/macOS also supported
+- [Ollama](https://ollama.ai) for the local AI brain
+
+### Install
 
 ```bash
-# Clone
 git clone https://github.com/GISMO-1/GISMO.git
 cd GISMO
-
-# Set up virtual environment
 python -m venv .venv
 
-# Activate (Windows PowerShell)
+# Windows
 .venv\Scripts\Activate.ps1
 
-# Activate (Linux/macOS)
+# Linux/macOS
 source .venv/bin/activate
 
-# Install
 pip install -e .
-
-# Verify
-python scripts/verify.py
-
-# Create GISMO's model identity in Ollama
-ollama create gismo -f Modelfile
-
-# Launch the web dashboard
-gismo web
 ```
 
-Open `http://127.0.0.1:7800` in your browser. You're running.
+### Launch
 
----
-
-## Core Commands
-
+**Desktop app** (recommended):
 ```bash
-# Run a command
-gismo run "echo:Hello from GISMO"
-
-# Ask GISMO to plan something
-gismo ask "Summarize the last 10 queue failures" --dry-run
-
-# Defer a plan for review before execution
-gismo ask "Do X safely" --defer
-
-# Review and approve plans
-gismo plan list
-gismo plan show PLAN_ID
-gismo plan approve PLAN_ID
-gismo plan reject PLAN_ID --reason "too risky"
-gismo plan edit PLAN_ID --action 1 --cmd "echo:updated"
-
-# Queue and daemon
-gismo enqueue "note:remember this"
-gismo up          # start daemon
-gismo status      # check health
-gismo down        # stop daemon
-
-# Web dashboard
-gismo web
-
-# Terminal dashboard
-gismo tui
-
-# Voice
-gismo tts speak "Hello from GISMO"
-gismo tts voices list
-gismo tts voices set en_GB-northern_english_male-medium
+gismo app
 ```
+
+**Web dashboard**:
+```bash
+gismo web
+```
+
+**Command line**:
+```bash
+gismo ask "What can you do?"
+```
+
+On first launch, GISMO walks you through setup — your name, preferred voice, and you're ready to go.
 
 ---
 
-## Architecture
+## The Command Center
 
-```
-gismo/
-  core/       Orchestration engine, queue, daemon, state store, models
-  memory/     SQLite memory store, profiles, retention, summarization
-  llm/        Ollama integration, planner, prompt engineering
-  cli/        All CLI commands and argument parsing
-  tts/        Piper-tts voice engine, preferences, voice registry
-  web/        Local web dashboard (API, server, templates)
-  tui/        Terminal UI dashboard
-  tools/      Tool implementations (echo, note, shell, graph)
+GISMO opens as a mission control dashboard:
 
-policy/       Security policy files (readonly, dev-safe)
-data/         Training data for fine-tuning
-notebooks/    Colab notebook for model fine-tuning
-tests/        Comprehensive test coverage
-docs/         Operator guide and handoff documentation
-```
+- **Center** — Chat with GISMO, the primary interface
+- **Left panel** — Connected devices with live status
+- **Right panel** — Activity feed and task queue
+- **Top bar** — System status, search, your name
+
+Talk naturally: *"Turn on the living room lights"*, *"Check the front door camera"*, *"What's my schedule today?"*
 
 ---
 
 ## Voice
 
-GISMO speaks using [piper-tts](https://github.com/rhasspy/piper) with 5 selectable voices:
-
-| Voice | Language | Quality |
-|-------|----------|---------|
-| Northern English Male (default) | en-GB | medium |
-| Alan | en-GB | medium |
-| Lessac | en-US | medium |
-| Ryan | en-US | high |
-| Amy | en-US | medium |
-
-Voice models download automatically on first use and are cached locally. Configure in the web Settings tab or via `gismo tts voices set`.
+GISMO speaks with 11 high-quality voices powered by Kokoro TTS. Choose your favorite during setup or change it anytime in Settings. Default voice: Lewis (British male, calm and clear).
 
 ---
 
-## Policy & Safety
+## Privacy
 
-GISMO's safety model is built on real industrial robotics experience. The developer operates real industrial robots — he knows what happens when machines act without proper controls.
+Everything stays on your machine. GISMO doesn't phone home, doesn't collect analytics, and doesn't send your data anywhere. Your conversations, your device data, your preferences — all stored locally in a SQLite database that only you can access.
 
-- **Deny by default** — nothing executes unless explicitly permitted
-- **Deterministic risk classification** — LOW / MEDIUM / HIGH for every plan
-- **Confirmation gates** — operator approval required for MEDIUM and HIGH risk
-- **Full audit trail** — every action logged with cryptographic receipts
-- **No silent actions** — ever
+---
+
+## Device Support
+
+GISMO connects to devices on your local network:
+
+| Device Type | Protocol | Status |
+|---|---|---|
+| Tapo cameras | RTSP / pytapo | In progress |
+| FEIT / Tuya smart lights | Tuya local API | In progress |
+| Generic IP cameras | RTSP | In progress |
+| MQTT devices | MQTT | Planned |
+| Zigbee / Z-Wave | Via bridges | Planned |
+| Arduino / Raspberry Pi | Serial / GPIO | Planned |
+| Home Assistant | REST API | Planned |
+
+More devices added regularly. If it's on your network, GISMO can probably talk to it.
+
+---
+
+## How It Works
+
+GISMO runs a local AI model (via Ollama) on your hardware. When you ask it to do something:
+
+1. GISMO understands your request
+2. Creates a plan with specific actions
+3. Checks the plan against your safety rules
+4. Executes with your approval (or automatically for safe actions)
+5. Logs everything so you can review what happened
+
+Under the hood: Python, SQLite, Ollama, Kokoro TTS, pywebview. No frameworks, no heavy dependencies.
+
+---
+
+## For Developers
+
+GISMO has a full CLI and powerful internals:
+
+```bash
+gismo run "echo:Hello"          # Run a command immediately
+gismo enqueue "note:remember"   # Queue for daemon execution
+gismo ask "plan something"      # AI-powered planning
+gismo agent "do X" --once       # Autonomous agent loop
+gismo tts speak "Hello"         # Text-to-speech
+gismo tui                       # Terminal dashboard
+gismo daemon                    # Background task executor
+gismo queue stats               # Queue inspection
+gismo export --latest           # Audit log export
+```
+
+Architecture overview:
+- `gismo/core/` — orchestration engine, queue, daemon
+- `gismo/memory/` — SQLite memory store, profiles, retention
+- `gismo/llm/` — Ollama integration, planner
+- `gismo/tts/` — Kokoro + Piper text-to-speech
+- `gismo/web/` — Command center dashboard and API
+- `gismo/desktop/` — Native desktop app (pywebview)
+- `gismo/cli/` — All CLI commands
+- `tests/` — Test coverage
+
+Full developer docs: [docs/OPERATOR.md](docs/OPERATOR.md)
 
 ---
 
 ## Roadmap
 
-| Phase | Status |
-|-------|--------|
-| Phase 0 — Foundation | ✅ Complete |
-| Phase 1 — Local LLM Planner | ✅ Complete |
-| Phase 2 — Control & Guardrails | ✅ Complete |
-| Phase 3 — Memory & Context | ✅ Complete |
-| Phase 4 — Interactive GISMO | 🔄 In Progress |
-
-**Phase 4 completed so far:** TUI dashboard, web UI, TTS voice support, interactive plan approval, chat interface, fine-tuned model.
-
-**Up next:** Always-on service behavior, standalone application packaging, authentication and security.
-
----
-
-## The Story
-
-GISMO was born on Christmas Day 2025. Built by a factory worker who operates industrial robots by day and codes by night, on a 7-year-old laptop in Auburn, New York.
-
-The name is a nod to Gizmo from Gremlins — cute, friendly, helpful. But you need proper rules and controls to keep things safe. That's the whole point.
+- [x] Foundation — queue, daemon, SQLite state, audit logging
+- [x] Local LLM planner — Ollama integration, plan/approve/execute
+- [x] Safety model — risk classification, policy gates, confirmation
+- [x] Memory — persistent context, profiles, snapshots
+- [x] Voice — Kokoro TTS with 11 voices
+- [x] Command center — desktop app with mission control dashboard
+- [x] Onboarding — first-run setup, personalized experience
+- [x] Fine-tuned model — custom GISMO personality
+- [ ] Device connections — cameras, lights, sensors, thermostats
+- [ ] Network scanning — auto-discover devices on your network
+- [ ] Camera feeds — live thumbnails and fullscreen viewer
+- [ ] Smart home control — lights, locks, climate via chat
+- [ ] Always-on service — auto-start, background operation
+- [ ] Remote access — check on things from your phone
+- [ ] Standalone installer — one-click setup for non-developers
 
 ---
 
-## Documentation
+## Why GISMO?
 
-- [Operator Guide](docs/OPERATOR.md) — usage and lifecycle guidance
-- [Handoff](Handoff.md) — maintainer handoff and architecture overview
+Every AI assistant today sends your data to a company's servers. Alexa listens for Amazon. Siri processes through Apple. Google Assistant feeds Google.
+
+GISMO is different. It runs on YOUR computer. Nothing leaves. No subscription. No company can change the terms, shut it down, or sell your data. You own it completely.
+
+The name comes from Gizmo in Gremlins — friendly and helpful, but with rules to keep things safe. That's GISMO's philosophy: powerful but controlled. Your AI, your rules.
+
+---
+
+## Support the Project
+
+- Star this repo
+- [Sponsor on GitHub](https://github.com/sponsors/GISMO-1)
+- Report bugs and request features via [Issues](https://github.com/GISMO-1/GISMO/issues)
+- Follow [@GISMO_ai](https://twitter.com/GISMO_ai) on X
 
 ---
 
 ## License
 
-[MIT](LICENSE) — Free. Open source. Yours.
+MIT License — free to use, modify, and distribute.
 
----
+Built with determination on a 7-year-old laptop by [Mike Burns](https://github.com/GISMO-1).
 
-**GitHub:** [github.com/GISMO-1/GISMO](https://github.com/GISMO-1/GISMO)
-**Twitter:** [@GISMO_ai](https://x.com/GISMO_ai)
+Born December 25, 2025. 🎄

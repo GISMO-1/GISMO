@@ -324,6 +324,25 @@ def run_memory_snapshot_import(args: argparse.Namespace, deps: SnapshotDependenc
         snapshot_payload = load_snapshot(snapshot_path)
         items, snapshot_hash = validate_snapshot(snapshot_payload)
     except (OSError, ValueError, json.JSONDecodeError) as exc:
+        with StateStore(args.db_path) as store:
+            store.create_quarantine_entry(
+                source_kind="memory_snapshot",
+                source_ref=str(snapshot_path),
+                origin_type="memory_snapshot",
+                content=None,
+                content_sha256=None,
+                actor=actor,
+                trust_labels=["imported"],
+                verification_status="unverified",
+                provenance_json={"snapshot_path": str(snapshot_path)},
+                metadata_json={
+                    "mode": args.mode,
+                    "validated": False,
+                    "error": str(exc),
+                    "dry_run": dry_run,
+                },
+                related_event_id=snapshot_event_id,
+            )
         _record_snapshot_import_audit(
             db_path=args.db_path,
             event_id=snapshot_event_id,
@@ -350,6 +369,26 @@ def run_memory_snapshot_import(args: argparse.Namespace, deps: SnapshotDependenc
         )
         print(f"Invalid snapshot: {exc}", file=sys.stderr)
         raise SystemExit(2) from exc
+
+    with StateStore(args.db_path) as store:
+        quarantine_record = store.create_quarantine_entry(
+            source_kind="memory_snapshot",
+            source_ref=str(snapshot_path),
+            origin_type="memory_snapshot",
+            content=snapshot_payload,
+            content_sha256=snapshot_hash,
+            actor=actor,
+            trust_labels=["imported"],
+            verification_status="unverified",
+            provenance_json={"snapshot_path": str(snapshot_path), "snapshot_hash": snapshot_hash},
+            metadata_json={
+                "mode": args.mode,
+                "validated": True,
+                "item_count": len(items),
+                "dry_run": dry_run,
+            },
+            related_event_id=snapshot_event_id,
+        )
 
     validated = len(items)
     applied = 0
@@ -470,6 +509,14 @@ def run_memory_snapshot_import(args: argparse.Namespace, deps: SnapshotDependenc
                 tags=item.tags,
                 confidence=item.confidence,
                 source=item.source,
+                source_type="memory_snapshot",
+                verification_status="unverified",
+                trust_labels=["imported"],
+                provenance_json={
+                    "snapshot_hash": snapshot_hash,
+                    "snapshot_path": str(snapshot_path),
+                    "quarantine_id": quarantine_record.id,
+                },
                 ttl_seconds=None,
                 is_tombstoned=item.is_tombstoned,
                 created_at=item.created_at,

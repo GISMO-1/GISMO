@@ -164,7 +164,11 @@ def handle_plan_approve(args: argparse.Namespace) -> None:
                 print("Not approved.", file=sys.stderr)
                 raise SystemExit(2)
 
-        enqueued_ids, skipped = enqueue_plan_actions(store, plan.plan_json)
+        enqueued_ids, skipped = enqueue_plan_actions(
+            store,
+            plan.plan_json,
+            approval_id=plan_id,
+        )
         store.approve_pending_plan(plan_id)
 
     if skipped:

@@ -12,6 +12,7 @@ def enqueue_plan_actions(
     plan: dict,
     *,
     run_id: str | None = None,
+    approval_id: str | None = None,
 ) -> tuple[list[str], list[str]]:
     """Iterate *plan['actions']*, validate, and enqueue each as a queue item.
 
@@ -41,6 +42,7 @@ def enqueue_plan_actions(
             run_id=run_id,
             max_retries=int(action.get("retries") or 0),
             timeout_seconds=int(action.get("timeout_seconds") or 30),
+            metadata={"approval_id": approval_id} if approval_id else None,
         )
         enqueued_ids.append(item.id)
 

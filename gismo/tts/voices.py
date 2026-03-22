@@ -5,6 +5,9 @@ import urllib.request
 from pathlib import Path
 from typing import Callable
 
+from gismo.core.outbound import check_outbound_scope, check_outbound_target
+from gismo.core.permissions import NetworkPolicy
+
 # ── Engine constants ────────────────────────────────────────────────────────
 
 ENGINE_KOKORO = "kokoro"
@@ -200,38 +203,85 @@ _KOKORO_VOICES_URL = (
 )
 
 
-def _download_file(url: str, dest: Path, progress_cb: Callable[[str], None] | None) -> None:
+def _download_file(
+    url: str,
+    dest: Path,
+    progress_cb: Callable[[str], None] | None,
+    *,
+    network_policy: NetworkPolicy | None = None,
+    db_path: str | None = None,
+) -> None:
     if progress_cb:
         progress_cb(f"Downloading {dest.name}…")
+    check_outbound_target(
+        component="tts_download",
+        target=url,
+        policy=network_policy,
+        actor="tts",
+        action="download",
+        db_path=db_path,
+    )
     urllib.request.urlretrieve(url, dest)
     if progress_cb:
         size_mb = dest.stat().st_size / 1e6
         progress_cb(f"Downloaded {dest.name} ({size_mb:.1f} MB)")
 
 
-def ensure_kokoro_downloaded(progress_cb: Callable[[str], None] | None = None) -> None:
+def ensure_kokoro_downloaded(
+    progress_cb: Callable[[str], None] | None = None,
+    *,
+    network_policy: NetworkPolicy | None = None,
+    db_path: str | None = None,
+) -> None:
     """Download kokoro model files if not already cached."""
     if not kokoro_model_path().exists():
-        _download_file(_KOKORO_MODEL_URL, kokoro_model_path(), progress_cb)
+        _download_file(
+            _KOKORO_MODEL_URL,
+            kokoro_model_path(),
+            progress_cb,
+            network_policy=network_policy,
+            db_path=db_path,
+        )
     if not kokoro_voices_path().exists():
-        _download_file(_KOKORO_VOICES_URL, kokoro_voices_path(), progress_cb)
+        _download_file(
+            _KOKORO_VOICES_URL,
+            kokoro_voices_path(),
+            progress_cb,
+            network_policy=network_policy,
+            db_path=db_path,
+        )
 
 
 def ensure_downloaded(
     voice_id: str,
     progress_cb: Callable[[str], None] | None = None,
+    *,
+    network_policy: NetworkPolicy | None = None,
+    db_path: str | None = None,
 ) -> None:
     """Download model files for *voice_id* if not already cached."""
     validate_voice(voice_id)
     if is_downloaded(voice_id):
         return
     if VOICES[voice_id]["engine"] == ENGINE_KOKORO:
-        ensure_kokoro_downloaded(progress_cb)
+        ensure_kokoro_downloaded(
+            progress_cb,
+            network_policy=network_policy,
+            db_path=db_path,
+        )
     else:
         from piper.download_voices import download_voice
 
         if progress_cb:
             progress_cb(f"Downloading voice model '{voice_id}'…")
+        check_outbound_scope(
+            component="tts_download",
+            scope="public",
+            policy=network_policy,
+            actor="tts",
+            action="download",
+            db_path=db_path,
+        )
         download_voice(voice_id, voices_dir())
         if progress_cb:
             progress_cb(f"Downloaded '{voice_id}'.")

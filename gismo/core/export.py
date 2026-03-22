@@ -304,6 +304,8 @@ def _serialize_tool_receipt(receipt: ToolReceipt) -> dict[str, Any]:
         "error_message": receipt.error_message,
         "policy_decision_id": receipt.policy_decision_id,
         "policy_snapshot": receipt.policy_snapshot,
+        "capability_id": receipt.capability_id,
+        "capability_summary": receipt.capability_summary,
     }
 
 

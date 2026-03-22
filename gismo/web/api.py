@@ -21,8 +21,21 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+from gismo.core.device_runtime import execute_device_runtime_action, serialize_device
+from gismo.core.execution import select_execution_events, summarize_execution_events
 from gismo.core.models import CalendarEvent, ConnectedDevice, QueueStatus
+from gismo.core.outbound import check_outbound_scope, check_outbound_target
+from gismo.core.readiness import build_readiness_payload, build_runtime_status
 from gismo.core.state import StateStore
+from gismo.core.trust import (
+    TRUST_LABEL_TRUSTED,
+    TRUST_LABEL_VERIFIED,
+    VERIFICATION_STATUS_UNVERIFIED,
+    VERIFICATION_STATUS_VERIFIED,
+    ensure_verification_status,
+    normalize_trust_labels,
+    sha256_text,
+)
 from gismo.llm.model_policy import (
     DEFAULT_PRIMARY_ASSISTANT_MODEL,
     discover_models,
@@ -73,6 +86,134 @@ def _coerce_calendar_dt(value: Any) -> datetime:
     return dt.astimezone(timezone.utc)
 
 
+def _coerce_optional_str(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _serialize_security_event(
+    event: Any,
+    *,
+    previous: Any | None = None,
+    next_event: Any | None = None,
+) -> dict[str, Any]:
+    payload = event.to_dict()
+    if previous is not None or next_event is not None:
+        payload["chain"] = {
+            "previous": (
+                {
+                    "seq": previous.seq,
+                    "id": previous.id,
+                    "event_hash": previous.event_hash,
+                }
+                if previous is not None
+                else None
+            ),
+            "current": {
+                "seq": event.seq,
+                "id": event.id,
+                "prev_event_id": event.prev_event_id,
+                "prev_hash": event.prev_hash,
+                "event_hash": event.event_hash,
+            },
+            "next": (
+                {
+                    "seq": next_event.seq,
+                    "id": next_event.id,
+                    "prev_event_id": next_event.prev_event_id,
+                    "prev_hash": next_event.prev_hash,
+                }
+                if next_event is not None
+                else None
+            ),
+        }
+    return payload
+
+
+def _serialize_quarantine_record(record: Any, *, include_content: bool) -> dict[str, Any]:
+    payload = {
+        "id": record.id,
+        "created_at": record.created_at.isoformat(),
+        "source_kind": record.source_kind,
+        "source_ref": record.source_ref,
+        "origin_type": record.origin_type,
+        "content_sha256": record.content_sha256,
+        "verification_status": record.verification_status,
+        "trust_labels": list(record.trust_labels),
+        "provenance": dict(record.provenance_json),
+        "metadata": dict(record.metadata_json),
+        "status": record.status,
+        "decision_reason": record.decision_reason,
+        "decision_at": record.decision_at.isoformat() if record.decision_at else None,
+        "memory_namespace": record.memory_namespace,
+        "memory_key": record.memory_key,
+        "related_run_id": record.related_run_id,
+        "related_task_id": record.related_task_id,
+        "related_plan_id": record.related_plan_id,
+        "related_event_id": record.related_event_id,
+        "content_present": record.content is not None,
+    }
+    if include_content:
+        payload["content"] = record.content
+    return payload
+
+
+def _serialize_memory_item_trust(item: Any) -> dict[str, Any]:
+    return {
+        "id": item.id,
+        "namespace": item.namespace,
+        "key": item.key,
+        "kind": item.kind,
+        "value": item.value,
+        "source": item.source,
+        "source_type": item.source_type,
+        "verification_status": item.verification_status,
+        "trust_labels": list(item.trust_labels),
+        "provenance": dict(item.provenance_json),
+        "is_tombstoned": item.is_tombstoned,
+        "created_at": item.created_at,
+        "updated_at": item.updated_at,
+    }
+
+
+def _default_verification_status_for_labels(labels: list[str], explicit: Any) -> str:
+    if explicit is not None:
+        return ensure_verification_status(str(explicit))
+    if TRUST_LABEL_TRUSTED in labels or TRUST_LABEL_VERIFIED in labels:
+        return VERIFICATION_STATUS_VERIFIED
+    return VERIFICATION_STATUS_UNVERIFIED
+
+
+def _resolve_quarantine_value(record: Any, body: dict[str, Any]) -> Any:
+    if "value" in body and "value_text" in body:
+        raise ValueError("Provide only one of value or value_text.")
+    if "value_text" in body:
+        return body.get("value_text")
+    if "value" in body:
+        return body.get("value")
+    if record.content is None:
+        raise ValueError("Quarantine record does not contain stored content.")
+    return record.content
+
+
+def _metadata_default(record: Any, field_name: str) -> str | None:
+    target = record.metadata_json.get("memory_target")
+    if isinstance(target, dict):
+        value = target.get(field_name)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    value = record.metadata_json.get(field_name)
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return None
+
+
+def _default_memory_kind(value: Any) -> str:
+    return "note" if isinstance(value, str) else "fact"
+
+
 def _calendar_event_day_bounds(day_value: str) -> tuple[datetime, datetime]:
     try:
         day = datetime.fromisoformat(day_value).date()
@@ -87,66 +228,12 @@ def _calendar_event_day_bounds(day_value: str) -> tuple[datetime, datetime]:
 
 
 def get_status(db_path: str) -> dict[str, Any]:
-    """Return background worker status + queue stats."""
-    with StateStore(db_path) as store:
-        hb = store.get_daemon_heartbeat()
-        paused = store.get_daemon_paused()
-        stats = store.queue_stats()
-
-    now = datetime.now(timezone.utc)
-    daemon: dict[str, Any]
-    if hb is None:
-        daemon = {"running": False, "paused": paused, "stale": False, "state": "ready"}
-    else:
-        last_seen = hb.last_seen
-        if last_seen.tzinfo is None:
-            last_seen = last_seen.replace(tzinfo=timezone.utc)
-        age_secs = max(0, int((now - last_seen).total_seconds()))
-        stale = age_secs > 30
-        daemon = {
-            "running": not stale,
-            "paused": paused,
-            "stale": stale,
-            "state": "online" if not stale else "starting",
-            "pid": hb.pid,
-            "started_at": _dt(hb.started_at),
-            "last_seen": _dt(hb.last_seen),
-            "age_secs": age_secs,
-        }
-    working = int((stats.get("by_status") or {}).get("IN_PROGRESS") or 0) > 0
-    gismo_state = "working" if working and daemon["running"] else "ready" if daemon["running"] else "starting"
-    return {
-        "daemon": daemon,
-        "queue": stats,
-        "database": {"ready": True, "state": "ready"},
-        "api": {"ready": True, "state": "ready"},
-        "gismo": {
-            "state": gismo_state,
-            "ready": bool(daemon["running"]),
-            "working": working,
-            "paused": paused,
-        },
-    }
+    """Return command-center status grounded in current runtime state."""
+    return build_runtime_status(db_path)
 
 
 def get_readiness(db_path: str) -> dict[str, Any]:
-    status = get_status(db_path)
-    daemon = status["daemon"]
-    ready = bool(status["database"]["ready"] and status["api"]["ready"] and daemon["running"] and not daemon.get("stale"))
-    return {
-        "ready": ready,
-        "gismo_state": status["gismo"]["state"],
-        "stages": [
-            {"key": "state", "label": "State", "ready": True, "detail": "Connected"},
-            {
-                "key": "worker",
-                "label": "Worker",
-                "ready": bool(daemon["running"] and not daemon.get("stale")),
-                "detail": "Ready" if daemon["running"] and not daemon.get("stale") else "Starting",
-            },
-            {"key": "api", "label": "API", "ready": True, "detail": "Listening"},
-        ],
-    }
+    return build_readiness_payload(db_path)
 
 
 def get_queue_stats(db_path: str) -> dict[str, Any]:
@@ -250,12 +337,17 @@ def get_run_detail(db_path: str, run_id: str) -> dict[str, Any]:
         run = runs[0]
         tasks = list(store.list_tasks(run_id))
         tool_calls = list(store.list_tool_calls(run_id))
+        receipts = list(store.list_tool_receipts(run_id))
+        security_events = store.list_security_events(limit=1000, related_run_id=run_id)
+    metadata = run.metadata_json if isinstance(run.metadata_json, dict) else {}
 
     return {
         "id": run.id,
         "label": run.label or "",
         "created_at": _dt(run.created_at),
-        "metadata": run.metadata_json,
+        "metadata": metadata,
+        "approval_id": metadata.get("approval_id"),
+        "plan_event_id": metadata.get("plan_event_id"),
         "tasks": [
             {
                 "id": t.id,
@@ -266,6 +358,7 @@ def get_run_detail(db_path: str, run_id: str) -> dict[str, Any]:
                 "output": t.output_json,
                 "error": t.error,
                 "failure_type": _status_val(t.failure_type),
+                "status_reason": t.status_reason,
             }
             for t in tasks
         ],
@@ -280,7 +373,323 @@ def get_run_detail(db_path: str, run_id: str) -> dict[str, Any]:
             }
             for tc in tool_calls
         ],
+        "receipts": [_serialize_tool_receipt(receipt) for receipt in receipts],
+        "execution": [
+            entry.to_dict()
+            for entry in summarize_execution_events(security_events, limit=25)
+        ],
     }
+
+
+def _serialize_tool_receipt(receipt: Any) -> dict[str, Any]:
+    policy_snapshot = receipt.policy_snapshot if isinstance(receipt.policy_snapshot, dict) else {}
+    response_payload = {}
+    if isinstance(receipt.response_payload_json, str) and receipt.response_payload_json.strip():
+        try:
+            response_payload = json.loads(receipt.response_payload_json)
+        except json.JSONDecodeError:
+            response_payload = {}
+    return {
+        "id": receipt.id,
+        "tool_name": receipt.tool_name,
+        "tool_kind": receipt.tool_kind,
+        "status": _status_val(receipt.status),
+        "started_at": _dt(receipt.started_at),
+        "finished_at": _dt(receipt.finished_at),
+        "duration_ms": receipt.duration_ms,
+        "error_type": receipt.error_type,
+        "error_message": receipt.error_message,
+        "policy_decision_id": receipt.policy_decision_id,
+        "policy_snapshot": policy_snapshot,
+        "capability_id": receipt.capability_id,
+        "capability_summary": receipt.capability_summary,
+        "execution": policy_snapshot.get("execution"),
+        "response": response_payload,
+    }
+
+
+def _summarize_output_payload(payload: Any) -> str:
+    if payload is None:
+        return ""
+    if isinstance(payload, str):
+        return payload.strip()
+    if isinstance(payload, list):
+        return " ".join(part for part in (_summarize_output_payload(item) for item in payload) if part)
+    if isinstance(payload, dict):
+        for key in ("summary", "note", "message", "stdout", "output"):
+            text = _summarize_output_payload(payload.get(key))
+            if text:
+                return text
+        echo = payload.get("echo")
+        if isinstance(echo, dict):
+            text = _summarize_output_payload(echo.get("message"))
+            if text:
+                return text
+    return ""
+
+
+def get_execution_status(
+    db_path: str,
+    *,
+    queue_item_ids: list[str] | None = None,
+    run_id: str | None = None,
+) -> dict[str, Any]:
+    queue_ids = [str(item_id).strip() for item_id in (queue_item_ids or []) if str(item_id).strip()]
+    if not queue_ids and not (run_id and run_id.strip()):
+        raise ValueError("queue_item_ids or run_id is required")
+
+    with StateStore(db_path) as store:
+        queue_items = [
+            store.get_queue_item(item_id)
+            for item_id in queue_ids
+        ]
+        run_map = {
+            run.id: run
+            for run in store.list_runs(limit=1000, newest_first=True)
+        }
+        queue_run_map = {}
+        for run in run_map.values():
+            metadata = run.metadata_json if isinstance(run.metadata_json, dict) else {}
+            queue_item_id = metadata.get("queue_item_id")
+            if isinstance(queue_item_id, str) and queue_item_id:
+                queue_run_map[queue_item_id] = run.id
+        run_candidates = [
+            item.run_id or queue_run_map.get(item.id)
+            for item in queue_items
+            if item is not None
+        ]
+        if isinstance(run_id, str) and run_id.strip():
+            run_candidates.append(run_id.strip())
+        related_run_ids = {
+            str(candidate).strip()
+            for candidate in run_candidates
+            if isinstance(candidate, str) and candidate.strip()
+        }
+        task_map = {run_key: list(store.list_tasks(run_key)) for run_key in related_run_ids}
+        receipt_map = {run_key: list(store.list_tool_receipts(run_key)) for run_key in related_run_ids}
+        execution_map = {
+            run_key: summarize_execution_events(
+                store.list_security_events(limit=1000, related_run_id=run_key),
+                limit=25,
+            )
+            for run_key in related_run_ids
+        }
+
+    serialized_queue = [
+        _serialize_queue_item(item, run_id_override=queue_run_map.get(item.id) if item is not None else None)
+        for item in queue_items
+        if item is not None
+    ]
+    missing_queue_ids = [queue_ids[index] for index, item in enumerate(queue_items) if item is None]
+    run_summaries = []
+    for related_run_id in sorted(related_run_ids):
+        run = run_map.get(related_run_id)
+        if run is None:
+            continue
+        metadata = run.metadata_json if isinstance(run.metadata_json, dict) else {}
+        receipts = [_serialize_tool_receipt(receipt) for receipt in receipt_map.get(related_run_id, [])]
+        run_summaries.append({
+            "run_id": run.id,
+            "approval_id": metadata.get("approval_id"),
+            "plan_event_id": metadata.get("plan_event_id"),
+            "command": metadata.get("command"),
+            "tasks": [
+                {
+                    "id": task.id,
+                    "title": task.title,
+                    "status": _status_val(task.status),
+                    "output": task.output_json,
+                    "error": task.error,
+                    "failure_type": _status_val(task.failure_type),
+                    "status_reason": task.status_reason,
+                }
+                for task in task_map.get(related_run_id, [])
+            ],
+            "receipts": receipts,
+            "execution": [entry.to_dict() for entry in execution_map.get(related_run_id, [])],
+        })
+
+    state, reason, message, final = _execution_plain_result(
+        queue_items=serialized_queue,
+        missing_queue_ids=missing_queue_ids,
+        runs=run_summaries,
+    )
+    execution_modes = sorted({
+        str(receipt.get("execution", {}).get("mode"))
+        for run in run_summaries
+        for receipt in run.get("receipts") or []
+        if isinstance(receipt.get("execution"), dict) and receipt.get("execution", {}).get("mode")
+    })
+    trust_zones = sorted({
+        str(receipt.get("execution", {}).get("zone"))
+        for run in run_summaries
+        for receipt in run.get("receipts") or []
+        if isinstance(receipt.get("execution"), dict) and receipt.get("execution", {}).get("zone")
+    })
+    approval_ids = sorted({
+        str(run.get("approval_id"))
+        for run in run_summaries
+        if isinstance(run.get("approval_id"), str) and run.get("approval_id")
+    })
+    return {
+        "state": state,
+        "reason": reason,
+        "message": message,
+        "final": final,
+        "queue_item_ids": queue_ids,
+        "queue_items": serialized_queue,
+        "missing_queue_item_ids": missing_queue_ids,
+        "runs": run_summaries,
+        "advanced": {
+            "run_ids": [run["run_id"] for run in run_summaries],
+            "approval_ids": approval_ids,
+            "execution_modes": execution_modes,
+            "trust_zones": trust_zones,
+        },
+    }
+
+
+def _serialize_queue_item(item: Any, *, run_id_override: str | None = None) -> dict[str, Any]:
+    return {
+        "id": item.id,
+        "status": _status_val(item.status),
+        "command_text": item.command_text,
+        "attempt_count": item.attempt_count,
+        "created_at": _dt(item.created_at),
+        "updated_at": _dt(item.updated_at),
+        "started_at": _dt(item.started_at),
+        "finished_at": _dt(item.finished_at),
+        "last_error": item.last_error,
+        "cancel_requested": item.cancel_requested,
+        "run_id": run_id_override or item.run_id,
+    }
+
+
+def _execution_plain_result(
+    *,
+    queue_items: list[dict[str, Any]],
+    missing_queue_ids: list[str],
+    runs: list[dict[str, Any]],
+) -> tuple[str, str | None, str, bool]:
+    if missing_queue_ids:
+        return (
+            "could_not_verify",
+            "queue item missing",
+            "I could not verify that completed.",
+            True,
+        )
+    if not queue_items:
+        return (
+            "could_not_verify",
+            "no queue items",
+            "I could not verify that completed.",
+            True,
+        )
+    terminal_statuses = {"SUCCEEDED", "FAILED", "CANCELLED"}
+    if any(item["status"] not in terminal_statuses for item in queue_items):
+        return (
+            "running",
+            None,
+            "Working on that now.",
+            False,
+        )
+    failed = [item for item in queue_items if item["status"] in {"FAILED", "CANCELLED"}]
+    if failed:
+        state, reason, message = _failed_execution_result(queue_items=failed, runs=runs)
+        return state, reason, message, True
+    if not runs:
+        return (
+            "could_not_verify",
+            "missing run detail",
+            "I could not verify that completed.",
+            True,
+        )
+    summaries = []
+    for run in runs:
+        for task in run.get("tasks") or []:
+            if task.get("status") == "SUCCEEDED":
+                summary = _summarize_output_payload(task.get("output"))
+                if summary and summary not in summaries:
+                    summaries.append(summary)
+    if summaries:
+        return (
+            "completed",
+            None,
+            f"I ran that successfully. {summaries[0]}",
+            True,
+        )
+    return (
+        "completed",
+        None,
+        "I ran that successfully.",
+        True,
+    )
+
+
+def _failed_execution_result(
+    *,
+    queue_items: list[dict[str, Any]],
+    runs: list[dict[str, Any]],
+) -> tuple[str, str | None, str]:
+    policy_blocked = False
+    unverified_source = False
+    timeout_failure = False
+    detail = ""
+    for run in runs:
+        for receipt in run.get("receipts") or []:
+            policy = receipt.get("policy_snapshot") or {}
+            if isinstance(policy, dict) and policy.get("allowed") is False:
+                policy_blocked = True
+                detail = str(
+                    ((policy.get("network_decision") or {}).get("reason"))
+                    or receipt.get("error_message")
+                    or detail
+                )
+            error_text = " ".join(
+                part for part in [
+                    str(receipt.get("error_message") or "").strip(),
+                    str(receipt.get("error_type") or "").strip(),
+                ]
+                if part
+            ).lower()
+            if "unverified" in error_text or "not trusted" in error_text:
+                unverified_source = True
+                detail = receipt.get("error_message") or detail
+            if "timeout" in error_text or "timed out" in error_text:
+                timeout_failure = True
+                detail = receipt.get("error_message") or detail
+        for task in run.get("tasks") or []:
+            text = " ".join(
+                part for part in [
+                    str(task.get("error") or "").strip(),
+                    str(task.get("status_reason") or "").strip(),
+                    str(task.get("failure_type") or "").strip(),
+                ]
+                if part
+            ).lower()
+            if "policy" in text or "denied" in text:
+                policy_blocked = True
+                detail = task.get("error") or task.get("status_reason") or detail
+            if "unverified" in text or "not trusted" in text:
+                unverified_source = True
+                detail = task.get("error") or task.get("status_reason") or detail
+            if "timeout" in text or "timed out" in text:
+                timeout_failure = True
+                detail = task.get("error") or task.get("status_reason") or detail
+    if not detail:
+        detail = str(queue_items[0].get("last_error") or "").strip()
+    if policy_blocked:
+        return "blocked", "blocked by policy", "That was blocked by policy."
+    if unverified_source:
+        return "unverified_source", "source not trusted yet", "That source is unverified."
+    if timeout_failure:
+        return "failed", "execution timed out", "I could not finish that because it timed out."
+    if any(item["status"] == "CANCELLED" for item in queue_items):
+        return "blocked", "execution was cancelled", "That was blocked."
+    message = "I could not finish that."
+    if detail:
+        message = f"{message} {detail}"
+    return "failed", detail or None, message
 
 
 # ── memory ─────────────────────────────────────────────────────────────────
@@ -301,6 +710,10 @@ def get_memory(db_path: str) -> dict[str, Any]:
             "value": item.value,
             "confidence": item.confidence,
             "source": item.source,
+            "source_type": item.source_type,
+            "verification_status": item.verification_status,
+            "trust_labels": item.trust_labels,
+            "provenance": item.provenance_json,
             "tags": item.tags,
             "created_at": item.created_at,
             "updated_at": item.updated_at,
@@ -318,6 +731,241 @@ def get_memory(db_path: str) -> dict[str, Any]:
         for ns in namespaces
     ]
     return {"namespaces": ns_list, "items": items_by_ns}
+
+
+def get_security_events(
+    db_path: str,
+    *,
+    event_type: str | None = None,
+    related_run_id: str | None = None,
+    related_task_id: str | None = None,
+    related_plan_id: str | None = None,
+    related_approval_id: str | None = None,
+    event_id: str | None = None,
+    limit: int = 50,
+) -> dict[str, Any]:
+    with StateStore(db_path) as store:
+        selected_event = store.get_security_event(event_id=event_id) if event_id else None
+        if event_id and selected_event is None:
+            raise ValueError(f"Security event not found: {event_id}")
+        previous = (
+            store.get_security_event(seq=selected_event.seq - 1)
+            if selected_event is not None and selected_event.seq > 1
+            else None
+        )
+        next_event = (
+            store.get_security_event(seq=selected_event.seq + 1)
+            if selected_event is not None
+            else None
+        )
+        events = store.list_security_events(
+            limit=limit,
+            event_type=event_type,
+            related_run_id=related_run_id,
+            related_task_id=related_task_id,
+            related_plan_id=related_plan_id,
+            related_approval_id=related_approval_id,
+        )
+    return {
+        "filters": {
+            "event_type": event_type,
+            "related_run_id": related_run_id,
+            "related_task_id": related_task_id,
+            "related_plan_id": related_plan_id,
+            "related_approval_id": related_approval_id,
+            "event_id": event_id,
+            "limit": limit,
+        },
+        "events": [_serialize_security_event(event) for event in events],
+        "selected_event": (
+            _serialize_security_event(selected_event, previous=previous, next_event=next_event)
+            if selected_event is not None
+            else None
+        ),
+    }
+
+
+def verify_security_event_chain(db_path: str) -> dict[str, Any]:
+    with StateStore(db_path) as store:
+        status = store.validate_security_event_chain()
+        mismatch_event = (
+            store.get_security_event(event_id=status.mismatch_event_id)
+            if status.mismatch_event_id
+            else None
+        )
+    payload = status.to_dict()
+    payload["mismatch_event"] = (
+        _serialize_security_event(mismatch_event)
+        if mismatch_event is not None
+        else None
+    )
+    return payload
+
+
+def get_security_execution(
+    db_path: str,
+    *,
+    mode: str | None = None,
+    zone: str | None = None,
+    component: str | None = None,
+    related_run_id: str | None = None,
+    related_task_id: str | None = None,
+    related_plan_id: str | None = None,
+    recent: int = 25,
+) -> dict[str, Any]:
+    with StateStore(db_path) as store:
+        events = store.list_security_events(
+            limit=max(recent * 12, 200),
+            related_run_id=related_run_id,
+            related_task_id=related_task_id,
+            related_plan_id=related_plan_id,
+        )
+    executions = summarize_execution_events(
+        events,
+        limit=recent,
+        mode=mode,
+        zone=zone,
+        component=component,
+    )
+    return {
+        "filters": {
+            "mode": mode,
+            "zone": zone,
+            "component": component,
+            "related_run_id": related_run_id,
+            "related_task_id": related_task_id,
+            "related_plan_id": related_plan_id,
+            "recent": recent,
+        },
+        "executions": [entry.to_dict() for entry in executions],
+    }
+
+
+def get_security_execution_detail(
+    db_path: str,
+    execution_id: str,
+) -> dict[str, Any]:
+    with StateStore(db_path) as store:
+        events = store.list_security_events(limit=5000)
+    resolved = _resolve_execution_id(events, execution_id)
+    if resolved is None:
+        raise ValueError(f"Execution record not found: {execution_id}")
+    selected_events = select_execution_events(events, execution_id=resolved)
+    executions = summarize_execution_events(selected_events, limit=1)
+    if not executions:
+        raise ValueError(f"Execution record not found: {execution_id}")
+    return {
+        "execution": executions[0].to_dict(),
+        "events": [_serialize_security_event(event) for event in selected_events],
+    }
+
+
+def list_quarantine_entries(
+    db_path: str,
+    *,
+    status: str | None = None,
+    verification_status: str | None = None,
+    source_kind: str | None = None,
+    origin_type: str | None = None,
+    limit: int = 50,
+) -> list[dict[str, Any]]:
+    with StateStore(db_path) as store:
+        records = store.list_quarantine_records(
+            status=status,
+            verification_status=verification_status,
+            source_kind=source_kind,
+            origin_type=origin_type,
+            limit=limit,
+        )
+    return [_serialize_quarantine_record(record, include_content=False) for record in records]
+
+
+def get_quarantine_entry(db_path: str, record_id: str) -> dict[str, Any]:
+    with StateStore(db_path) as store:
+        record = store.get_quarantine_record(record_id)
+    if record is None:
+        raise ValueError(f"Quarantine record not found: {record_id}")
+    return _serialize_quarantine_record(record, include_content=True)
+
+
+def promote_quarantine_entry(
+    db_path: str,
+    record_id: str,
+    body: dict[str, Any],
+) -> dict[str, Any]:
+    labels = normalize_trust_labels(body.get("labels") or [])
+    if not labels:
+        raise ValueError("Quarantine promotion requires explicit trust labels.")
+    reason = str(body.get("reason") or "").strip()
+    if not reason:
+        raise ValueError("Quarantine promotion requires a reason.")
+    verification_status = _default_verification_status_for_labels(
+        labels,
+        body.get("verification_status"),
+    )
+    with StateStore(db_path) as store:
+        record = store.get_quarantine_record(record_id)
+        if record is None:
+            raise ValueError(f"Quarantine record not found: {record_id}")
+        value = _resolve_quarantine_value(record, body)
+        namespace = _coerce_optional_str(body.get("namespace")) or _metadata_default(record, "namespace")
+        key = _coerce_optional_str(body.get("key")) or _metadata_default(record, "key")
+        if not namespace or not key:
+            raise ValueError(
+                "Quarantine promotion requires namespace and key when the record has no default memory target."
+            )
+        kind = _coerce_optional_str(body.get("kind")) or _metadata_default(record, "kind") or _default_memory_kind(value)
+        source = _coerce_optional_str(body.get("source")) or _metadata_default(record, "source") or f"quarantine:{record.source_kind}"
+        item = store.promote_quarantine_record(
+            record_id,
+            namespace=namespace,
+            key=key,
+            kind=kind,
+            value=value,
+            source=source,
+            actor="operator",
+            trust_labels=labels,
+            verification_status=verification_status,
+            reason=reason,
+            policy_hash="security-review",
+            related_run_id=record.related_run_id,
+        )
+        updated = store.get_quarantine_record(record_id)
+    return {
+        "quarantine": _serialize_quarantine_record(updated or record, include_content=False),
+        "memory_item": _serialize_memory_item_trust(item),
+    }
+
+
+def reject_quarantine_entry(
+    db_path: str,
+    record_id: str,
+    body: dict[str, Any],
+) -> dict[str, Any]:
+    reason = str(body.get("reason") or "").strip()
+    if not reason:
+        raise ValueError("Quarantine rejection requires a reason.")
+    with StateStore(db_path) as store:
+        record = store.reject_quarantine_record(
+            record_id,
+            actor="operator",
+            reason=reason,
+        )
+    return _serialize_quarantine_record(record, include_content=False)
+
+
+def _resolve_execution_id(events: list[Any], selector: str) -> str | None:
+    text = str(selector or "").strip()
+    if not text:
+        return None
+    executions = summarize_execution_events(events, limit=max(len(events), 1))
+    exact = [entry.execution_id for entry in executions if entry.execution_id == text]
+    if exact:
+        return exact[0]
+    prefix = [entry.execution_id for entry in executions if entry.execution_id.startswith(text)]
+    if len(prefix) == 1:
+        return prefix[0]
+    return None
 
 
 # ── Plan approval ─────────────────────────────────────────────────────────
@@ -393,7 +1041,11 @@ def approve_plan(db_path: str, plan_id: str) -> dict[str, Any]:
             raise ValueError(f"Plan not found: {plan_id}")
         if plan.status != PlanStatus.PENDING:
             raise ValueError(f"Plan is already {plan.status.value.lower()}")
-        enqueued_ids, skipped = enqueue_plan_actions(store, plan.plan_json)
+        enqueued_ids, skipped = enqueue_plan_actions(
+            store,
+            plan.plan_json,
+            approval_id=plan_id,
+        )
         store.approve_pending_plan(plan_id)
 
     return {"id": plan_id, "status": "APPROVED", "enqueued_ids": enqueued_ids, "skipped": skipped}
@@ -776,9 +1428,24 @@ def _run_freeform_chat_with_fallback(
                     system=system,
                     model=model,
                     timeout_s=route.capability.assistant_timeout_s,
+                    db_path=db_path,
+                    actor="web-chat",
                 )
             )
             if reply:
+                with StateStore(db_path) as store:
+                    store.create_quarantine_entry(
+                        source_kind="llm_reply",
+                        source_ref=model,
+                        origin_type="model_output",
+                        content=reply,
+                        content_sha256=sha256_text(reply),
+                        actor="web-chat",
+                        trust_labels=["gismo_inferred"],
+                        verification_status="unverified",
+                        provenance_json={"purpose": "assistant_reply", "model": model},
+                        metadata_json={"message_count": len(messages)},
+                    )
                 record_model_result(purpose="assistant_reply", model=model, success=True)
                 return reply
             raise RuntimeError("LLM reply was empty")
@@ -1036,6 +1703,71 @@ def _build_calendar_enqueue_plan(message: str) -> tuple[dict[str, Any], dict[str
     )
 
 
+def _build_device_enqueue_plan(message: str) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]] | None:
+    from gismo.core.risk import classify_plan_risk
+
+    normalized = " ".join((message or "").strip().split())
+    lowered = normalized.lower()
+    command: str | None = None
+    why = ""
+    intent = ""
+    summary = ""
+    if re.search(r"\b(scan|find|discover)\b", lowered) and re.search(r"\b(?:device|devices|camera|cameras|network)\b", lowered):
+        command = "device: scan"
+        why = "scan your network for devices"
+        intent = "device_scan"
+        summary = "device_scan"
+    elif re.search(r"\b(list|show)\b", lowered) and re.search(r"\b(?:device|devices)\b", lowered):
+        command = "device: list"
+        why = "check your saved devices"
+        intent = "device_list"
+        summary = "device_list"
+    else:
+        power_match = re.match(r"(?i)^(?:turn|switch|power)\s+(on|off)\s+(.+)$", normalized)
+        if power_match:
+            state = power_match.group(1).lower()
+            target = " ".join(power_match.group(2).split())
+            command = f"device: turn {state} {target}"
+            why = f"turn {state} {target}"
+            intent = "device_power"
+            summary = "device_power"
+        else:
+            check_match = re.match(
+                r"(?i)^(?:check|show|status(?:\s+of)?|what(?:'s| is)\s+the\s+status\s+of)\s+(.+)$",
+                normalized,
+            )
+            if check_match:
+                target = " ".join(check_match.group(1).split())
+                command = f"device: check {target}"
+                why = f"check {target}"
+                intent = "device_check"
+                summary = "device_check"
+    if command is None:
+        return None
+    actions = [
+        {
+            "type": "enqueue",
+            "command": command,
+            "timeout_seconds": 30,
+            "retries": 0,
+            "why": why,
+            "risk": "low",
+        }
+    ]
+    risk = classify_plan_risk(actions).to_dict()
+    return (
+        {
+            "intent": intent,
+            "assumptions": ["Operator asked GISMO to use saved device controls."],
+            "actions": actions,
+            "notes": [],
+            "memory_suggestions": [],
+        },
+        risk,
+        {"summary": summary},
+    )
+
+
 def _activity_summary_reply(db_path: str) -> str:
     items = get_activity_feed(db_path, limit=5)
     if not items:
@@ -1059,22 +1791,17 @@ def _device_summary_reply(db_path: str) -> str:
 
 def _status_summary_reply(db_path: str) -> str:
     status = get_status(db_path)
-    health = get_system_health()
-    queue = (status.get("queue") or {}).get("by_status", {})
+    health = get_system_health(db_path)
+    queue = status.get("queue") or {}
     gismo = status.get("gismo") or {}
     cpu = round(float(health.get("cpu_percent") or 0))
     ram = round(float(health.get("virtual_memory") or 0))
     lan = "connected" if health.get("lan_connected") else "offline"
     internet = "online" if health.get("internet_connected") else "offline"
-    if gismo.get("working"):
-        state_text = "GISMO is working right now."
-    elif gismo.get("ready"):
-        state_text = "GISMO is ready."
-    else:
-        state_text = "GISMO is still getting ready."
+    state_text = str(gismo.get("summary") or "GISMO status is available.")
     return (
-        f"{state_text} Queue: {queue.get('QUEUED', 0)} queued, {queue.get('IN_PROGRESS', 0)} running, "
-        f"{queue.get('FAILED', 0)} failed. CPU {cpu}% and RAM {ram}%. Network is {lan}; internet is {internet}."
+        f"{state_text} Queue: {queue.get('queued', 0)} queued, {queue.get('running', 0)} running, "
+        f"{queue.get('failed', 0)} failed. CPU {cpu}% and RAM {ram}%. Network is {lan}; internet is {internet}."
     )
 
 
@@ -1153,7 +1880,7 @@ def _handle_deterministic_query(db_path: str, message: str) -> dict[str, Any] | 
         data = {"devices": list_devices(db_path)}
         reply = _device_summary_reply(db_path)
     elif query_kind == "status":
-        data = {"status": get_status(db_path), "health": get_system_health()}
+        data = {"status": get_status(db_path), "health": get_system_health(db_path)}
         reply = _status_summary_reply(db_path)
     elif query_kind == "memory":
         data = get_memory(db_path)
@@ -1179,6 +1906,49 @@ def _handle_deterministic_query(db_path: str, message: str) -> dict[str, Any] | 
             "reason": query[1],
         },
         "data": data,
+    }
+
+
+def _enqueue_chat_execution(
+    db_path: str,
+    *,
+    message: str,
+    plan: dict[str, Any],
+    classification: dict[str, Any],
+    explain_json: dict[str, Any],
+) -> dict[str, Any]:
+    from gismo.core.plan_store import enqueue_plan_actions
+
+    with StateStore(db_path) as store:
+        plan_event = store.record_event(
+            actor="web-chat",
+            event_type="chat_action_planned",
+            message="Queued work from chat.",
+            json_payload={
+                "message": message,
+                "classification": classification.get("kind"),
+                "intent": plan.get("intent"),
+                "summary": explain_json.get("summary"),
+            },
+        )
+        run = store.create_run(
+            label="web-chat",
+            metadata={
+                "source": "web-chat",
+                "command": message,
+                "chat_classification": classification.get("kind"),
+                "plan_event_id": plan_event.id,
+            },
+        )
+        enqueued_ids, skipped = enqueue_plan_actions(store, plan, run_id=run.id)
+    if not enqueued_ids:
+        raise ValueError("No valid actions could be enqueued from that request.")
+    return {
+        "run_id": run.id,
+        "plan_event_id": plan_event.id,
+        "queue_item_ids": enqueued_ids,
+        "skipped": skipped,
+        "state": "queued",
     }
 
 
@@ -1232,8 +2002,11 @@ def chat_message(
                 "classification_detail": classification,
             }
 
-        calendar_plan = _build_calendar_enqueue_plan(message)
-        if calendar_plan is not None:
+        device_plan = _build_device_enqueue_plan(message)
+        calendar_plan = _build_calendar_enqueue_plan(message) if device_plan is None else None
+        if device_plan is not None:
+            plan, risk, explain_json = device_plan
+        elif calendar_plan is not None:
             plan, risk, explain_json = calendar_plan
         else:
             plan, risk, explain_json = _request_chat_plan(db_path, message)
@@ -1254,13 +2027,35 @@ def chat_message(
                 "classification_detail": classification,
             }
 
+        risk_level = str(risk.get("risk_level") or "LOW").upper()
+        if risk_level == "LOW":
+            execution = _enqueue_chat_execution(
+                db_path,
+                message=message,
+                plan=plan,
+                classification=classification,
+                explain_json=explain_json,
+            )
+            reply = "Working on that now."
+            _append_chat_record(message, reply)
+            return {
+                "reply": reply,
+                "mode": "execution",
+                "classification": classification["kind"],
+                "classification_detail": classification,
+                "execution": execution,
+                "plan_notes": _coerce_text_list(plan.get("notes")),
+                "risk_level": risk_level,
+                "risk_flags": list(risk.get("risk_flags") or []),
+            }
+
         with StateStore(db_path) as store:
             pending = store.create_pending_plan(
                 intent=str(plan.get("intent") or "operate"),
                 plan_json=plan,
-                risk_level=str(risk.get("risk_level") or "LOW"),
+                risk_level=risk_level,
                 risk_json={
-                    "risk_level": str(risk.get("risk_level") or "LOW"),
+                    "risk_level": risk_level,
                     "risk_flags": list(risk.get("risk_flags") or []),
                     "rationale": list(risk.get("rationale") or []),
                 },
@@ -1279,7 +2074,7 @@ def chat_message(
             "plan_id": pending.id,
             "plan_steps": steps,
             "plan_notes": _coerce_text_list(plan.get("notes")),
-            "risk_level": str(risk.get("risk_level") or "LOW"),
+            "risk_level": risk_level,
             "risk_flags": list(risk.get("risk_flags") or []),
         }
     except Exception as exc:
@@ -1306,12 +2101,36 @@ def chat_message(
 
 def get_onboarding_status(db_path: str) -> dict[str, Any]:
     from gismo.onboarding import get_operator_name
+    from gismo.tts.prefs import get_voice
 
+    policy = load_model_policy(db_path)
+    voices = [
+        voice
+        for voice in get_voices(db_path)["voices"]
+        if voice.get("engine") == "kokoro"
+    ]
     name = get_operator_name(db_path)
-    return {"needs_onboarding": name is None, "operator_name": name}
+    return {
+        "needs_onboarding": name is None,
+        "operator_name": name,
+        "voice_id": get_voice(db_path),
+        "voices": voices,
+        "performance_mode": policy.performance_mode,
+        "performance_modes": [
+            {"id": "auto", "label": "Balanced", "detail": "Let GISMO pick a good default."},
+            {"id": "prefer_quality", "label": "Best answers", "detail": "Favor richer replies when possible."},
+            {"id": "prefer_responsiveness", "label": "Fast replies", "detail": "Favor speed over longer processing."},
+        ],
+    }
 
 
-def complete_onboarding(db_path: str, name: str, voice_id: str) -> dict[str, Any]:
+def complete_onboarding(
+    db_path: str,
+    name: str,
+    voice_id: str,
+    *,
+    performance_mode: str | None = None,
+) -> dict[str, Any]:
     from gismo.onboarding import set_operator_name
     from gismo.tts.prefs import set_voice
     from gismo.tts.voices import validate_voice
@@ -1320,7 +2139,15 @@ def complete_onboarding(db_path: str, name: str, voice_id: str) -> dict[str, Any
     validate_voice(voice_id)
     set_operator_name(db_path, name)
     set_voice(db_path, voice_id)
-    return {"ok": True, "name": name, "voice": voice_id}
+    if performance_mode:
+        save_model_policy(db_path, performance_mode=performance_mode)
+    policy = load_model_policy(db_path)
+    return {
+        "ok": True,
+        "name": name,
+        "voice": voice_id,
+        "performance_mode": policy.performance_mode,
+    }
 
 
 # ── System health ──────────────────────────────────────────────────────────
@@ -1398,7 +2225,7 @@ def _detect_lan_status() -> dict[str, Any]:
 
 
 
-def get_system_health() -> dict[str, Any]:
+def get_system_health(db_path: str | None = None) -> dict[str, Any]:
     """Return CPU, memory, and network health."""
     import psutil
 
@@ -1408,11 +2235,18 @@ def get_system_health() -> dict[str, Any]:
     for host in ("1.1.1.1", "8.8.8.8"):
         started = time.monotonic()
         try:
+            check_outbound_target(
+                component="web_health_probe",
+                target=host,
+                actor="web",
+                action="health_probe",
+                db_path=db_path,
+            )
             with socket.create_connection((host, 53), timeout=1.5):
                 internet_connected = True
                 internet_latency_ms = round((time.monotonic() - started) * 1000)
                 break
-        except OSError:
+        except (OSError, PermissionError):
             continue
 
     return {
@@ -1493,11 +2327,23 @@ def _serialize_device(device: ConnectedDevice, *, status: str | None = None) -> 
         "thumbnail_url": stream_url,
         "stream_url": stream_url,
         "actions": _device_actions(device),
+        "capabilities": _device_capabilities(device, stream_url=stream_url),
         "needs_setup": _device_supports_power(device) and not _device_power_ready(device),
         "created_at": _dt(device.created_at),
         "updated_at": _dt(device.updated_at),
         "metadata": device.metadata_json,
     }
+
+
+def _device_capabilities(device: ConnectedDevice, *, stream_url: str | None) -> list[str]:
+    capabilities = ["status"]
+    if _device_supports_power(device):
+        capabilities.append("on/off")
+    if stream_url:
+        capabilities.append("stream")
+    if device.snapshot_url:
+        capabilities.append("snapshot")
+    return capabilities
 
 
 def _device_is_online(device: ConnectedDevice) -> bool:
@@ -1507,14 +2353,23 @@ def _device_is_online(device: ConnectedDevice) -> bool:
     return any(_scan_port(device.ip, int(port), timeout=0.15) for port in ports[:4])
 
 
-def _local_ipv4_addresses() -> list[str]:
+def _local_ipv4_addresses(db_path: str | None = None) -> list[str]:
     found: set[str] = set()
     try:
+        check_outbound_target(
+            component="web_device_discovery",
+            target="8.8.8.8",
+            actor="web",
+            action="device_local_ip",
+            db_path=db_path,
+        )
         probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        probe.connect(("8.8.8.8", 80))
-        found.add(probe.getsockname()[0])
-        probe.close()
-    except OSError:
+        try:
+            probe.connect(("8.8.8.8", 80))
+            found.add(probe.getsockname()[0])
+        finally:
+            probe.close()
+    except (OSError, PermissionError):
         pass
     try:
         for addr in socket.gethostbyname_ex(socket.gethostname())[2]:
@@ -1571,9 +2426,9 @@ def _infer_device_identity(ip: str, hostname: str | None) -> dict[str, Any]:
     }
 
 
-def _local_networks() -> list[ipaddress.IPv4Network]:
+def _local_networks(db_path: str | None = None) -> list[ipaddress.IPv4Network]:
     networks: list[ipaddress.IPv4Network] = []
-    for local_ip in _local_ipv4_addresses():
+    for local_ip in _local_ipv4_addresses(db_path):
         try:
             network = ipaddress.ip_network(f"{local_ip}/24", strict=False)
         except ValueError:
@@ -1678,37 +2533,28 @@ def _ping_sweep(networks: list[ipaddress.IPv4Network], deadline: float) -> list[
 
 
 def scan_devices(db_path: str, timeout_seconds: float = 10.0) -> list[dict[str, Any]]:
-    deadline = time.monotonic() + max(0.01, timeout_seconds)
-    saved = {device.ip: device for device in _list_device_models(db_path)}
-    merged: dict[str, dict[str, Any]] = {}
-    networks = _local_networks()
-
-    for ip in _read_arp_table(timeout_seconds=min(2.0, max(0.2, deadline - time.monotonic()))):
-        if not _is_local_ip(ip, networks):
-            continue
-        merged[ip] = _infer_device_identity(ip, _safe_hostname(ip))
-
-    if time.monotonic() < deadline and networks:
-        for ip in _ping_sweep(networks, deadline):
-            current = merged.get(ip, {})
-            current.update(_infer_device_identity(ip, current.get("hostname") or _safe_hostname(ip)))
-            merged[ip] = current
-
-    results = []
-    for ip, item in sorted(merged.items()):
-        saved_device = saved.get(ip)
-        results.append({
-            "ip": ip,
-            "hostname": item.get("hostname") or (saved_device.hostname if saved_device else ip) or ip,
-            "device_type": item.get("device_type") or (saved_device.device_type if saved_device else "smart device"),
-            "brand": item.get("brand") or (saved_device.brand if saved_device else "Unknown"),
-            "rtsp_url": item.get("rtsp_url") or (saved_device.rtsp_url if saved_device else None),
-            "snapshot_url": item.get("snapshot_url") or (saved_device.snapshot_url if saved_device else None),
-            "open_ports": item.get("open_ports") or (saved_device.metadata_json.get("open_ports", []) if saved_device else []),
-            "saved": saved_device is not None,
-            "saved_id": saved_device.id if saved_device else None,
-        })
-    return results
+    check_outbound_scope(
+        component="web_device_discovery",
+        scope="private",
+        actor="web",
+        action="device_scan",
+        db_path=db_path,
+    )
+    execution = execute_device_runtime_action(
+        component="web_device_discovery",
+        action="scan_network",
+        actor="web",
+        db_path=db_path,
+        payload={
+            "saved_devices": [
+                serialize_device(device)
+                for device in _list_device_models(db_path)
+            ],
+            "timeout_seconds": timeout_seconds,
+        },
+        timeout_s=timeout_seconds,
+    )
+    return list(execution.get("devices") or [])
 
 
 def _list_device_models(db_path: str) -> list[ConnectedDevice]:
@@ -1717,9 +2563,42 @@ def _list_device_models(db_path: str) -> list[ConnectedDevice]:
 
 
 def list_devices(db_path: str) -> list[dict[str, Any]]:
+    can_probe = True
+    try:
+        check_outbound_scope(
+            component="web_device_discovery",
+            scope="private",
+            actor="web",
+            action="device_status",
+            db_path=db_path,
+        )
+    except PermissionError:
+        can_probe = False
+    devices = _list_device_models(db_path)
+    if not can_probe:
+        return [
+            _serialize_device(device, status="offline")
+            for device in devices
+        ]
+    execution = execute_device_runtime_action(
+        component="web_device_discovery",
+        action="device_status",
+        actor="web",
+        db_path=db_path,
+        payload={"devices": [serialize_device(device) for device in devices]},
+        timeout_s=5.0,
+    )
+    statuses = {
+        str(item.get("id")): str(item.get("status") or "offline")
+        for item in list(execution.get("devices") or [])
+        if isinstance(item, dict)
+    }
     return [
-        _serialize_device(device, status="online" if _device_is_online(device) else "offline")
-        for device in _list_device_models(db_path)
+        _serialize_device(
+            device,
+            status=statuses.get(device.id, "offline"),
+        )
+        for device in devices
     ]
 
 
@@ -1777,7 +2656,32 @@ def add_device(
             message=f"Connected {stored.brand} {stored.device_type} at {stored.ip}",
             json_payload={"device_id": stored.id, "ip": stored.ip},
         )
-    return _serialize_device(stored, status="online" if _device_is_online(stored) else "offline")
+    can_probe = True
+    try:
+        check_outbound_scope(
+            component="web_device_discovery",
+            scope="private",
+            actor="web",
+            action="device_status",
+            db_path=db_path,
+        )
+    except PermissionError:
+        can_probe = False
+    if not can_probe:
+        return _serialize_device(stored, status="offline")
+    execution = execute_device_runtime_action(
+        component="web_device_discovery",
+        action="device_status",
+        actor="web",
+        db_path=db_path,
+        payload={"devices": [serialize_device(stored)]},
+        timeout_s=5.0,
+    )
+    runtime_devices = list(execution.get("devices") or [])
+    status = "offline"
+    if runtime_devices and isinstance(runtime_devices[0], dict):
+        status = str(runtime_devices[0].get("status") or "offline")
+    return _serialize_device(stored, status=status)
 
 
 def remove_device(db_path: str, device_id: str) -> dict[str, Any]:
@@ -1830,6 +2734,13 @@ def get_device_stream_payload(db_path: str, device_id: str) -> dict[str, Any]:
 
     if device.snapshot_url:
         try:
+            check_outbound_target(
+                component="web_device_snapshot",
+                target=device.snapshot_url,
+                actor="web",
+                action="device_snapshot",
+                db_path=db_path,
+            )
             with urllib.request.urlopen(device.snapshot_url, timeout=4) as response:
                 body = response.read()
             return {"kind": "snapshot", "content_type": "image/jpeg", "body": body}
@@ -2214,7 +3125,7 @@ def tts_synthesize(db_path: str, text: str, voice_id: str | None = None) -> byte
 
     if not voice_id:
         voice_id = get_voice(db_path)
-    return synthesize(text, voice_id)
+    return synthesize(text, voice_id, db_path=db_path)
 
 
 def tts_preview(db_path: str, voice_id: str | None = None) -> bytes:

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import secrets
 import sqlite3
 from contextlib import closing, contextmanager
 from dataclasses import dataclass
@@ -30,6 +31,29 @@ from gismo.core.models import (
     ToolCallStatus,
     ToolReceipt,
     ToolReceiptStatus,
+)
+from gismo.core.capabilities import (
+    DEFAULT_CAPABILITY_TTL_SECONDS,
+    build_tool_capability,
+    parse_capability_token,
+)
+from gismo.core.security_events import (
+    SecurityEvent,
+    SecurityEventChainStatus,
+    append_security_event,
+    ensure_security_events_schema,
+    get_security_event as get_security_event_record,
+    list_security_events as list_security_event_records,
+    validate_security_event_chain,
+)
+from gismo.core.trust import (
+    TRUST_LABEL_TRUSTED,
+    VERIFICATION_STATUS_REJECTED,
+    VERIFICATION_STATUS_UNVERIFIED,
+    ensure_trust_state,
+    prepare_trust_transition,
+    trust_metadata_for_source,
+    trust_metadata_from_state,
 )
 
 
@@ -83,6 +107,30 @@ class MemoryProvenance:
         if self.policy.get("path") or self.policy.get("decision_path"):
             return True
         return False
+
+
+@dataclass(frozen=True)
+class QuarantineRecord:
+    id: str
+    created_at: datetime
+    source_kind: str
+    source_ref: str | None
+    origin_type: str
+    content: Any | None
+    content_sha256: str | None
+    verification_status: str
+    trust_labels: list[str]
+    provenance_json: Dict[str, Any]
+    metadata_json: Dict[str, Any]
+    status: str
+    decision_reason: str | None
+    decision_at: datetime | None
+    memory_namespace: str | None
+    memory_key: str | None
+    related_run_id: str | None
+    related_task_id: str | None
+    related_plan_id: str | None
+    related_event_id: str | None
 
 
 class StateStore:
@@ -206,6 +254,7 @@ class StateStore:
                         output_json TEXT,
                         error TEXT,
                         failure_type TEXT,
+                        capability_token TEXT,
                         status_reason TEXT,
                         FOREIGN KEY (run_id) REFERENCES runs(id)
                     )
@@ -254,6 +303,8 @@ class StateStore:
                         error_message TEXT NULL,
                         policy_decision_id TEXT NULL,
                         policy_snapshot_json TEXT NULL,
+                        capability_id TEXT NULL,
+                        capability_summary_json TEXT NULL,
                         FOREIGN KEY (run_id) REFERENCES runs(id)
                     )
                     """
@@ -275,7 +326,8 @@ class StateStore:
                         next_attempt_at TEXT,
                         timeout_seconds INTEGER NOT NULL DEFAULT 300,
                         cancel_requested INTEGER NOT NULL DEFAULT 0,
-                        last_error TEXT
+                        last_error TEXT,
+                        metadata_json TEXT NOT NULL DEFAULT '{}'
                     )
                     """
                 )
@@ -301,6 +353,15 @@ class StateStore:
                 )
                 cursor.execute(
                     """
+                    CREATE TABLE IF NOT EXISTS security_settings (
+                        id INTEGER PRIMARY KEY CHECK (id = 1),
+                        capability_secret TEXT NOT NULL,
+                        updated_at TEXT NOT NULL
+                    )
+                    """
+                )
+                cursor.execute(
+                    """
                     CREATE TABLE IF NOT EXISTS events (
                         id TEXT PRIMARY KEY,
                         ts TEXT NOT NULL,
@@ -308,6 +369,32 @@ class StateStore:
                         event_type TEXT NOT NULL,
                         message TEXT NOT NULL,
                         json_payload TEXT
+                    )
+                    """
+                )
+                cursor.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS quarantine_records (
+                        id TEXT PRIMARY KEY,
+                        created_at TEXT NOT NULL,
+                        source_kind TEXT NOT NULL,
+                        source_ref TEXT NULL,
+                        origin_type TEXT NOT NULL DEFAULT 'external',
+                        content_json TEXT NULL,
+                        content_sha256 TEXT NULL,
+                        verification_status TEXT NOT NULL DEFAULT 'unverified',
+                        trust_labels_json TEXT NOT NULL DEFAULT '[]',
+                        provenance_json TEXT NOT NULL DEFAULT '{}',
+                        metadata_json TEXT NOT NULL DEFAULT '{}',
+                        status TEXT NOT NULL DEFAULT 'pending',
+                        decision_reason TEXT NULL,
+                        decision_at TEXT NULL,
+                        memory_namespace TEXT NULL,
+                        memory_key TEXT NULL,
+                        related_run_id TEXT NULL,
+                        related_task_id TEXT NULL,
+                        related_plan_id TEXT NULL,
+                        related_event_id TEXT NULL
                     )
                     """
                 )
@@ -357,6 +444,18 @@ class StateStore:
                     """
                     CREATE INDEX IF NOT EXISTS idx_calendar_events_updated_at
                     ON calendar_events (updated_at)
+                    """
+                )
+                cursor.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_quarantine_records_created_at
+                    ON quarantine_records (created_at)
+                    """
+                )
+                cursor.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_quarantine_records_trust_state
+                    ON quarantine_records (verification_status)
                     """
                 )
                 cursor.execute(
@@ -511,6 +610,7 @@ class StateStore:
                     ON pending_plans (created_at)
                     """
                 )
+                ensure_security_events_schema(connection)
                 self._ensure_columns(connection)
                 cursor.execute(
                     """
@@ -541,6 +641,7 @@ class StateStore:
             "TEXT NOT NULL DEFAULT '[]'",
         )
         self._ensure_column(connection, "tasks", "failure_type", "TEXT")
+        self._ensure_column(connection, "tasks", "capability_token", "TEXT")
         self._ensure_column(connection, "tasks", "status_reason", "TEXT")
         self._ensure_column(
             connection,
@@ -588,6 +689,70 @@ class StateStore:
         self._ensure_column(connection, "queue_items", "status", "TEXT NOT NULL")
         self._ensure_column(connection, "queue_items", "created_at", "TEXT NOT NULL")
         self._ensure_column(connection, "queue_items", "updated_at", "TEXT NOT NULL")
+        self._ensure_column(connection, "queue_items", "metadata_json", "TEXT NOT NULL DEFAULT '{}'")
+        self._ensure_column(connection, "tool_receipts", "capability_id", "TEXT")
+        self._ensure_column(connection, "tool_receipts", "capability_summary_json", "TEXT")
+        self._ensure_column(
+            connection,
+            "quarantine_records",
+            "origin_type",
+            "TEXT NOT NULL DEFAULT 'external'",
+        )
+        self._ensure_column(connection, "quarantine_records", "content_json", "TEXT")
+        self._ensure_column(
+            connection,
+            "quarantine_records",
+            "verification_status",
+            "TEXT NOT NULL DEFAULT 'unverified'",
+        )
+        self._ensure_column(
+            connection,
+            "quarantine_records",
+            "trust_labels_json",
+            "TEXT NOT NULL DEFAULT '[]'",
+        )
+        self._ensure_column(
+            connection,
+            "quarantine_records",
+            "provenance_json",
+            "TEXT NOT NULL DEFAULT '{}'",
+        )
+        self._ensure_column(
+            connection,
+            "quarantine_records",
+            "status",
+            "TEXT NOT NULL DEFAULT 'pending'",
+        )
+        self._ensure_column(connection, "quarantine_records", "decision_reason", "TEXT")
+        self._ensure_column(connection, "quarantine_records", "decision_at", "TEXT")
+        self._ensure_column(connection, "quarantine_records", "memory_namespace", "TEXT")
+        self._ensure_column(connection, "quarantine_records", "memory_key", "TEXT")
+        self._ensure_column(connection, "quarantine_records", "related_task_id", "TEXT")
+        self._ensure_column(connection, "quarantine_records", "related_plan_id", "TEXT")
+        self._ensure_column(
+            connection,
+            "memory_items",
+            "source_type",
+            "TEXT NOT NULL DEFAULT 'local'",
+        )
+        self._ensure_column(
+            connection,
+            "memory_items",
+            "verification_status",
+            "TEXT NOT NULL DEFAULT 'unverified'",
+        )
+        self._ensure_column(
+            connection,
+            "memory_items",
+            "trust_labels_json",
+            "TEXT NOT NULL DEFAULT '[]'",
+        )
+        self._ensure_column(
+            connection,
+            "memory_items",
+            "provenance_json",
+            "TEXT NOT NULL DEFAULT '{}'",
+        )
         self._sync_queue_retry_columns(connection)
 
     def record_event(
@@ -666,6 +831,471 @@ class StateStore:
         if row is None:
             return None
         return self._row_to_event(row)
+
+    def record_security_event(
+        self,
+        *,
+        event_type: str,
+        actor: str,
+        action: str,
+        resource: str,
+        payload: Dict[str, Any] | None = None,
+        related_run_id: str | None = None,
+        related_task_id: str | None = None,
+        related_plan_id: str | None = None,
+        related_approval_id: str | None = None,
+        connection: Optional[sqlite3.Connection] = None,
+    ) -> SecurityEvent:
+        if connection is None:
+            with self._connection() as connection:
+                event = self.record_security_event(
+                    event_type=event_type,
+                    actor=actor,
+                    action=action,
+                    resource=resource,
+                    payload=payload,
+                    related_run_id=related_run_id,
+                    related_task_id=related_task_id,
+                    related_plan_id=related_plan_id,
+                    related_approval_id=related_approval_id,
+                    connection=connection,
+                )
+                connection.commit()
+                return event
+        return append_security_event(
+            connection=connection,
+            event_type=event_type,
+            actor=actor,
+            action=action,
+            resource=resource,
+            payload=payload,
+            related_run_id=related_run_id,
+            related_task_id=related_task_id,
+            related_plan_id=related_plan_id,
+            related_approval_id=related_approval_id,
+        )
+
+    def list_security_events(
+        self,
+        *,
+        limit: int = 100,
+        event_type: str | None = None,
+        related_run_id: str | None = None,
+        related_task_id: str | None = None,
+        related_plan_id: str | None = None,
+        related_approval_id: str | None = None,
+        event_id: str | None = None,
+    ) -> list[SecurityEvent]:
+        with self._connection() as connection:
+            return list_security_event_records(
+                connection=connection,
+                limit=limit,
+                event_type=event_type,
+                related_run_id=related_run_id,
+                related_task_id=related_task_id,
+                related_plan_id=related_plan_id,
+                related_approval_id=related_approval_id,
+                event_id=event_id,
+            )
+
+    def get_security_event(
+        self,
+        *,
+        event_id: str | None = None,
+        seq: int | None = None,
+    ) -> SecurityEvent | None:
+        with self._connection() as connection:
+            return get_security_event_record(
+                connection=connection,
+                event_id=event_id,
+                seq=seq,
+            )
+
+    def validate_security_event_chain(self) -> SecurityEventChainStatus:
+        with self._connection() as connection:
+            return validate_security_event_chain(connection=connection)
+
+    def create_quarantine_entry(
+        self,
+        *,
+        source_kind: str,
+        source_ref: str | None,
+        origin_type: str,
+        content: Any | None = None,
+        content_sha256: str | None,
+        actor: str = "system",
+        verification_status: str | None = None,
+        trust_labels: list[str] | None = None,
+        provenance_json: Optional[Dict[str, Any]] = None,
+        metadata_json: Optional[Dict[str, Any]] = None,
+        related_run_id: str | None = None,
+        related_task_id: str | None = None,
+        related_plan_id: str | None = None,
+        related_event_id: str | None = None,
+        record_id: str | None = None,
+        connection: Optional[sqlite3.Connection] = None,
+    ) -> QuarantineRecord:
+        if not source_kind or not source_kind.strip():
+            raise ValueError("source_kind must be a non-empty string")
+        if not origin_type or not origin_type.strip():
+            raise ValueError("origin_type must be a non-empty string")
+        if connection is None:
+            with self._connection() as connection:
+                record = self.create_quarantine_entry(
+                    source_kind=source_kind,
+                    source_ref=source_ref,
+                    origin_type=origin_type,
+                    content=content,
+                    content_sha256=content_sha256,
+                    actor=actor,
+                    verification_status=verification_status,
+                    trust_labels=trust_labels,
+                    provenance_json=provenance_json,
+                    metadata_json=metadata_json,
+                    related_run_id=related_run_id,
+                    related_task_id=related_task_id,
+                    related_plan_id=related_plan_id,
+                    related_event_id=related_event_id,
+                    record_id=record_id,
+                    connection=connection,
+                )
+                connection.commit()
+                return record
+        trust = trust_metadata_for_source(
+            source=source_kind,
+            source_type=origin_type,
+            verification_status=verification_status,
+            trust_labels=trust_labels,
+            provenance=provenance_json,
+        )
+        record = QuarantineRecord(
+            id=record_id or str(uuid4()),
+            created_at=_utc_now(),
+            source_kind=source_kind.strip(),
+            source_ref=source_ref.strip() if isinstance(source_ref, str) and source_ref.strip() else None,
+            origin_type=origin_type.strip().lower(),
+            content=content,
+            content_sha256=(
+                content_sha256.strip()
+                if isinstance(content_sha256, str) and content_sha256.strip()
+                else None
+            ),
+            verification_status=trust.verification_status,
+            trust_labels=list(trust.trust_labels),
+            provenance_json=dict(trust.provenance),
+            metadata_json=dict(metadata_json or {}),
+            status="pending",
+            decision_reason=None,
+            decision_at=None,
+            memory_namespace=None,
+            memory_key=None,
+            related_run_id=related_run_id.strip() if isinstance(related_run_id, str) and related_run_id.strip() else None,
+            related_task_id=related_task_id.strip() if isinstance(related_task_id, str) and related_task_id.strip() else None,
+            related_plan_id=related_plan_id.strip() if isinstance(related_plan_id, str) and related_plan_id.strip() else None,
+            related_event_id=related_event_id.strip() if isinstance(related_event_id, str) and related_event_id.strip() else None,
+        )
+        connection.execute(
+            """
+            INSERT INTO quarantine_records (
+                id, created_at, source_kind, source_ref, origin_type, content_json, content_sha256,
+                verification_status, trust_labels_json, provenance_json, metadata_json,
+                status, decision_reason, decision_at, memory_namespace, memory_key,
+                related_run_id, related_task_id, related_plan_id, related_event_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                record.id,
+                record.created_at.isoformat(),
+                record.source_kind,
+                record.source_ref,
+                record.origin_type,
+                json.dumps(record.content, ensure_ascii=False, sort_keys=True)
+                if record.content is not None
+                else None,
+                record.content_sha256,
+                record.verification_status,
+                json.dumps(record.trust_labels, ensure_ascii=False, sort_keys=True),
+                json.dumps(record.provenance_json, ensure_ascii=False, sort_keys=True),
+                json.dumps(record.metadata_json, ensure_ascii=False, sort_keys=True),
+                record.status,
+                record.decision_reason,
+                record.decision_at.isoformat() if record.decision_at else None,
+                record.memory_namespace,
+                record.memory_key,
+                record.related_run_id,
+                record.related_task_id,
+                record.related_plan_id,
+                record.related_event_id,
+            ),
+        )
+        self.record_security_event(
+            event_type="quarantine_created",
+            actor=actor,
+            action="create",
+            resource=f"quarantine:{record.id}",
+            payload={
+                "source_kind": record.source_kind,
+                "source_ref": record.source_ref,
+                "origin_type": record.origin_type,
+                "content_sha256": record.content_sha256,
+                "verification_status": record.verification_status,
+                "trust_labels": record.trust_labels,
+                "metadata": record.metadata_json,
+            },
+            related_run_id=record.related_run_id,
+            related_task_id=record.related_task_id,
+            related_plan_id=record.related_plan_id,
+            connection=connection,
+        )
+        return record
+
+    def record_quarantine_record(
+        self,
+        *,
+        source_kind: str,
+        source_ref: str | None,
+        content_sha256: str | None,
+        trust_state: str,
+        metadata_json: Optional[Dict[str, Any]] = None,
+        related_run_id: str | None = None,
+        related_event_id: str | None = None,
+        record_id: str | None = None,
+        connection: Optional[sqlite3.Connection] = None,
+    ) -> QuarantineRecord:
+        metadata = dict(metadata_json or {})
+        actor = str(metadata.get("actor") or "system")
+        trust = trust_metadata_from_state(
+            trust_state=ensure_trust_state(trust_state),
+            source_type=str(metadata.get("origin_type") or source_kind or "external"),
+            provenance=metadata.get("provenance") if isinstance(metadata.get("provenance"), dict) else {},
+        )
+        return self.create_quarantine_entry(
+            source_kind=source_kind,
+            source_ref=source_ref,
+            origin_type=trust.source_type,
+            content=metadata.get("content"),
+            content_sha256=content_sha256,
+            actor=actor,
+            verification_status=trust.verification_status,
+            trust_labels=trust.trust_labels,
+            provenance_json=trust.provenance,
+            metadata_json=metadata,
+            related_run_id=related_run_id,
+            related_event_id=related_event_id,
+            record_id=record_id,
+            connection=connection,
+        )
+
+    def get_quarantine_record(self, record_id: str) -> QuarantineRecord | None:
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM quarantine_records WHERE id = ?",
+                (record_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return self._row_to_quarantine_record(row)
+
+    def reject_quarantine_record(
+        self,
+        record_id: str,
+        *,
+        actor: str,
+        reason: str,
+    ) -> QuarantineRecord:
+        if not reason or not reason.strip():
+            raise ValueError("Quarantine rejection requires a reason.")
+        with self._connection() as connection:
+            record = self.get_quarantine_record(record_id)
+            if record is None:
+                raise ValueError(f"Quarantine record not found: {record_id}")
+            if record.status == "rejected":
+                raise ValueError("Quarantine record is already rejected.")
+            if record.status == "promoted":
+                raise ValueError("Promoted quarantine records may not be rejected.")
+            decision_at = _utc_now()
+            connection.execute(
+                """
+                UPDATE quarantine_records
+                SET status = ?, verification_status = ?, decision_reason = ?, decision_at = ?
+                WHERE id = ?
+                """,
+                (
+                    "rejected",
+                    VERIFICATION_STATUS_REJECTED,
+                    reason.strip(),
+                    decision_at.isoformat(),
+                    record_id,
+                ),
+            )
+            self.record_security_event(
+                event_type="quarantine_rejected",
+                actor=actor,
+                action="reject",
+                resource=f"quarantine:{record_id}",
+                payload={"reason": reason.strip()},
+                related_run_id=record.related_run_id,
+                related_task_id=record.related_task_id,
+                related_plan_id=record.related_plan_id,
+                connection=connection,
+            )
+            connection.commit()
+        updated = self.get_quarantine_record(record_id)
+        if updated is None:
+            raise RuntimeError("Failed to load quarantine record after reject")
+        return updated
+
+    def promote_quarantine_record(
+        self,
+        record_id: str,
+        *,
+        namespace: str,
+        key: str,
+        kind: str,
+        value: Any,
+        source: str,
+        actor: str,
+        trust_labels: list[str],
+        verification_status: str,
+        reason: str,
+        policy_hash: str,
+        related_run_id: str | None = None,
+        related_ask_event_id: str | None = None,
+    ):
+        from gismo.memory.store import put_item
+
+        with self._connection() as connection:
+            record = self.get_quarantine_record(record_id)
+            if record is None:
+                raise ValueError(f"Quarantine record not found: {record_id}")
+            if record.status == "promoted":
+                raise ValueError("Quarantine record is already promoted.")
+            if record.status == "rejected":
+                raise ValueError("Rejected quarantine records may not be promoted.")
+            transition = prepare_trust_transition(
+                labels_before=record.trust_labels,
+                labels_after=trust_labels,
+                verification_before=record.verification_status,
+                verification_after=verification_status,
+                reason=reason,
+            )
+            item = put_item(
+                self.db_path,
+                namespace=namespace,
+                key=key,
+                kind=kind,
+                value=value,
+                tags=None,
+                confidence="high",
+                source=source,
+                source_type=record.origin_type,
+                verification_status=transition.verification_after,
+                trust_labels=transition.labels_after,
+                provenance_json={
+                    **record.provenance_json,
+                    "quarantine_id": record.id,
+                    "source_kind": record.source_kind,
+                    "source_ref": record.source_ref,
+                    "content_sha256": record.content_sha256,
+                },
+                ttl_seconds=None,
+                actor=actor,
+                policy_hash=policy_hash,
+                result_meta_extra={
+                    "quarantine_id": record.id,
+                    "quarantine_promotion_reason": transition.reason,
+                },
+                related_run_id=related_run_id,
+                related_ask_event_id=related_ask_event_id,
+            )
+            decision_at = _utc_now()
+            connection.execute(
+                """
+                UPDATE quarantine_records
+                SET status = ?, verification_status = ?, trust_labels_json = ?, decision_reason = ?,
+                    decision_at = ?, memory_namespace = ?, memory_key = ?
+                WHERE id = ?
+                """,
+                (
+                    "promoted",
+                    transition.verification_after,
+                    json.dumps(transition.labels_after, ensure_ascii=False, sort_keys=True),
+                    transition.reason,
+                    decision_at.isoformat(),
+                    namespace,
+                    key,
+                    record_id,
+                ),
+            )
+            self.record_security_event(
+                event_type="trust_transition",
+                actor=actor,
+                action="promote",
+                resource=f"quarantine:{record_id}",
+                payload=transition.to_dict(),
+                related_run_id=record.related_run_id or related_run_id,
+                related_task_id=record.related_task_id,
+                related_plan_id=record.related_plan_id or related_ask_event_id,
+                connection=connection,
+            )
+            self.record_security_event(
+                event_type="quarantine_promoted",
+                actor=actor,
+                action="promote",
+                resource=f"quarantine:{record_id}",
+                payload={
+                    "memory_namespace": namespace,
+                    "memory_key": key,
+                    "verification_status": transition.verification_after,
+                    "trust_labels": transition.labels_after,
+                    "reason": transition.reason,
+                },
+                related_run_id=record.related_run_id or related_run_id,
+                related_task_id=record.related_task_id,
+                related_plan_id=record.related_plan_id or related_ask_event_id,
+                connection=connection,
+            )
+            connection.commit()
+            return item
+
+    def list_quarantine_records(
+        self,
+        *,
+        verification_status: str | None = None,
+        status: str | None = None,
+        source_kind: str | None = None,
+        origin_type: str | None = None,
+        limit: int = 100,
+    ) -> list[QuarantineRecord]:
+        if limit <= 0:
+            raise ValueError("limit must be > 0")
+        clauses: list[str] = []
+        params: list[object] = []
+        if isinstance(verification_status, str) and verification_status.strip():
+            clauses.append("verification_status = ?")
+            params.append(verification_status.strip().lower())
+        if isinstance(status, str) and status.strip():
+            clauses.append("status = ?")
+            params.append(status.strip().lower())
+        if isinstance(source_kind, str) and source_kind.strip():
+            clauses.append("source_kind = ?")
+            params.append(source_kind.strip())
+        if isinstance(origin_type, str) and origin_type.strip():
+            clauses.append("origin_type = ?")
+            params.append(origin_type.strip().lower())
+        where_clause = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        params.append(limit)
+        with self._connection() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT * FROM quarantine_records
+                {where_clause}
+                ORDER BY created_at DESC, id DESC
+                LIMIT ?
+                """,
+                tuple(params),
+            ).fetchall()
+        return [self._row_to_quarantine_record(row) for row in rows]
 
     def upsert_device(self, device: ConnectedDevice) -> ConnectedDevice:
         now = _utc_now().isoformat()
@@ -909,6 +1539,33 @@ class StateStore:
         finally:
             self._close_connection(connection)
 
+    def get_or_create_capability_secret(
+        self,
+        connection: Optional[sqlite3.Connection] = None,
+    ) -> str:
+        if connection is None:
+            with self._connection() as connection:
+                secret = self.get_or_create_capability_secret(connection=connection)
+                connection.commit()
+                return secret
+        row = connection.execute(
+            "SELECT capability_secret FROM security_settings WHERE id = 1"
+        ).fetchone()
+        if row and row["capability_secret"]:
+            return str(row["capability_secret"])
+        secret = secrets.token_hex(32)
+        connection.execute(
+            """
+            INSERT INTO security_settings (id, capability_secret, updated_at)
+            VALUES (1, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                capability_secret = excluded.capability_secret,
+                updated_at = excluded.updated_at
+            """,
+            (secret, _utc_now().isoformat()),
+        )
+        return secret
+
     def create_run(self, label: str, metadata: Optional[Dict[str, Any]] = None) -> Run:
         run = Run(label=label, metadata_json=metadata or {})
         with self._connection() as connection:
@@ -1139,6 +1796,8 @@ class StateStore:
         depends_on: Optional[list[str]] = None,
         idempotency_key: str = "",
         input_hash: str = "",
+        capability_token: str | None = None,
+        capability_ttl_seconds: int = DEFAULT_CAPABILITY_TTL_SECONDS,
     ) -> Task:
         task = Task(
             run_id=run_id,
@@ -1148,16 +1807,24 @@ class StateStore:
             depends_on=list(depends_on or []),
             idempotency_key=idempotency_key,
             input_hash=input_hash,
+            capability_token=capability_token,
         )
         with self._connection() as connection:
+            if task.capability_token is None:
+                task.capability_token = self._build_task_capability_token(
+                    task,
+                    connection=connection,
+                    ttl_seconds=capability_ttl_seconds,
+                )
+            capability_token = parse_capability_token(task.capability_token)
             connection.execute(
                 """
                 INSERT INTO tasks (
                     id, run_id, title, description, status,
                     depends_on_json, idempotency_key, input_hash,
                     created_at, updated_at, input_json, output_json,
-                    error, failure_type, status_reason
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    error, failure_type, capability_token, status_reason
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     task.id,
@@ -1174,8 +1841,21 @@ class StateStore:
                     json.dumps(task.output_json) if task.output_json is not None else None,
                     task.error,
                     task.failure_type.value if task.failure_type else None,
+                    task.capability_token,
                     task.status_reason,
                 ),
+            )
+            self.record_security_event(
+                event_type="capability_issued",
+                actor=capability_token.claims.subject,
+                action=capability_token.claims.action,
+                resource=capability_token.claims.resource,
+                payload=capability_token.claims.to_dict(),
+                related_run_id=capability_token.claims.run_id,
+                related_task_id=capability_token.claims.task_id,
+                related_plan_id=capability_token.claims.plan_event_id,
+                related_approval_id=capability_token.claims.approval_id,
+                connection=connection,
             )
             connection.commit()
         return task
@@ -1191,7 +1871,7 @@ class StateStore:
             UPDATE tasks
             SET status = ?, updated_at = ?, output_json = ?, error = ?,
                 idempotency_key = ?, input_hash = ?, failure_type = ?,
-                depends_on_json = ?, status_reason = ?
+                depends_on_json = ?, capability_token = ?, status_reason = ?
             WHERE id = ?
             """,
             (
@@ -1203,10 +1883,55 @@ class StateStore:
                 task.input_hash,
                 task.failure_type.value if task.failure_type else None,
                 json.dumps(task.depends_on),
+                task.capability_token,
                 task.status_reason,
                 task.id,
             ),
         )
+
+    def _build_task_capability_token(
+        self,
+        task: Task,
+        *,
+        connection: sqlite3.Connection,
+        ttl_seconds: int,
+    ) -> str:
+        if not isinstance(task.input_json, dict):
+            raise ValueError("Task input_json must be an object")
+        tool_name = task.input_json.get("tool")
+        payload = task.input_json.get("payload")
+        if not isinstance(tool_name, str) or not tool_name.strip():
+            raise ValueError("Task input_json.tool must be a non-empty string")
+        if not isinstance(payload, dict):
+            raise ValueError("Task input_json.payload must be an object")
+        run = self.get_run(task.run_id)
+        metadata = run.metadata_json if run and isinstance(run.metadata_json, dict) else {}
+        subject = self._task_capability_subject(metadata)
+        secret = self.get_or_create_capability_secret(connection=connection)
+        return build_tool_capability(
+            secret=secret,
+            subject=subject,
+            tool_name=tool_name,
+            tool_input=payload,
+            run_id=task.run_id,
+            task_id=task.id,
+            ttl_seconds=ttl_seconds,
+            plan_event_id=_optional_metadata_str(metadata, "plan_event_id"),
+            approval_id=_optional_metadata_str(metadata, "approval_id"),
+            queue_item_id=_optional_metadata_str(metadata, "queue_item_id"),
+        )
+
+    def _task_capability_subject(self, metadata: Dict[str, Any]) -> str:
+        source = _optional_metadata_str(metadata, "source")
+        if source:
+            return source
+        if isinstance(metadata.get("agent_session"), dict):
+            return "agent_session"
+        if isinstance(metadata.get("agent_role"), dict):
+            role_name = _optional_metadata_str(metadata["agent_role"], "role_name")
+            if role_name:
+                return f"agent_role:{role_name}"
+        return "system"
 
     def record_tool_call(
         self,
@@ -1284,8 +2009,8 @@ class StateStore:
                 tool_name, tool_kind, request_payload_json, response_payload_json,
                 status, started_at, finished_at, duration_ms, request_sha256,
                 response_sha256, error_type, error_message, policy_decision_id,
-                policy_snapshot_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                policy_snapshot_json, capability_id, capability_summary_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 receipt.id,
@@ -1309,6 +2034,10 @@ class StateStore:
                 receipt.policy_decision_id,
                 json.dumps(receipt.policy_snapshot)
                 if receipt.policy_snapshot is not None
+                else None,
+                receipt.capability_id,
+                json.dumps(receipt.capability_summary)
+                if receipt.capability_summary is not None
                 else None,
             ),
         )
@@ -1397,6 +2126,7 @@ class StateStore:
         run_id: Optional[str] = None,
         max_retries: int = 3,
         timeout_seconds: int = 300,
+        metadata: Optional[Dict[str, Any]] = None,
     ) -> QueueItem:
         if not command_text or not command_text.strip():
             raise ValueError("command_text must be a non-empty string")
@@ -1409,6 +2139,7 @@ class StateStore:
             run_id=run_id,
             max_retries=max_retries,
             timeout_seconds=timeout_seconds,
+            metadata_json=metadata or {},
         )
         with self._connection() as connection:
             connection.execute(
@@ -1416,8 +2147,9 @@ class StateStore:
                 INSERT INTO queue_items (
                     id, run_id, command_text, status, created_at, updated_at,
                     started_at, finished_at, attempt_count, max_attempts, max_retries,
-                    next_attempt_at, timeout_seconds, cancel_requested, last_error
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    next_attempt_at, timeout_seconds, cancel_requested, last_error,
+                    metadata_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     item.id,
@@ -1435,6 +2167,7 @@ class StateStore:
                     item.timeout_seconds,
                     1 if item.cancel_requested else 0,
                     item.last_error,
+                    json.dumps(item.metadata_json),
                 ),
             )
             connection.commit()
@@ -2025,6 +2758,7 @@ class StateStore:
             output_json=json.loads(row["output_json"]) if row["output_json"] else None,
             error=row["error"],
             failure_type=FailureType(row["failure_type"]) if row["failure_type"] else FailureType.NONE,
+            capability_token=row["capability_token"] if "capability_token" in row.keys() else None,
             status_reason=row["status_reason"],
         )
         return task
@@ -2086,6 +2820,11 @@ class StateStore:
         policy_snapshot = (
             json.loads(row["policy_snapshot_json"]) if row["policy_snapshot_json"] else None
         )
+        capability_summary = (
+            json.loads(row["capability_summary_json"])
+            if "capability_summary_json" in row.keys() and row["capability_summary_json"]
+            else None
+        )
         return ToolReceipt(
             id=row["id"],
             run_id=row["run_id"],
@@ -2107,6 +2846,8 @@ class StateStore:
             error_message=row["error_message"],
             policy_decision_id=row["policy_decision_id"],
             policy_snapshot=policy_snapshot,
+            capability_id=row["capability_id"] if "capability_id" in row.keys() else None,
+            capability_summary=capability_summary,
         )
 
     def _row_to_queue_item(self, row: sqlite3.Row) -> QueueItem:
@@ -2132,6 +2873,11 @@ class StateStore:
             if "cancel_requested" in row.keys()
             else False,
             last_error=row["last_error"],
+            metadata_json=(
+                json.loads(row["metadata_json"])
+                if "metadata_json" in row.keys() and row["metadata_json"]
+                else {}
+            ),
         )
 
     def _row_to_event(self, row: sqlite3.Row) -> Event:
@@ -2142,6 +2888,50 @@ class StateStore:
             event_type=row["event_type"],
             message=row["message"],
             json_payload=json.loads(row["json_payload"]) if row["json_payload"] else None,
+        )
+
+    def _row_to_quarantine_record(self, row: sqlite3.Row) -> QuarantineRecord:
+        return QuarantineRecord(
+            id=row["id"],
+            created_at=_parse_dt(row["created_at"]),
+            source_kind=row["source_kind"],
+            source_ref=row["source_ref"],
+            origin_type=row["origin_type"] if "origin_type" in row.keys() else row["source_kind"],
+            content=(
+                json.loads(row["content_json"])
+                if "content_json" in row.keys() and row["content_json"]
+                else None
+            ),
+            content_sha256=row["content_sha256"],
+            verification_status=(
+                row["verification_status"]
+                if "verification_status" in row.keys()
+                else VERIFICATION_STATUS_UNVERIFIED
+            ),
+            trust_labels=(
+                json.loads(row["trust_labels_json"])
+                if "trust_labels_json" in row.keys() and row["trust_labels_json"]
+                else []
+            ),
+            provenance_json=(
+                json.loads(row["provenance_json"])
+                if "provenance_json" in row.keys() and row["provenance_json"]
+                else {}
+            ),
+            metadata_json=json.loads(row["metadata_json"]) if row["metadata_json"] else {},
+            status=row["status"] if "status" in row.keys() else "pending",
+            decision_reason=row["decision_reason"] if "decision_reason" in row.keys() else None,
+            decision_at=(
+                _parse_dt(row["decision_at"])
+                if "decision_at" in row.keys() and row["decision_at"]
+                else None
+            ),
+            memory_namespace=row["memory_namespace"] if "memory_namespace" in row.keys() else None,
+            memory_key=row["memory_key"] if "memory_key" in row.keys() else None,
+            related_run_id=row["related_run_id"],
+            related_task_id=row["related_task_id"] if "related_task_id" in row.keys() else None,
+            related_plan_id=row["related_plan_id"] if "related_plan_id" in row.keys() else None,
+            related_event_id=row["related_event_id"],
         )
 
     def _row_to_device(self, row: sqlite3.Row) -> ConnectedDevice:
@@ -2532,6 +3322,14 @@ def _sorted_unique_items(
         )
     )
     return unique_items
+
+
+def _optional_metadata_str(metadata: Dict[str, Any], key: str) -> str | None:
+    value = metadata.get(key)
+    if not isinstance(value, str):
+        return None
+    stripped = value.strip()
+    return stripped or None
 
 
 def _parse_dt(value: str) -> datetime:

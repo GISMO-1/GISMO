@@ -207,6 +207,11 @@ body{background:var(--bg);color:var(--text);font-family:var(--font);font-size:13
 .vi{padding:9px 12px;border:1px solid var(--border);border-radius:8px;cursor:pointer;transition:all .15s}
 .vi:hover,.vi.sel{border-color:var(--accent);background:var(--accent-dim)}
 .vi-name{font-size:12px}.vi-desc{font-size:10px;color:var(--dim);margin-top:2px}
+.choice-list{display:flex;flex-direction:column;gap:6px;margin-bottom:16px}
+.choice-card{padding:9px 12px;border:1px solid var(--border);border-radius:8px;cursor:pointer;transition:all .15s}
+.choice-card:hover,.choice-card.sel{border-color:var(--accent);background:var(--accent-dim)}
+.choice-title{font-size:12px}
+.choice-desc{font-size:10px;color:var(--dim);margin-top:2px}
 .primary-btn{width:100%;padding:11px;background:var(--accent);border:none;color:var(--bg);border-radius:8px;font-family:var(--font);font-size:13px;font-weight:700;cursor:pointer;transition:opacity .15s}
 .primary-btn:hover{opacity:.85}.primary-btn:disabled{opacity:.35;cursor:not-allowed}
 .sm-modal{width:360px;padding:24px 28px}
@@ -225,6 +230,7 @@ body{background:var(--bg);color:var(--text);font-family:var(--font);font-size:13
 .viewer-modal{width:min(860px,92vw);padding:20px}
 .viewer-frame{width:100%;height:min(70vh,520px);border:1px solid var(--border);border-radius:12px;overflow:hidden;background:var(--bg)}
 .viewer-frame img{width:100%;height:100%;object-fit:contain;display:block}
+.dev-cap{font-size:10px;color:var(--dim);margin-top:6px;line-height:1.5}
 .settings-grid{display:flex;flex-direction:column;gap:12px}
 .field-label{font-size:10px;color:var(--dim);letter-spacing:1px;text-transform:uppercase}
 .field-note{font-size:11px;color:var(--dim)}
@@ -504,6 +510,20 @@ body{background:var(--bg);color:var(--text);font-family:var(--font);font-size:13
         </div>
         <div class="boot-stage-state" id="boot-flag-worker">STARTING</div>
       </div>
+      <div class="boot-stage" id="boot-stage-setup">
+        <div>
+          <div class="boot-stage-name">Setup</div>
+          <div class="boot-stage-detail" id="boot-detail-setup">Waiting</div>
+        </div>
+        <div class="boot-stage-state" id="boot-flag-setup">STARTING</div>
+      </div>
+      <div class="boot-stage" id="boot-stage-model">
+        <div>
+          <div class="boot-stage-name">Model</div>
+          <div class="boot-stage-detail" id="boot-detail-model">Waiting</div>
+        </div>
+        <div class="boot-stage-state" id="boot-flag-model">STARTING</div>
+      </div>
       <div class="boot-stage" id="boot-stage-api">
         <div>
           <div class="boot-stage-name">API</div>
@@ -527,9 +547,10 @@ body{background:var(--bg);color:var(--text);font-family:var(--font);font-size:13
       <button class="primary-btn" onclick="obNext()">Continue →</button>
     </div>
     <div class="ob-step" id="ob-s2">
-      <div class="ob-h">Choose a voice.</div>
-      <div class="ob-p">GISMO can speak to you using text-to-speech. Pick a voice to get started.</div>
+      <div class="ob-h">Choose your defaults.</div>
+      <div class="ob-p">Pick a voice and how responsive you want GISMO to feel.</div>
       <div class="voice-list" id="ob-voices"></div>
+      <div class="choice-list" id="ob-performance"></div>
       <button class="primary-btn" id="ob-done-btn" onclick="obFinish()" disabled>Get Started</button>
     </div>
   </div>
@@ -684,6 +705,7 @@ var daemonPaused  = false;
 var micActive     = false;
 var micRec        = null;
 var obVoice       = null;
+var obPerformanceMode = 'auto';
 var briefingDone  = false;
 var ttsEnabled    = true;   // operator can toggle via mic mute concept
 var currentAudio  = null;
@@ -730,7 +752,7 @@ async function init() {
     return;
   }
   if (ob.needs_onboarding) {
-    showOb();
+    showOb(ob);
   } else {
     setOp(ob.operator_name);
     maybeBriefing();
@@ -741,7 +763,7 @@ async function waitForBootReady() {
   while (true) {
     var ready = await get('/api/ready');
     updateBootStages(ready);
-    if (ready && ready.ready && (Date.now() - bootStartedAt) >= 10000) {
+    if (ready && ready.surface_ready && (Date.now() - bootStartedAt) >= 1200) {
       $('boot-overlay').classList.add('hidden');
       return;
     }
@@ -753,16 +775,24 @@ function updateBootStages(data) {
   var stages = (data && data.stages) || [];
   var stageMap = {};
   stages.forEach(function(stage) { stageMap[stage.key] = stage; });
-  [['state', 'State'], ['worker', 'Worker'], ['api', 'API']].forEach(function(entry) {
+  [['state', 'State'], ['worker', 'Worker'], ['setup', 'Setup'], ['model', 'Model'], ['api', 'API']].forEach(function(entry) {
     var key = entry[0];
     var stage = stageMap[key] || {ready: false, detail: 'Waiting'};
     $('boot-stage-' + key).classList.toggle('ready', !!stage.ready);
     $('boot-detail-' + key).textContent = stage.detail || 'Waiting';
-    $('boot-flag-' + key).textContent = stage.ready ? 'READY' : 'STARTING';
+    $('boot-flag-' + key).textContent = stage.ready ? 'READY' : bootStageFlag(key, data);
   });
-  $('boot-copy').textContent = data && data.ready
-    ? 'Everything is ready. Opening your command center.'
+  $('boot-copy').textContent = (data && data.summary)
+    ? data.summary
     : 'Checking your local system and background worker.';
+}
+
+function bootStageFlag(key, data) {
+  if (!data) return 'STARTING';
+  if (key === 'state') return statusStateLabel(data.gismo_state).toUpperCase();
+  if (key === 'model' && data.gismo_state === 'degraded') return 'DEGRADED';
+  if (key === 'setup') return 'WAITING';
+  return 'STARTING';
 }
 
 function toggleMenu(name, event) {
@@ -824,32 +854,23 @@ async function refreshStatus() {
 
 function updatePill(d, q, g) {
   var pill = $('status-pill'), dot = $('s-dot'), txt = $('s-txt');
-  var byStatus = (q && q.by_status) || {};
-  var working = (byStatus.IN_PROGRESS || 0) > 0;
-  var online = !!d.running && !d.stale;
+  var state = (g && g.state) || 'offline';
   daemonPaused = !!d.paused;
-  if (working && online) {
+  if (state === 'ready') {
     pill.className = 'pill-online';
-    dot.className  = 'pill-dot dot-green';
-    txt.textContent = 'WORKING';
-  } else if (daemonPaused) {
-    pill.className = 'pill-paused';
-    dot.className  = 'pill-dot dot-yellow';
-    txt.textContent = 'PAUSED';
-  } else if (online) {
-    pill.className = 'pill-online';
-    dot.className  = 'pill-dot dot-green';
+    dot.className = 'pill-dot dot-green';
     txt.textContent = 'READY';
-  } else {
+  } else if (state === 'degraded' || state === 'approval_needed' || state === 'starting') {
     pill.className = 'pill-paused';
-    dot.className  = 'pill-dot dot-yellow';
-    txt.textContent = 'STARTING';
+    dot.className = 'pill-dot dot-yellow';
+    txt.textContent = statusStateLabel(state).toUpperCase();
+  } else {
+    pill.className = 'pill-offline';
+    dot.className = 'pill-dot dot-red';
+    txt.textContent = statusStateLabel(state).toUpperCase();
   }
-  $('pause-btn').textContent  = daemonPaused ? 'Resume Work' : 'Pause Work';
-  $('daemon-val').textContent = daemonPaused ? 'Paused'
-    : working ? 'Working'
-    : online ? 'Ready'
-    : 'Starting';
+  $('pause-btn').textContent = daemonPaused ? 'Resume Work' : 'Pause Work';
+  $('daemon-val').textContent = (g && g.summary) || statusStateLabel(state);
 }
 
 function setStatusOffline() {
@@ -864,18 +885,17 @@ function computeLocalSystemState() {
   if (!apiReachable || !latestStatus) {
     return {dot: 'd-off', type: 'API unavailable', meta: 'Local system is unreachable.'};
   }
-  var daemon = latestStatus.daemon || {};
-  var queue = (latestStatus.queue || {}).by_status || {};
+  var gismo = latestStatus.gismo || {};
   var cpu = latestHealth ? Math.round(latestHealth.cpu_percent || 0) : null;
   var ram = latestHealth ? Math.round(latestHealth.virtual_memory || 0) : null;
-  var working = (queue.IN_PROGRESS || 0) > 0;
-  var online = !!daemon.running && !daemon.stale;
+  var state = gismo.state || 'offline';
   var pressure = Math.max(cpu || 0, ram || 0);
-  var dot = 'd-on';
-  if (!online || pressure >= 92) dot = 'd-off';
-  else if (pressure >= 75 || daemonPaused) dot = 'd-alt';
-  var type = working ? 'Working' : online ? 'Ready' : 'Starting';
+  var dot = state === 'ready' ? 'd-on' : (state === 'offline' || state === 'blocked') ? 'd-off' : 'd-alt';
+  if (pressure >= 92) dot = 'd-off';
+  else if (pressure >= 75 && dot === 'd-on') dot = 'd-alt';
+  var type = gismo.label || statusStateLabel(state);
   var meta = [];
+  if (gismo.summary) meta.push(gismo.summary);
   if (cpu != null) meta.push('CPU ' + cpu + '%');
   if (ram != null) meta.push('RAM ' + ram + '%');
   return {dot: dot, type: type, meta: meta.join(' | ') || 'Local system'};
@@ -891,10 +911,10 @@ function updateLocalSystemCard() {
 
 function updateStats(q) {
   var b = q.by_status || {};
-  $('q-queued').textContent  = b.QUEUED      != null ? b.QUEUED      : 0;
-  $('q-running').textContent = b.IN_PROGRESS != null ? b.IN_PROGRESS : 0;
-  $('q-done').textContent    = b.SUCCEEDED   != null ? b.SUCCEEDED   : 0;
-  $('q-failed').textContent  = b.FAILED      != null ? b.FAILED      : 0;
+  $('q-queued').textContent  = q.queued  != null ? q.queued  : (b.QUEUED      != null ? b.QUEUED      : 0);
+  $('q-running').textContent = q.running != null ? q.running : (b.IN_PROGRESS != null ? b.IN_PROGRESS : 0);
+  $('q-done').textContent    = q.succeeded != null ? q.succeeded : (b.SUCCEEDED != null ? b.SUCCEEDED : 0);
+  $('q-failed').textContent  = q.failed  != null ? q.failed  : (b.FAILED      != null ? b.FAILED      : 0);
 }
 
 // -- Chat briefing on load ----------------------------------------------------
@@ -1230,6 +1250,11 @@ async function refreshDevices() {
     + '<div class="d-type" id="local-device-type">' + esc(localState.type) + '</div><div class="d-ip" id="local-device-ip">' + esc(localState.meta) + '</div></div></div></div>';
   devs.forEach(function(device) {
     var dot = device.status === 'online' ? 'd-on' : 'd-off';
+    var caps = Array.isArray(device.capabilities) ? device.capabilities.join(', ') : '';
+    var capLine = caps ? ('Can do: ' + caps + '.') : '';
+    if (device.needs_setup) {
+      capLine += (capLine ? ' ' : '') + 'Needs setup before power control.';
+    }
     var thumb = device.thumbnail_url
       ? '<div class="dev-thumb js-open-viewer" data-stream="' + esc(device.stream_url) + '" data-title="'
           + esc(device.name) + '"><img src="' + esc(device.thumbnail_url) + '?t=' + Date.now() + '" alt="'
@@ -1239,6 +1264,7 @@ async function refreshDevices() {
       + '<div class="d-info"><div class="d-title"><div class="d-dot ' + dot + '"></div><div class="d-name">' + esc(device.name) + '</div></div>'
       + '<div class="d-type">' + esc(device.brand) + ' / ' + esc(device.device_type) + '</div>'
       + '<div class="d-ip">' + esc(device.ip) + '</div>'
+      + '<div class="dev-cap">' + esc(capLine || 'Capability details unavailable.') + '</div>'
       + '<div class="dev-actions">'
       + (device.stream_url ? '<button class="mini-btn js-open-viewer" data-stream="' + esc(device.stream_url)
           + '" data-title="' + esc(device.name) + '">View</button>' : '')
@@ -1569,49 +1595,25 @@ function sleep(ms) {
 async function waitForExecution(enqueuedIds, workingMsg) {
   var deadline = Date.now() + 120000;
   while (Date.now() < deadline) {
-    var queue = await get('/api/queue') || [];
-    var runs = await get('/api/runs') || [];
-    var items = enqueuedIds.map(function(id) {
-      return queue.find(function(item) { return item.id === id; }) || null;
-    }).filter(Boolean);
-
-    if (items.length === enqueuedIds.length) {
-      var failed = items.find(function(item) {
-        return item.status === 'FAILED' || item.status === 'CANCELLED';
-      });
-      if (failed) {
-        var failText = 'I could not finish that: ' + (failed.last_error || statusLabel(failed.status) + '.');
-        setMsgText(workingMsg, failText);
-        return failText;
-      }
-      var allDone = items.every(function(item) { return item.status === 'SUCCEEDED'; });
-      if (allDone) {
-        await refreshCalendar();
-        await refreshDevices();
-        await refreshActivity();
-        var relatedRuns = runs.filter(function(run) {
-          return enqueuedIds.indexOf(run.queue_item_id) >= 0;
-        });
-        var summaries = [];
-        for (var i = 0; i < relatedRuns.length; i++) {
-          var detail = await get('/api/runs/' + encodeURIComponent(relatedRuns[i].id));
-          var summary = summarizeRunDetail(detail);
-          if (summary && summaries.indexOf(summary) < 0) summaries.push(summary);
-        }
-        var doneText = summaries.length ? ('Done. ' + summaries.join(' ')) : 'Done.';
-        setMsgText(workingMsg, doneText);
-        return doneText;
-      }
+    var execution = await post('/api/execution/status', {queue_item_ids: enqueuedIds});
+    if (execution && execution.message) {
+      setMsgText(workingMsg, execution.message);
     }
-
+    if (execution && execution.final) {
+      await refreshStatus();
+      await refreshCalendar();
+      await refreshDevices();
+      await refreshActivity();
+      return execution.message || 'I could not verify that completed.';
+    }
     await refreshStatus();
     await refreshActivity();
     await sleep(1500);
   }
 
-  var queuedText = 'I queued that work. You can follow the progress in Activity.';
-  setMsgText(workingMsg, queuedText);
-  return queuedText;
+  var unknownText = 'I could not verify that completed.';
+  setMsgText(workingMsg, unknownText);
+  return unknownText;
 }
 
 async function submitPendingPlanDecision(decision, userText) {
@@ -1663,6 +1665,13 @@ async function handleChatResponse(data) {
   if (data.mode === 'plan' && data.plan_id) {
     addPlanMsg(data);
     chatHistory.push({role: 'assistant', content: reply});
+    return;
+  }
+  if (data.mode === 'execution' && data.execution && Array.isArray(data.execution.queue_item_ids)) {
+    var workingMsg = addMsg('gismo', reply || 'Working on that now.');
+    var finalReply = await waitForExecution(data.execution.queue_item_ids, workingMsg);
+    chatHistory.push({role: 'assistant', content: finalReply});
+    speakText(finalReply || '');
     return;
   }
   addMsg('gismo', reply || 'I am not sure how to help with that yet.');
@@ -1799,16 +1808,15 @@ async function togglePause() {
 }
 
 // ── 7. Onboarding — in-UI wizard ──────────────────────────────────────────────
-function showOb() {
+function showOb(data) {
   $('ob-overlay').classList.remove('hidden');
   $('ob-name').focus();
-  loadObVoices();
+  renderOnboardingOptions(data || {});
 }
 
-async function loadObVoices() {
-  var d = await get('/api/tts/voices');
-  if (!d) return;
-  $('ob-voices').innerHTML = d.voices.map(function(v) {
+function renderOnboardingOptions(data) {
+  var voices = (data && data.voices) || [];
+  $('ob-voices').innerHTML = voices.map(function(v) {
     var sel = v.is_selected ? ' sel' : '';
     return '<div class="vi' + sel + '" data-voice-id="' + esc(v.id) + '">'
       + '<div class="vi-name">' + esc(v.name) + '</div>'
@@ -1820,21 +1828,42 @@ async function loadObVoices() {
       selVoice(el.dataset.voiceId, el);
     });
   });
-  // pre-select first voice
-  var first = d.voices[0];
+  var first = voices[0];
   if (first) {
-    obVoice = first.id;
-    var fe = $('ob-voices').firstElementChild;
-    if (fe) fe.classList.add('sel');
+    obVoice = (data && data.voice_id) || first.id;
+    document.querySelectorAll('#ob-voices .vi').forEach(function(el) {
+      el.classList.toggle('sel', el.dataset.voiceId === obVoice);
+    });
   }
-  $('ob-done-btn').disabled = !obVoice;
+  var modes = (data && data.performance_modes) || [];
+  obPerformanceMode = (data && data.performance_mode) || 'auto';
+  $('ob-performance').innerHTML = modes.map(function(mode) {
+    var sel = mode.id === obPerformanceMode ? ' sel' : '';
+    return '<div class="choice-card' + sel + '" data-mode-id="' + esc(mode.id) + '">'
+      + '<div class="choice-title">' + esc(mode.label) + '</div>'
+      + '<div class="choice-desc">' + esc(mode.detail) + '</div>'
+      + '</div>';
+  }).join('');
+  document.querySelectorAll('#ob-performance .choice-card').forEach(function(el) {
+    el.addEventListener('click', function() {
+      selPerformance(el.dataset.modeId, el);
+    });
+  });
+  $('ob-done-btn').disabled = !obVoice || !obPerformanceMode;
 }
 
 function selVoice(id, el) {
   obVoice = id;
-  document.querySelectorAll('.vi').forEach(function(e) { e.classList.remove('sel'); });
+  document.querySelectorAll('#ob-voices .vi').forEach(function(e) { e.classList.remove('sel'); });
   el.classList.add('sel');
-  $('ob-done-btn').disabled = false;
+  $('ob-done-btn').disabled = !obPerformanceMode;
+}
+
+function selPerformance(id, el) {
+  obPerformanceMode = id;
+  document.querySelectorAll('#ob-performance .choice-card').forEach(function(e) { e.classList.remove('sel'); });
+  el.classList.add('sel');
+  $('ob-done-btn').disabled = !obVoice;
 }
 
 function obNext() {
@@ -1846,15 +1875,20 @@ function obNext() {
 
 async function obFinish() {
   var name = $('ob-name').value.trim();
-  if (!name || !obVoice) return;
+  if (!name || !obVoice || !obPerformanceMode) return;
   var btn = $('ob-done-btn');
   btn.disabled    = true;
   btn.textContent = 'Setting up\u2026';
-  var res = await post('/api/onboarding/complete', {name: name, voice_id: obVoice});
+  var res = await post('/api/onboarding/complete', {
+    name: name,
+    voice_id: obVoice,
+    performance_mode: obPerformanceMode
+  });
   if (res && res.ok) {
     $('ob-overlay').classList.add('hidden');
     setOp(name);
     briefingDone = false;   // allow briefing now that name is set
+    await refreshStatus();
     maybeBriefing();
     refreshDevices();
   } else {
@@ -2029,6 +2063,12 @@ function statusLabel(status) {
   if (status === 'FAILED') return 'failed';
   if (status === 'QUEUED') return 'queued';
   return String(status || '').toLowerCase();
+}
+
+function statusStateLabel(state) {
+  if (state === 'approval_needed') return 'approval needed';
+  if (state === 'could_not_verify') return 'could not verify';
+  return String(state || 'offline').replace(/_/g, ' ');
 }
 
 async function get(path) {

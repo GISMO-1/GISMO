@@ -1,8 +1,9 @@
 import json
 import os
-import tempfile
 import unittest
 from pathlib import Path
+from uuid import uuid4
+import shutil
 
 from gismo.cli.operator import normalize_command, parse_command, required_tools
 from gismo.core.agent import SimpleAgent
@@ -43,6 +44,11 @@ def run_operator_plan(
 
 
 class OperatorShellTest(unittest.TestCase):
+    def _tmpdir(self, label: str) -> Path:
+        path = Path("tmp") / f"{label}-{uuid4().hex}"
+        path.mkdir(parents=True, exist_ok=False)
+        return path
+
     def test_device_command_parsing(self) -> None:
         plan = parse_command("device: turn on kitchen lights")
         self.assertEqual(plan["mode"], "single")
@@ -73,8 +79,10 @@ class OperatorShellTest(unittest.TestCase):
 
     @unittest.skipUnless(os.name == "nt", "Windows-only builtin shell regression")
     def test_shell_builtin_echo_windows(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            repo_root = Path(tmpdir)
+        tmpdir = self._tmpdir("operator-shell")
+        state_store = None
+        try:
+            repo_root = tmpdir
             db_path = str(repo_root / "state.db")
             policy_path = repo_root / "policy.json"
             policy_path.write_text(
@@ -117,6 +125,10 @@ class OperatorShellTest(unittest.TestCase):
             output = task.output_json or {}
             stdout = output.get("stdout", "")
             self.assertIn("hello", stdout.lower())
+        finally:
+            if state_store is not None:
+                state_store.close()
+            shutil.rmtree(tmpdir, ignore_errors=True)
 
 
 if __name__ == "__main__":

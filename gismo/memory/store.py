@@ -11,6 +11,17 @@ from pathlib import Path
 from typing import Any, Iterable, Optional
 from uuid import uuid4
 
+from gismo.core.security_events import append_security_event
+from gismo.core.trust import (
+    VERIFICATION_STATUS_UNVERIFIED,
+    ensure_verification_status,
+    is_execution_trusted,
+    is_planning_trusted,
+    normalize_trust_labels,
+    prepare_trust_transition,
+    trust_metadata_for_source,
+)
+
 MAX_EVENT_STRING_LEN = 1000
 MEMORY_SELECTION_TRACE_CAP = 200
 MEMORY_TABLE_NAMES = (
@@ -114,10 +125,26 @@ class MemoryItem:
     tags: list[str]
     confidence: str
     source: str
+    source_type: str
+    verification_status: str
+    trust_labels: list[str]
+    provenance_json: dict[str, Any]
     ttl_seconds: Optional[int]
     is_tombstoned: bool
     created_at: str
     updated_at: str
+
+
+@dataclass(frozen=True)
+class MemoryEligibility:
+    eligible: bool
+    reasons: list[str]
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "eligible": self.eligible,
+            "reasons": list(self.reasons),
+        }
 
 
 @dataclass(frozen=True)
@@ -304,6 +331,10 @@ class MemoryStore:
                         tags_json TEXT NULL,
                         confidence TEXT NOT NULL,
                         source TEXT NOT NULL,
+                        source_type TEXT NOT NULL DEFAULT 'local',
+                        verification_status TEXT NOT NULL DEFAULT 'unverified',
+                        trust_labels_json TEXT NOT NULL DEFAULT '[]',
+                        provenance_json TEXT NOT NULL DEFAULT '{}',
                         ttl_seconds INTEGER NULL,
                         is_tombstoned INTEGER NOT NULL DEFAULT 0,
                         created_at TEXT NOT NULL,
@@ -380,7 +411,51 @@ class MemoryStore:
                 )
                 for _, statement in MEMORY_INDEX_DEFINITIONS:
                     cursor.execute(statement)
+                self._ensure_columns(connection)
             connection.commit()
+
+    def _ensure_columns(self, connection: sqlite3.Connection) -> None:
+        self._ensure_column(
+            connection,
+            "memory_items",
+            "source_type",
+            "TEXT NOT NULL DEFAULT 'local'",
+        )
+        self._ensure_column(
+            connection,
+            "memory_items",
+            "verification_status",
+            "TEXT NOT NULL DEFAULT 'unverified'",
+        )
+        self._ensure_column(
+            connection,
+            "memory_items",
+            "trust_labels_json",
+            "TEXT NOT NULL DEFAULT '[]'",
+        )
+        self._ensure_column(
+            connection,
+            "memory_items",
+            "provenance_json",
+            "TEXT NOT NULL DEFAULT '{}'",
+        )
+
+    def _ensure_column(
+        self,
+        connection: sqlite3.Connection,
+        table_name: str,
+        column_name: str,
+        definition: str,
+    ) -> None:
+        row = connection.execute(
+            f"PRAGMA table_info({table_name})"
+        ).fetchall()
+        existing = {entry["name"] for entry in row}
+        if column_name in existing:
+            return
+        connection.execute(
+            f"ALTER TABLE {table_name} ADD COLUMN {column_name} {definition}"
+        )
 
     def list_namespaces(self) -> list[MemoryNamespaceSummary]:
         sql = """
@@ -660,11 +735,17 @@ class MemoryStore:
         *,
         profile: MemoryProfile,
         limit: int | None = None,
+        trusted_only: bool = True,
     ) -> list[MemoryItem]:
         if _profile_is_empty(profile):
             return []
         filters: list[str] = ["is_tombstoned = 0"]
         params: list[Any] = []
+        if trusted_only:
+            filters.append("verification_status != ?")
+            params.append("rejected")
+            filters.append("trust_labels_json LIKE ?")
+            params.append('%"trusted"%')
         if profile.include_namespaces:
             placeholders = ",".join("?" for _ in profile.include_namespaces)
             filters.append(f"namespace IN ({placeholders})")
@@ -960,6 +1041,10 @@ class MemoryStore:
         tags: Optional[list[str]],
         confidence: str,
         source: str,
+        source_type: str | None = None,
+        verification_status: str | None = None,
+        trust_labels: list[str] | None = None,
+        provenance_json: dict[str, Any] | None = None,
         ttl_seconds: Optional[int],
         actor: str,
         policy_hash: str,
@@ -971,6 +1056,13 @@ class MemoryStore:
         updated_at = created_at
         value_json = json.dumps(value, ensure_ascii=False, sort_keys=True)
         tags_json = json.dumps(tags, ensure_ascii=False, sort_keys=True) if tags else None
+        trust = trust_metadata_for_source(
+            source=source,
+            source_type=source_type,
+            verification_status=verification_status,
+            trust_labels=trust_labels,
+            provenance=provenance_json,
+        )
         new_id = str(uuid4())
         with self._connection() as connection:
             with self._cursor(connection) as cursor:
@@ -985,12 +1077,16 @@ class MemoryStore:
                         tags_json,
                         confidence,
                         source,
+                        source_type,
+                        verification_status,
+                        trust_labels_json,
+                        provenance_json,
                         ttl_seconds,
                         is_tombstoned,
                         created_at,
                         updated_at
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
                     ON CONFLICT(namespace, key)
                     DO UPDATE SET
                         kind = excluded.kind,
@@ -998,6 +1094,10 @@ class MemoryStore:
                         tags_json = excluded.tags_json,
                         confidence = excluded.confidence,
                         source = excluded.source,
+                        source_type = excluded.source_type,
+                        verification_status = excluded.verification_status,
+                        trust_labels_json = excluded.trust_labels_json,
+                        provenance_json = excluded.provenance_json,
                         ttl_seconds = excluded.ttl_seconds,
                         is_tombstoned = 0,
                         updated_at = excluded.updated_at
@@ -1011,6 +1111,10 @@ class MemoryStore:
                         tags_json,
                         confidence,
                         source,
+                        trust.source_type,
+                        trust.verification_status,
+                        json.dumps(trust.trust_labels, ensure_ascii=False, sort_keys=True),
+                        json.dumps(trust.provenance, ensure_ascii=False, sort_keys=True),
                         ttl_seconds,
                         created_at,
                         updated_at,
@@ -1033,12 +1137,17 @@ class MemoryStore:
                 "tags_json": tags_json,
                 "confidence": confidence,
                 "source": source,
+                "source_type": trust.source_type,
+                "verification_status": trust.verification_status,
+                "trust_labels": list(trust.trust_labels),
                 "ttl_seconds": ttl_seconds,
             }
             result_meta = {
                 "item_id": item.id,
                 "updated_at": item.updated_at,
                 "is_tombstoned": item.is_tombstoned,
+                "verification_status": item.verification_status,
+                "trust_labels": list(item.trust_labels),
             }
             if result_meta_extra:
                 result_meta.update(result_meta_extra)
@@ -1182,17 +1291,23 @@ class MemoryStore:
                 connection.commit()
                 return items
 
-    def list_prompt_items(self, *, limit: int = 20) -> list[MemoryItem]:
+    def list_prompt_items(self, *, limit: int = 20, trusted_only: bool = True) -> list[MemoryItem]:
         kinds = sorted(PROMPT_ALLOWED_KINDS)
         confidences = sorted(PROMPT_ALLOWED_CONFIDENCES)
         kind_placeholders = ",".join("?" for _ in kinds)
         confidence_placeholders = ",".join("?" for _ in confidences)
+        trust_clause = ""
+        trust_params: list[Any] = []
+        if trusted_only:
+            trust_clause = "AND verification_status != ? AND trust_labels_json LIKE ? "
+            trust_params.extend(["rejected", '%"trusted"%'])
         sql = (
             "SELECT * FROM memory_items "
             "WHERE is_tombstoned = 0 "
             "AND (namespace = ? OR namespace LIKE ?) "
             f"AND kind IN ({kind_placeholders}) "
             f"AND confidence IN ({confidence_placeholders}) "
+            f"{trust_clause}"
             "ORDER BY updated_at DESC, namespace ASC, key ASC, id ASC "
             "LIMIT ?"
         )
@@ -1201,6 +1316,7 @@ class MemoryStore:
             "project:%",
             *kinds,
             *confidences,
+            *trust_params,
             limit,
         ]
         with self._connection() as connection:
@@ -1478,6 +1594,20 @@ class MemoryStore:
                     )
                 )
                 continue
+            if not is_execution_trusted(
+                trust_labels=item.trust_labels,
+                verification_status=item.verification_status,
+            ):
+                decisions.append(
+                    MemorySelectionDecision(
+                        item_key=item.key,
+                        namespace=item.namespace,
+                        kind=item.kind,
+                        decision="exclude",
+                        reasons=[MemorySelectionReason(code="exclude.trust")],
+                    )
+                )
+                continue
             if item.kind not in PROMPT_ALLOWED_KINDS:
                 decisions.append(
                     MemorySelectionDecision(
@@ -1573,6 +1703,20 @@ class MemoryStore:
                     )
                 )
                 continue
+            if not is_execution_trusted(
+                trust_labels=item.trust_labels,
+                verification_status=item.verification_status,
+            ):
+                decisions.append(
+                    MemorySelectionDecision(
+                        item_key=item.key,
+                        namespace=item.namespace,
+                        kind=item.kind,
+                        decision="exclude",
+                        reasons=[MemorySelectionReason(code="exclude.trust")],
+                    )
+                )
+                continue
             if exclude_namespaces and item.namespace in exclude_namespaces:
                 decisions.append(
                     MemorySelectionDecision(
@@ -1642,15 +1786,21 @@ class MemoryStore:
             )
         return decisions
 
-    def _list_trace_candidates(self, *, limit: int) -> list[MemoryItem]:
+    def _list_trace_candidates(self, *, limit: int, trusted_only: bool = False) -> list[MemoryItem]:
+        trust_clause = ""
+        trust_params: list[Any] = []
+        if trusted_only:
+            trust_clause = "AND verification_status != ? AND trust_labels_json LIKE ? "
+            trust_params.extend(["rejected", '%"trusted"%'])
         sql = (
             "SELECT * FROM memory_items "
             "WHERE is_tombstoned = 0 "
+            f"{trust_clause}"
             "ORDER BY updated_at DESC, namespace ASC, key ASC, id ASC "
             "LIMIT ?"
         )
         with self._connection() as connection:
-            rows = connection.execute(sql, (limit,)).fetchall()
+            rows = connection.execute(sql, (*trust_params, limit)).fetchall()
             return [_row_to_item(row) for row in rows]
 
     def tombstone_item(
@@ -1770,6 +1920,10 @@ class MemoryStore:
         tags: Optional[list[str]],
         confidence: str,
         source: str,
+        source_type: str | None = None,
+        verification_status: str | None = None,
+        trust_labels: list[str] | None = None,
+        provenance_json: dict[str, Any] | None = None,
         ttl_seconds: Optional[int],
         is_tombstoned: bool,
         created_at: str,
@@ -1784,6 +1938,13 @@ class MemoryStore:
     ) -> MemoryItem:
         value_json = json.dumps(value, ensure_ascii=False, sort_keys=True)
         tags_json = json.dumps(tags, ensure_ascii=False, sort_keys=True) if tags else None
+        trust = trust_metadata_for_source(
+            source=source,
+            source_type=source_type,
+            verification_status=verification_status,
+            trust_labels=trust_labels,
+            provenance=provenance_json,
+        )
         new_id = str(uuid4())
         update_created_clause = ", created_at = excluded.created_at" if update_created_at else ""
         with self._connection() as connection:
@@ -1799,12 +1960,16 @@ class MemoryStore:
                         tags_json,
                         confidence,
                         source,
+                        source_type,
+                        verification_status,
+                        trust_labels_json,
+                        provenance_json,
                         ttl_seconds,
                         is_tombstoned,
                         created_at,
                         updated_at
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(namespace, key)
                     DO UPDATE SET
                         kind = excluded.kind,
@@ -1812,6 +1977,10 @@ class MemoryStore:
                         tags_json = excluded.tags_json,
                         confidence = excluded.confidence,
                         source = excluded.source,
+                        source_type = excluded.source_type,
+                        verification_status = excluded.verification_status,
+                        trust_labels_json = excluded.trust_labels_json,
+                        provenance_json = excluded.provenance_json,
                         ttl_seconds = excluded.ttl_seconds,
                         is_tombstoned = excluded.is_tombstoned,
                         updated_at = excluded.updated_at
@@ -1826,6 +1995,10 @@ class MemoryStore:
                         tags_json,
                         confidence,
                         source,
+                        trust.source_type,
+                        trust.verification_status,
+                        json.dumps(trust.trust_labels, ensure_ascii=False, sort_keys=True),
+                        json.dumps(trust.provenance, ensure_ascii=False, sort_keys=True),
                         ttl_seconds,
                         int(is_tombstoned),
                         created_at,
@@ -1849,6 +2022,9 @@ class MemoryStore:
                 "tags_json": tags_json,
                 "confidence": confidence,
                 "source": source,
+                "source_type": trust.source_type,
+                "verification_status": trust.verification_status,
+                "trust_labels": list(trust.trust_labels),
                 "ttl_seconds": ttl_seconds,
                 "created_at": created_at,
                 "updated_at": updated_at,
@@ -1858,6 +2034,8 @@ class MemoryStore:
                 "item_id": item.id,
                 "updated_at": item.updated_at,
                 "is_tombstoned": item.is_tombstoned,
+                "verification_status": item.verification_status,
+                "trust_labels": list(item.trust_labels),
             }
             if result_meta_extra:
                 result_meta.update(result_meta_extra)
@@ -1874,6 +2052,104 @@ class MemoryStore:
             connection.commit()
             return item
 
+    def transition_item_trust(
+        self,
+        *,
+        namespace: str,
+        key: str,
+        trust_labels: list[str],
+        verification_status: str,
+        actor: str,
+        reason: str,
+        policy_hash: str,
+        provenance_json: dict[str, Any] | None = None,
+        related_run_id: Optional[str] = None,
+        related_ask_event_id: Optional[str] = None,
+    ) -> MemoryItem:
+        with self._connection() as connection:
+            item = self._fetch_item(
+                connection,
+                namespace=namespace,
+                key=key,
+                include_tombstoned=True,
+            )
+            if item is None:
+                raise ValueError(f"Memory item not found: {namespace}/{key}")
+            transition = prepare_trust_transition(
+                labels_before=item.trust_labels,
+                labels_after=trust_labels,
+                verification_before=item.verification_status,
+                verification_after=verification_status,
+                reason=reason,
+            )
+            updated_provenance = dict(item.provenance_json)
+            if provenance_json:
+                updated_provenance.update(provenance_json)
+            updated_provenance["trust_transition_reason"] = transition.reason
+            connection.execute(
+                """
+                UPDATE memory_items
+                SET verification_status = ?, trust_labels_json = ?, provenance_json = ?, updated_at = ?
+                WHERE namespace = ? AND key = ?
+                """,
+                (
+                    transition.verification_after,
+                    json.dumps(transition.labels_after, ensure_ascii=False, sort_keys=True),
+                    json.dumps(updated_provenance, ensure_ascii=False, sort_keys=True),
+                    _utc_now().isoformat(),
+                    namespace,
+                    key,
+                ),
+            )
+            updated = self._fetch_item(
+                connection,
+                namespace=namespace,
+                key=key,
+                include_tombstoned=True,
+            )
+            if updated is None:
+                raise RuntimeError("Failed to load memory item after trust transition")
+            append_event(
+                connection,
+                operation="trust.transition",
+                actor=actor,
+                policy_hash=policy_hash,
+                request={
+                    "namespace": namespace,
+                    "key": key,
+                    "labels_before": item.trust_labels,
+                    "labels_after": transition.labels_after,
+                    "verification_before": item.verification_status,
+                    "verification_after": transition.verification_after,
+                    "reason": transition.reason,
+                },
+                result_meta={
+                    "item_id": updated.id,
+                    "updated_at": updated.updated_at,
+                    "verification_status": updated.verification_status,
+                    "trust_labels": updated.trust_labels,
+                },
+                related_run_id=related_run_id,
+                related_ask_event_id=related_ask_event_id,
+            )
+            append_security_event(
+                connection=connection,
+                event_type="trust_transition",
+                actor=actor,
+                action="promote",
+                resource=f"memory:{namespace}/{key}",
+                payload={
+                    **transition.to_dict(),
+                    "item_id": updated.id,
+                    "namespace": namespace,
+                    "key": key,
+                },
+                related_run_id=related_run_id,
+                related_plan_id=related_ask_event_id,
+            )
+            connection.commit()
+            return updated
+
 
 def put_item(
     db_path: str,
@@ -1885,6 +2161,10 @@ def put_item(
     tags: Optional[list[str]],
     confidence: str,
     source: str,
+    source_type: str | None = None,
+    verification_status: str | None = None,
+    trust_labels: list[str] | None = None,
+    provenance_json: dict[str, Any] | None = None,
     ttl_seconds: Optional[int],
     actor: str,
     policy_hash: str,
@@ -1901,6 +2181,10 @@ def put_item(
             tags=tags,
             confidence=confidence,
             source=source,
+            source_type=source_type,
+            verification_status=verification_status,
+            trust_labels=trust_labels,
+            provenance_json=provenance_json,
             ttl_seconds=ttl_seconds,
             actor=actor,
             policy_hash=policy_hash,
@@ -1994,6 +2278,10 @@ def upsert_item_with_timestamps(
     tags: Optional[list[str]],
     confidence: str,
     source: str,
+    source_type: str | None = None,
+    verification_status: str | None = None,
+    trust_labels: list[str] | None = None,
+    provenance_json: dict[str, Any] | None = None,
     ttl_seconds: Optional[int],
     is_tombstoned: bool,
     created_at: str,
@@ -2015,6 +2303,10 @@ def upsert_item_with_timestamps(
             tags=tags,
             confidence=confidence,
             source=source,
+            source_type=source_type,
+            verification_status=verification_status,
+            trust_labels=trust_labels,
+            provenance_json=provenance_json,
             ttl_seconds=ttl_seconds,
             is_tombstoned=is_tombstoned,
             created_at=created_at,
@@ -2033,9 +2325,10 @@ def list_prompt_items(
     db_path: str,
     *,
     limit: int = 20,
+    trusted_only: bool = True,
 ) -> list[MemoryItem]:
     with MemoryStore(db_path) as store:
-        return store.list_prompt_items(limit=limit)
+        return store.list_prompt_items(limit=limit, trusted_only=trusted_only)
 
 
 def list_selection_traces(
@@ -2187,9 +2480,79 @@ def list_profile_items(
     *,
     profile: MemoryProfile,
     limit: int | None = None,
+    trusted_only: bool = True,
 ) -> list[MemoryItem]:
     with MemoryStore(db_path) as store:
-        return store.list_profile_items(profile=profile, limit=limit)
+        return store.list_profile_items(
+            profile=profile,
+            limit=limit,
+            trusted_only=trusted_only,
+        )
+
+
+def transition_item_trust(
+    db_path: str,
+    *,
+    namespace: str,
+    key: str,
+    trust_labels: list[str],
+    verification_status: str,
+    actor: str,
+    reason: str,
+    policy_hash: str,
+    provenance_json: dict[str, Any] | None = None,
+    related_run_id: Optional[str] = None,
+    related_ask_event_id: Optional[str] = None,
+) -> MemoryItem:
+    with MemoryStore(db_path) as store:
+        return store.transition_item_trust(
+            namespace=namespace,
+            key=key,
+            trust_labels=trust_labels,
+            verification_status=verification_status,
+            actor=actor,
+            reason=reason,
+            policy_hash=policy_hash,
+            provenance_json=provenance_json,
+            related_run_id=related_run_id,
+            related_ask_event_id=related_ask_event_id,
+        )
+
+
+def item_planning_eligibility(item: MemoryItem) -> MemoryEligibility:
+    reasons: list[str] = []
+    if item.is_tombstoned:
+        reasons.append("tombstoned")
+    if item.namespace != "global" and not item.namespace.startswith("project:"):
+        reasons.append("namespace_not_prompt_visible")
+    if item.kind not in PROMPT_ALLOWED_KINDS:
+        reasons.append("kind_not_prompt_visible")
+    if item.confidence not in PROMPT_ALLOWED_CONFIDENCES:
+        reasons.append("confidence_not_prompt_visible")
+    if not is_planning_trusted(
+        trust_labels=item.trust_labels,
+        verification_status=item.verification_status,
+    ):
+        reasons.append("trust_not_promoted")
+    return MemoryEligibility(
+        eligible=not reasons,
+        reasons=reasons,
+    )
+
+
+def item_execution_eligibility(item: MemoryItem) -> MemoryEligibility:
+    reasons: list[str] = []
+    if item.is_tombstoned:
+        reasons.append("tombstoned")
+    if not is_execution_trusted(
+        trust_labels=item.trust_labels,
+        verification_status=item.verification_status,
+    ):
+        reasons.append("trust_not_execution_ready")
+    return MemoryEligibility(
+        eligible=not reasons,
+        reasons=reasons,
+    )
 
 
 def list_namespaces(db_path: str) -> list[MemoryNamespaceSummary]:
@@ -2448,6 +2811,27 @@ def _confidence_rank(value: str) -> int:
 
 def _row_to_item(row: sqlite3.Row) -> MemoryItem:
     tags_json = row["tags_json"]
+    source = row["source"]
+    source_type = (
+        row["source_type"]
+        if "source_type" in row.keys() and row["source_type"]
+        else trust_metadata_for_source(source=source).source_type
+    )
+    verification_status = (
+        ensure_verification_status(row["verification_status"])
+        if "verification_status" in row.keys() and row["verification_status"]
+        else VERIFICATION_STATUS_UNVERIFIED
+    )
+    trust_labels = (
+        normalize_trust_labels(json.loads(row["trust_labels_json"]))
+        if "trust_labels_json" in row.keys() and row["trust_labels_json"]
+        else trust_metadata_for_source(source=source).trust_labels
+    )
+    provenance_json = (
+        json.loads(row["provenance_json"])
+        if "provenance_json" in row.keys() and row["provenance_json"]
+        else {}
+    )
     return MemoryItem(
         id=row["id"],
         namespace=row["namespace"],
@@ -2456,7 +2840,11 @@ def _row_to_item(row: sqlite3.Row) -> MemoryItem:
         value=json.loads(row["value_json"]),
         tags=json.loads(tags_json) if tags_json else [],
         confidence=row["confidence"],
-        source=row["source"],
+        source=source,
+        source_type=source_type,
+        verification_status=verification_status,
+        trust_labels=trust_labels,
+        provenance_json=provenance_json,
         ttl_seconds=row["ttl_seconds"],
         is_tombstoned=bool(row["is_tombstoned"]),
         created_at=row["created_at"],

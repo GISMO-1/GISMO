@@ -333,6 +333,130 @@ Memory suggestions:
   gismo ask "remember default model" --apply-memory-suggestions \
     --policy policy/dev-safe.json --yes
 
+Trust and quarantine:
+- Operator-authored memory is stored as trusted memory.
+- LLM output, imported snapshots, and other external content are stored as unverified by default.
+- Unverified memory does not participate in trusted prompt/execution memory selection.
+- Quarantine tracks imported/model content separately from trusted memory.
+- Promotion from quarantine or unverified memory requires an explicit reason and is written to the security event stream.
+- Review quarantine from the CLI:
+
+  gismo quarantine list
+  gismo quarantine inspect QUARANTINE_ID
+  gismo quarantine promote QUARANTINE_ID --labels imported verified trusted \
+    --reason "Reviewed by operator" --namespace global --key reviewed-item
+  gismo quarantine reject QUARANTINE_ID --reason "Rejected by operator"
+
+- Promotion is explicit:
+  - `--reason` is required.
+  - `--labels` is required.
+  - If a record does not already carry a memory target, provide `--namespace` and `--key`.
+- Rejected records cannot be promoted later, and promoted records cannot be promoted or rejected again.
+- HTTP endpoints expose the same review flow:
+  - `GET /api/quarantine`
+  - `GET /api/quarantine/{id}`
+  - `POST /api/quarantine/{id}/promote`
+  - `POST /api/quarantine/{id}/reject`
+
+Security telemetry:
+- Security decisions are written to an append-only chained event stream.
+- Current event types include capability issuance/verification/rejection, outbound allow/deny, quarantine lifecycle events, trust transitions, plugin signature verification results, execution mode selection, isolated execution start/finish/failure, and blocked trust-zone boundary violations.
+- Hash chaining makes tampering detectable during review.
+- Inspect recent events:
+
+  gismo security events
+  gismo security events --type outbound_denied --limit 20
+  gismo security events --event SECURITY_EVENT_ID
+
+- Verify the event chain:
+
+  gismo security verify-chain
+
+- Inspect trust zones and execution boundaries:
+
+  gismo security zones
+  gismo security zones --component run_shell
+  gismo security execution
+  gismo security execution --recent 20 --mode sandboxed
+  gismo security execution --zone device_adapter
+  gismo security execution inspect EXECUTION_ID
+
+- Minimal HTTP inspection is also available:
+  - `GET /api/security/events`
+  - `GET /api/security/verify`
+  - `GET /api/security/execution`
+  - `GET /api/security/execution/{id}`
+
+Trust zones and execution boundaries:
+- GISMO uses separate trust zones for:
+  - `core_trusted`: orchestration, receipts, trusted memory/state, and trust decisions
+  - `model_runtime`: model transports and model output handling
+  - `tool_execution`: higher-risk tool execution such as `run_shell`
+  - `device_adapter`: LAN-facing device discovery and control
+  - `external_ingress`: imported and externally sourced content before trust promotion
+  - `plugin_runtime`: plugin/adaptor loading surfaces
+- Sandboxed execution in GISMO currently means:
+  - a separate child process
+  - an explicit working directory
+  - a reduced inherited environment
+  - captured stdout/stderr
+  - explicit timeout handling
+  - marshaled JSON input/output only
+- What is isolated today:
+  - `run_shell` executes through a separate worker subprocess with JSON input/output
+  - Ollama curl transport runs through the isolated subprocess boundary
+  - Ollama python transport runs through the constrained sandboxed worker boundary
+  - device discovery, status, and control paths use the sandboxed device runtime boundary
+  - verified plugin runtime execution uses the sandboxed plugin worker boundary
+- What remains in-process today:
+  - core orchestration, trust decisions, receipts, and trusted state
+  - plugin manifest verification and signer trust decisions
+  - policy/capability checks before work is handed to an isolated runtime
+- What GISMO does not claim yet:
+  - no container, VM, Hyper-V, or OS sandbox isolation
+  - no kernel-enforced filesystem or network sandbox
+  - no guarantee that child code cannot reach resources the OS already permits
+  - no guarantee that in-process components are protected from same-process compromise
+- The subprocess and sandbox boundaries reduce blast radius and keep trusted state out of direct-handle sharing for isolated paths, but they are not OS-grade sandboxes.
+- Review execution-boundary history directly from the security stream:
+  - `gismo security execution` shows recent boundary selections and outcomes
+  - `gismo security execution inspect EXECUTION_ID` shows one execution record plus its underlying events
+
+Outbound policy:
+- Network egress is deny-by-default.
+- Components must have explicit network scope in policy:
+  - `ollama_client` for model calls
+  - `device_control` and `web_device_*` for LAN device access
+  - `tts_download` for voice/model downloads
+  - `web_health_probe` for internet connectivity checks
+- Policies distinguish loopback, private-network, and broader public egress.
+- Use the security event stream to review both allowed and denied outbound attempts:
+
+  gismo security events --type outbound_denied
+  gismo security events --type outbound_allowed
+
+Plugin and adapter signing:
+- Plugin/adapter manifests must be signed.
+- Signers are trusted only through an explicit local trust store.
+- Unsigned, tampered, or untrusted-signer manifests are rejected and logged.
+- Verified plugin runtime execution is intentionally narrow in this slice:
+  - direct trusted-state handles are blocked at the boundary
+  - outbound network capability is not granted to plugin runtime execution
+- Default trust store location:
+
+  .gismo/plugin-trust.json
+
+- Inspect signer trust and verify manifests:
+
+  gismo plugins signers
+  gismo plugins verify --manifest path\\to\\plugin.json
+  gismo plugins verify --manifest-dir path\\to\\plugins
+
+- Inspect memory trust posture and transitions:
+
+  gismo trust inspect-memory global/reviewed-item
+  gismo trust transitions --limit 20
+
 -------------------------------------------------------------------------------
 
 TERMINAL DASHBOARD (TUI)
@@ -352,7 +476,8 @@ LOCAL WEB DASHBOARD
   gismo web --no-browser
 
 - Opens a browser to 127.0.0.1:7800 by default
-- Tabs: Queue, Runs, Memory, Plans, Settings
+- Command Center is the default surface for day-to-day use
+- Tabs: Command Center and Calendar, with advanced data still available through the API and security commands
 - Queue tab: view items, cancel individual items, purge all failed
 - Runs tab: run list with task/tool call detail view
 - Memory tab: namespace list + all active memory items
@@ -360,6 +485,39 @@ LOCAL WEB DASHBOARD
 - Settings tab: TTS voice selection and live playback test
 - Daemon sidebar: live status, pause/resume controls
 - No external HTTP libraries; stdlib only
+
+Command Center behavior:
+- GISMO auto-starts the background daemon when the desktop app or web server launches, if it is not already healthy.
+- Duplicate launches are avoided; startup results are logged to the event stream.
+- If auto-start fails, GISMO does not pretend to be ready. The surface stays in a truthful degraded or offline state.
+- Boot readiness is staged:
+  - State
+  - Worker
+  - Setup
+  - Model
+  - API
+- First-run setup happens inside the window, not in the terminal.
+- Onboarding currently captures:
+  - operator name
+  - preferred voice
+  - performance mode
+- Those settings are persisted through the existing settings and memory paths.
+
+Plain-language system states:
+- `ready`: GISMO is available for normal work.
+- `starting`: GISMO is still coming up or reconnecting.
+- `degraded`: GISMO is running, but some subsystem needs attention.
+- `approval needed`: GISMO is waiting for you to approve a request.
+- `blocked`: GISMO cannot proceed until something is fixed or resumed.
+- `offline`: GISMO is not currently available.
+
+Readiness is based on real backend state:
+- daemon heartbeat freshness
+- queue backlog and stale in-progress work
+- pending approvals
+- onboarding completion
+- model availability
+- recent startup failures
 
 -------------------------------------------------------------------------------
 
@@ -372,12 +530,18 @@ STARTING THE CHAT INTERFACE:
 - Chat tab is available in the web dashboard at 127.0.0.1:7800
 - Uses the gismo Ollama model (local, no cloud)
 - Full conversation history is maintained within the session
+- Informational requests can be answered directly
+- Operational requests route through the real execution path: planning, approval if needed, queue, worker, execution, and receipt-backed result reporting
 
 SENDING A MESSAGE:
 
 - Type in the input box and press Enter or click Send
 - GISMO responds inline in the chat window
 - Responses reflect GISMO's identity and operator policy
+- GISMO does not report action success before the queued work actually finishes
+- If approval is required, GISMO says so plainly and waits
+- If policy blocks an action, GISMO reports that plainly instead of narrating success
+- If completion cannot be verified, GISMO says that instead of guessing
 
 MIC BUTTON (VOICE INPUT):
 
@@ -403,6 +567,19 @@ Notes:
 - Logging failures are silent and never block the chat
 - This file is suitable as fine-tuning training data for future model runs
 - To review recent exchanges: python -c "import json,pathlib; [print(json.loads(l)['user']) for l in pathlib.Path('.gismo/chat_history.jsonl').read_text().splitlines()]"
+
+Chat result language:
+- `completed`: the work finished and GISMO has a real result.
+- `blocked`: the request was stopped by policy or another hard guardrail.
+- `needs approval`: GISMO is waiting for your decision before it can continue.
+- `failed`: the work ran and failed.
+- `could not verify`: GISMO could not confirm the final outcome.
+- `unverified source`: the request depended on content that is not trusted yet.
+
+Device actions in chat:
+- Device requests such as scan, status checks, and power actions go through the same queue and worker path as other operational work.
+- Device cards show only capabilities GISMO can actually resolve from current metadata, such as `status`, `on/off`, `stream`, and `snapshot`.
+- If capability detection is partial, the card reflects only what is currently known.
 
 -------------------------------------------------------------------------------
 

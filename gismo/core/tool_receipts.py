@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from gismo.core.permissions import PermissionPolicy
+from gismo.core.permissions import NetworkDecision, PermissionPolicy
 from gismo.core.state import StateStore
 
 
@@ -56,16 +56,41 @@ def tool_kind_for_name(tool_name: str) -> str:
         "write_note": "state",
         "device_control": "device",
         "calendar_control": "calendar",
+        "plugin_runtime": "plugin",
     }
     return mapping.get(tool_name, "tool")
 
 
-def build_policy_snapshot(policy: PermissionPolicy, tool_name: str, *, allowed: bool) -> dict[str, Any]:
-    return {
+def build_policy_snapshot(
+    policy: PermissionPolicy,
+    tool_name: str,
+    *,
+    allowed: bool,
+    capability: dict[str, Any] | None = None,
+    network: NetworkDecision | dict[str, Any] | None = None,
+    execution: dict[str, Any] | None = None,
+    output_trust: dict[str, Any] | None = None,
+    reason: str | None = None,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
         "tool_name": tool_name,
         "allowed": allowed,
         "allowed_tools": sorted(policy.allowed_tools),
+        "network": policy.network.summary_for_component(tool_name),
     }
+    if capability is not None:
+        payload["capability"] = capability
+    if network is not None:
+        payload["network_decision"] = (
+            network.to_dict() if isinstance(network, NetworkDecision) else network
+        )
+    if execution is not None:
+        payload["execution"] = execution
+    if output_trust is not None:
+        payload["output_trust"] = output_trust
+    if reason:
+        payload["reason"] = reason
+    return payload
 
 
 @dataclass(frozen=True)

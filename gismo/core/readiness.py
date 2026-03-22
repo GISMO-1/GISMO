@@ -1,0 +1,381 @@
+"""Central readiness/status helpers for operator-facing GISMO surfaces."""
+from __future__ import annotations
+
+from datetime import datetime, timezone
+from typing import Any
+
+from gismo.core.background_worker import STALE_SECONDS, get_background_worker_status
+from gismo.core.models import PlanStatus, QueueStatus
+from gismo.core.state import StateStore
+from gismo.llm.model_policy import get_model_health, load_model_policy, peek_model_discovery
+from gismo.onboarding import get_operator_name
+
+_AUTOSTART_EVENT_TYPES = (
+    "daemon_autostart_failed",
+    "daemon_autostart_started",
+    "daemon_autostart_skipped",
+)
+_AUTOSTART_FAILURE_WINDOW_SECONDS = 300
+_MIN_RUNNING_STALE_SECONDS = 120
+_RUNNING_GRACE_SECONDS = 15
+
+
+def build_runtime_status(
+    db_path: str,
+    *,
+    model_probe: str = "cached",
+) -> dict[str, Any]:
+    now = datetime.now(timezone.utc)
+    with StateStore(db_path) as store:
+        queue_stats = store.queue_stats()
+        pending_plans = list(store.list_pending_plans(status=PlanStatus.PENDING, limit=100))
+        running_items = list(store.list_queue_items_by_status(QueueStatus.IN_PROGRESS))
+        recent_events = store.list_events(limit=80)
+    daemon = get_background_worker_status(db_path).to_dict()
+    daemon["age_secs"] = daemon.get("age_seconds")
+    daemon["state"] = _daemon_state_label(daemon)
+    onboarding = _build_onboarding_status(db_path)
+    startup = _build_startup_status(recent_events, now=now)
+    queue = _build_queue_status(queue_stats, running_items, now=now)
+    models = _build_model_status(db_path, probe=model_probe)
+    approvals = {
+        "pending_count": len(pending_plans),
+        "state": "needs_approval" if pending_plans else "ready",
+        "detail": (
+            f"{len(pending_plans)} request{'s' if len(pending_plans) != 1 else ''} need approval."
+            if pending_plans
+            else "No approvals are waiting."
+        ),
+    }
+    gismo = _build_gismo_status(
+        daemon=daemon,
+        queue=queue,
+        approvals=approvals,
+        onboarding=onboarding,
+        models=models,
+        startup=startup,
+    )
+    stages = [
+        {
+            "key": "state",
+            "label": "State",
+            "ready": bool(gismo["surface_ready"]),
+            "detail": gismo["detail"],
+        },
+        {
+            "key": "worker",
+            "label": "Worker",
+            "ready": bool(daemon["running"] and not daemon["stale"]),
+            "detail": _worker_detail(daemon, startup),
+        },
+        {
+            "key": "setup",
+            "label": "Setup",
+            "ready": onboarding["completed"],
+            "detail": onboarding["detail"],
+        },
+        {
+            "key": "model",
+            "label": "Model",
+            "ready": models["state"] == "ready",
+            "detail": models["detail"],
+        },
+        {
+            "key": "api",
+            "label": "API",
+            "ready": True,
+            "detail": "Listening",
+        },
+    ]
+    return {
+        "daemon": daemon,
+        "queue": queue,
+        "database": {"ready": True, "state": "ready"},
+        "api": {"ready": True, "state": "ready"},
+        "startup": startup,
+        "onboarding": onboarding,
+        "approvals": approvals,
+        "models": models,
+        "gismo": gismo,
+        "readiness": {
+            "ready": bool(gismo["ready"]),
+            "surface_ready": bool(gismo["surface_ready"]),
+            "gismo_state": gismo["state"],
+            "summary": gismo["summary"],
+            "stages": stages,
+        },
+    }
+
+
+def build_readiness_payload(db_path: str) -> dict[str, Any]:
+    return dict(build_runtime_status(db_path, model_probe="full")["readiness"])
+
+
+def _build_onboarding_status(db_path: str) -> dict[str, Any]:
+    name = get_operator_name(db_path)
+    completed = bool(name and str(name).strip())
+    return {
+        "completed": completed,
+        "needs_onboarding": not completed,
+        "operator_name": name,
+        "state": "ready" if completed else "blocked",
+        "detail": "Complete" if completed else "Needs setup",
+    }
+
+
+def _build_startup_status(events: list[Any], *, now: datetime) -> dict[str, Any]:
+    selected = next(
+        (event for event in events if getattr(event, "event_type", None) in _AUTOSTART_EVENT_TYPES),
+        None,
+    )
+    if selected is None:
+        return {
+            "state": "unknown",
+            "detail": "No recent startup event.",
+            "recent_failure": False,
+            "event_type": None,
+            "timestamp": None,
+            "payload": {},
+        }
+    timestamp = selected.ts
+    if timestamp.tzinfo is None:
+        timestamp = timestamp.replace(tzinfo=timezone.utc)
+    age_seconds = max(0, int((now - timestamp).total_seconds()))
+    recent_failure = (
+        selected.event_type == "daemon_autostart_failed"
+        and age_seconds <= _AUTOSTART_FAILURE_WINDOW_SECONDS
+    )
+    detail = selected.message
+    if isinstance(selected.json_payload, dict):
+        source = str(selected.json_payload.get("source") or "").strip()
+        if source:
+            detail = f"{selected.message} ({source})"
+    return {
+        "state": (
+            "failed"
+            if selected.event_type == "daemon_autostart_failed"
+            else "started"
+            if selected.event_type == "daemon_autostart_started"
+            else "healthy"
+        ),
+        "detail": detail,
+        "recent_failure": recent_failure,
+        "event_type": selected.event_type,
+        "timestamp": timestamp.isoformat(),
+        "payload": selected.json_payload or {},
+    }
+
+
+def _build_queue_status(queue_stats: dict[str, Any], running_items: list[Any], *, now: datetime) -> dict[str, Any]:
+    by_status = dict(queue_stats.get("by_status") or {})
+    stale_running = 0
+    for item in running_items:
+        started_at = getattr(item, "started_at", None)
+        if started_at is None:
+            continue
+        if started_at.tzinfo is None:
+            started_at = started_at.replace(tzinfo=timezone.utc)
+        age_seconds = max(0, int((now - started_at).total_seconds()))
+        timeout_seconds = max(
+            int(getattr(item, "timeout_seconds", 0) or 0),
+            _MIN_RUNNING_STALE_SECONDS,
+        )
+        if age_seconds > timeout_seconds + _RUNNING_GRACE_SECONDS:
+            stale_running += 1
+    return {
+        "total": int(queue_stats.get("total") or 0),
+        "by_status": by_status,
+        "queued": int(by_status.get("QUEUED") or 0),
+        "running": int(by_status.get("IN_PROGRESS") or 0),
+        "succeeded": int(by_status.get("SUCCEEDED") or 0),
+        "failed": int(by_status.get("FAILED") or 0),
+        "cancelled": int(by_status.get("CANCELLED") or 0),
+        "stale_running": stale_running,
+    }
+
+
+def _build_model_status(db_path: str, *, probe: str) -> dict[str, Any]:
+    if probe == "cached":
+        cached = peek_model_discovery()
+        if cached is None:
+            return {
+                "state": "unknown",
+                "detail": "Checking availability",
+                "health": None,
+            }
+        return _build_cached_model_status(db_path, cached)
+    health = get_model_health(db_path)
+    issues = list(health.get("issues") or [])
+    degraded = bool((health.get("degraded_mode") or {}).get("active"))
+    ollama_available = bool(health.get("ollama_available"))
+    if degraded:
+        state = "degraded"
+        detail = str((health.get("degraded_mode") or {}).get("reason") or "Reduced mode")
+    elif not ollama_available:
+        state = "offline"
+        detail = "Model service unavailable"
+    elif issues:
+        state = "degraded"
+        detail = str(issues[0])
+    else:
+        state = "ready"
+        detail = "Ready"
+    return {
+        "state": state,
+        "detail": detail,
+        "health": health,
+    }
+
+
+def _build_cached_model_status(db_path: str, discovery: dict[str, Any]) -> dict[str, Any]:
+    policy = load_model_policy(db_path)
+    installed = set(discovery.get("installed_models") or [])
+    if not discovery.get("ollama_available"):
+        state = "offline"
+        detail = "Model service unavailable"
+    elif policy.primary_assistant_model not in installed:
+        state = "degraded"
+        detail = "Main model is not installed"
+    elif policy.planner_model not in installed:
+        state = "degraded"
+        detail = "Planner model is not installed"
+    elif policy.helper_model and policy.helper_model not in installed:
+        state = "degraded"
+        detail = "Helper model is not installed"
+    else:
+        state = "ready"
+        detail = "Ready"
+    return {
+        "state": state,
+        "detail": detail,
+        "health": {
+            "installed_models": list(discovery.get("installed_models") or []),
+            "loaded_models": list(discovery.get("loaded_models") or []),
+            "ollama_available": bool(discovery.get("ollama_available")),
+            "policy": policy.to_dict(),
+            "probe": "cached",
+        },
+    }
+
+
+def _build_gismo_status(
+    *,
+    daemon: dict[str, Any],
+    queue: dict[str, Any],
+    approvals: dict[str, Any],
+    onboarding: dict[str, Any],
+    models: dict[str, Any],
+    startup: dict[str, Any],
+) -> dict[str, Any]:
+    state = "ready"
+    detail = "Ready."
+    if not daemon["running"]:
+        if startup["recent_failure"]:
+            state = "blocked"
+            detail = "Background service could not start."
+        elif daemon["last_seen"]:
+            state = "starting"
+            detail = "Background service is reconnecting."
+        else:
+            state = "offline"
+            detail = "Background service is offline."
+    elif bool(daemon["paused"]):
+        state = "blocked"
+        detail = "Work is paused."
+    elif onboarding["needs_onboarding"]:
+        state = "blocked"
+        detail = "Finish setup to continue."
+    elif approvals["pending_count"]:
+        state = "approval_needed"
+        detail = approvals["detail"]
+    elif queue["stale_running"] > 0:
+        state = "degraded"
+        detail = "Some work may be stuck."
+    elif queue["failed"] > 0:
+        state = "degraded"
+        detail = (
+            f"{queue['failed']} failed item{'s' if queue['failed'] != 1 else ''} need attention."
+        )
+    elif models["state"] not in {"ready", "unknown"}:
+        state = "degraded"
+        detail = models["detail"]
+    summary = _build_summary(
+        state=state,
+        detail=detail,
+        queue=queue,
+        daemon=daemon,
+        approvals=approvals,
+        onboarding=onboarding,
+    )
+    return {
+        "state": state,
+        "label": _state_label(state),
+        "ready": state == "ready",
+        "surface_ready": state != "starting",
+        "working": queue["running"] > 0,
+        "paused": bool(daemon["paused"]),
+        "approval_needed": approvals["pending_count"] > 0,
+        "detail": detail,
+        "summary": summary,
+    }
+
+
+def _build_summary(
+    *,
+    state: str,
+    detail: str,
+    queue: dict[str, Any],
+    daemon: dict[str, Any],
+    approvals: dict[str, Any],
+    onboarding: dict[str, Any],
+) -> str:
+    if state == "ready":
+        if queue["running"] > 0:
+            return f"GISMO is ready and handling {queue['running']} active task{'s' if queue['running'] != 1 else ''}."
+        return "GISMO is ready."
+    if state == "approval_needed":
+        return approvals["detail"]
+    if state == "blocked" and onboarding["needs_onboarding"]:
+        return "Finish setup to continue."
+    if state == "blocked" and daemon["paused"]:
+        return "GISMO is paused."
+    if state == "starting":
+        return "GISMO is starting up."
+    if state == "offline":
+        return "GISMO is offline."
+    return detail
+
+
+def _worker_detail(daemon: dict[str, Any], startup: dict[str, Any]) -> str:
+    if daemon["running"] and not daemon["stale"]:
+        if daemon["paused"]:
+            return "Paused"
+        age = daemon.get("age_seconds")
+        if age is None:
+            return "Running"
+        return f"Running ({age}s heartbeat)"
+    if startup["recent_failure"]:
+        return startup["detail"]
+    if daemon.get("last_seen"):
+        return f"Waiting for heartbeat ({STALE_SECONDS}s stale window)"
+    return "Waiting to start"
+
+
+def _state_label(state: str) -> str:
+    labels = {
+        "ready": "Ready",
+        "starting": "Starting",
+        "degraded": "Degraded",
+        "approval_needed": "Approval Needed",
+        "blocked": "Blocked",
+        "offline": "Offline",
+    }
+    return labels.get(state, state.replace("_", " ").title())
+
+
+def _daemon_state_label(daemon: dict[str, Any]) -> str:
+    if daemon["running"] and not daemon["stale"]:
+        return "online"
+    if daemon.get("last_seen"):
+        return "starting"
+    return "offline"

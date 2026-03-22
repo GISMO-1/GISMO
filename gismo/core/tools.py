@@ -1,6 +1,7 @@
 """Tool abstractions and registry."""
 from __future__ import annotations
 
+import inspect
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
@@ -13,7 +14,12 @@ class Tool:
     description: str
     schema: Optional[Dict[str, Any]] = None
 
-    def run(self, tool_input: Dict[str, Any]) -> Dict[str, Any]:
+    def run(
+        self,
+        tool_input: Dict[str, Any],
+        *,
+        context: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
         raise NotImplementedError
 
 
@@ -41,7 +47,12 @@ class EchoTool(Tool):
             schema={"type": "object"},
         )
 
-    def run(self, tool_input: Dict[str, Any]) -> Dict[str, Any]:
+    def run(
+        self,
+        tool_input: Dict[str, Any],
+        *,
+        context: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
         return {"echo": tool_input}
 
 
@@ -54,8 +65,23 @@ class WriteNoteTool(Tool):
         )
         self._state_store = state_store
 
-    def run(self, tool_input: Dict[str, Any]) -> Dict[str, Any]:
+    def run(
+        self,
+        tool_input: Dict[str, Any],
+        *,
+        context: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
         note = tool_input.get("note")
         if not isinstance(note, str) or not note.strip():
             raise ValueError("'note' must be a non-empty string")
         return {"note": note}
+
+
+def tool_accepts_context(tool: Tool) -> bool:
+    parameters = inspect.signature(tool.run).parameters.values()
+    for parameter in parameters:
+        if parameter.kind == inspect.Parameter.VAR_KEYWORD:
+            return True
+        if parameter.name == "context":
+            return True
+    return False

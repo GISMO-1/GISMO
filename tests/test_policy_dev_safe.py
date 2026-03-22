@@ -1,6 +1,7 @@
-import tempfile
 import unittest
 from pathlib import Path
+from uuid import uuid4
+import shutil
 
 from gismo.core.agent import SimpleAgent
 from gismo.core.models import FailureType
@@ -12,6 +13,11 @@ from gismo.core.tools import ToolRegistry
 
 
 class PolicyDevSafeTest(unittest.TestCase):
+    def _tmpdir(self, label: str) -> Path:
+        path = Path("tmp") / f"{label}-{uuid4().hex}"
+        path.mkdir(parents=True, exist_ok=False)
+        return path
+
     def _load_dev_safe_policy(self) -> tuple[Path, PermissionPolicy]:
         repo_root = Path(__file__).resolve().parents[1]
         policy_path = repo_root / "policy" / "dev-safe.json"
@@ -39,9 +45,11 @@ class PolicyDevSafeTest(unittest.TestCase):
         return state_store, orchestrator
 
     def test_dev_safe_allows_shell_allowlist(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
+        tmpdir = self._tmpdir("policy-dev-safe-allow")
+        state_store = None
+        try:
             _, policy = self._load_dev_safe_policy()
-            db_path = str(Path(tmpdir) / "state.db")
+            db_path = str(tmpdir / "state.db")
             state_store, orchestrator = self._build_orchestrator(db_path, policy)
             run = state_store.create_run(label="dev-safe", metadata={})
             task = state_store.create_task(
@@ -56,11 +64,17 @@ class PolicyDevSafeTest(unittest.TestCase):
             self.assertEqual(result.status.value, "SUCCEEDED")
             tool_calls = list(state_store.list_tool_calls_for_task(task.id))
             self.assertEqual(tool_calls[0].status.value, "SUCCEEDED")
+        finally:
+            if state_store is not None:
+                state_store.close()
+            shutil.rmtree(tmpdir, ignore_errors=True)
 
     def test_dev_safe_denies_non_allowlisted_command(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
+        tmpdir = self._tmpdir("policy-dev-safe-deny")
+        state_store = None
+        try:
             _, policy = self._load_dev_safe_policy()
-            db_path = str(Path(tmpdir) / "state.db")
+            db_path = str(tmpdir / "state.db")
             state_store, orchestrator = self._build_orchestrator(db_path, policy)
             run = state_store.create_run(label="dev-safe", metadata={})
             task = state_store.create_task(
@@ -76,6 +90,10 @@ class PolicyDevSafeTest(unittest.TestCase):
             tool_calls = list(state_store.list_tool_calls_for_task(task.id))
             self.assertEqual(tool_calls[0].failure_type, FailureType.PERMISSION_DENIED)
             self.assertIn("allowlist", tool_calls[0].error or "")
+        finally:
+            if state_store is not None:
+                state_store.close()
+            shutil.rmtree(tmpdir, ignore_errors=True)
 
 
 if __name__ == "__main__":

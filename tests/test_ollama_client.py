@@ -4,6 +4,7 @@ import subprocess
 import unittest
 from unittest import mock
 
+from gismo.core.execution import build_execution_request
 from gismo.llm import ollama
 
 
@@ -25,32 +26,47 @@ class OllamaClientPayloadTest(unittest.TestCase):
     def test_chat_payload_includes_json_format_and_keep_alive(self) -> None:
         captured = {}
 
-        def fake_urlopen(request, timeout):
-            captured["request"] = request
-            captured["timeout"] = timeout
-            return DummyResponse("{}")
+        def fake_run(command, **kwargs):
+            captured["command"] = command
+            captured["timeout"] = kwargs["timeout"]
+            captured["worker_input"] = json.loads(kwargs["input"])
+            captured["cwd"] = kwargs.get("cwd")
+            captured["env"] = kwargs.get("env")
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                stdout=json.dumps(
+                    {
+                        "ok": True,
+                        "body": '{"message":{"content":"{}"}}',
+                        "exit_code": 0,
+                        "stdout": "",
+                        "stderr": "",
+                    }
+                ),
+                stderr="",
+            )
 
         with (
-            mock.patch.dict(os.environ, {"GISMO_OLLAMA_TRANSPORT": "python"}),
-            mock.patch.object(
-                ollama.urllib.request,
-                "urlopen",
-                side_effect=fake_urlopen,
-            ),
-            mock.patch.object(ollama, "_extract_message_content", return_value="{}"),
+            mock.patch.dict(os.environ, {"GISMO_OLLAMA_TRANSPORT": "python", "GISMO_TEST_SECRET": "hidden"}),
+            mock.patch("gismo.core.execution.subprocess.run", side_effect=fake_run),
         ):
             response = ollama.ollama_chat("ping", "return JSON")
 
         self.assertEqual(response, "{}")
+        self.assertEqual(captured["command"][:3], [os.sys.executable, "-m", "gismo.core.isolation_worker"])
+        self.assertEqual(captured["command"][3], "ollama_python")
+        self.assertIsNotNone(captured["cwd"])
+        self.assertNotIn("GISMO_TEST_SECRET", captured["env"])
 
-        body = json.loads(captured["request"].data.decode("utf-8"))
+        body = json.loads(captured["worker_input"]["payload_json"])
         self.assertEqual(body["format"], "json")
         self.assertIn("keep_alive", body)
         self.assertEqual(body["options"]["temperature"], 0)
 
 
 class OllamaCurlTransportTest(unittest.TestCase):
-    def test_curl_transport_writes_payload_and_invokes_curl(self) -> None:
+    def test_curl_transport_uses_isolated_worker_payload(self) -> None:
         captured = {}
 
         payload = ollama.build_ollama_chat_payload(
@@ -67,39 +83,48 @@ class OllamaCurlTransportTest(unittest.TestCase):
             transport="curl",
         )
 
-        def fake_run(command, capture_output, text, check, timeout):
+        def fake_run(command, input, capture_output, text, encoding, timeout, check):
             captured["command"] = command
             captured["timeout"] = timeout
-
-            data_arg = command[-1]
-            self.assertTrue(data_arg.startswith("@"))
-
-            with open(data_arg[1:], encoding="utf-8") as handle:
-                body = json.load(handle)
-
-            self.assertEqual(body["format"], "json")
-            self.assertEqual(body["options"]["temperature"], 0)
-
+            captured["worker_input"] = json.loads(input)
             return subprocess.CompletedProcess(
                 command,
                 0,
-                stdout='{"message":{"content":"{}"}}',
+                stdout=json.dumps(
+                    {
+                        "ok": True,
+                        "stdout": '{"message":{"content":"{}"}}',
+                        "stderr": "",
+                        "exit_code": 0,
+                    }
+                ),
                 stderr="",
             )
 
-        with mock.patch.object(ollama.subprocess, "run", side_effect=fake_run):
+        with mock.patch("gismo.core.execution.subprocess.run", side_effect=fake_run):
             response = ollama._ollama_chat_via_curl(
                 "http://127.0.0.1:11434/api/chat",
                 payload_json,
                 timeout_s=config.timeout_s,
                 config=config,
                 curl_executable="curl.exe",
+                request=build_execution_request(
+                    component="ollama_client",
+                    action="model_request",
+                    actor="test",
+                    mode="isolated_subprocess",
+                ),
             )
 
         self.assertEqual(response, "{}")
-        self.assertIn("curl.exe", captured["command"][0])
-        self.assertIn("--data-binary", captured["command"])
-        self.assertEqual(captured["timeout"], 5)
+        self.assertEqual(captured["command"][:3], [os.sys.executable, "-m", "gismo.core.isolation_worker"])
+        self.assertEqual(captured["command"][3], "curl")
+        self.assertEqual(captured["worker_input"]["curl_executable"], "curl.exe")
+        self.assertEqual(captured["worker_input"]["url"], "http://127.0.0.1:11434/api/chat")
+        worker_payload = json.loads(captured["worker_input"]["payload_json"])
+        self.assertEqual(worker_payload["format"], "json")
+        self.assertEqual(worker_payload["options"]["temperature"], 0)
+        self.assertEqual(captured["timeout"], 7.0)
 
 
 if __name__ == "__main__":

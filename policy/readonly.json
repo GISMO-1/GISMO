@@ -1,6 +1,30 @@
 {
   "allowed_tools": ["echo", "read_file", "list_dir", "memory.read", "device_control", "calendar_control"],
   "fs": { "base_dir": "." },
+  "network": {
+    "default_action": "deny",
+    "components": {
+      "device_control": {
+        "allow_private": true
+      },
+      "ollama_client": {
+        "allow_loopback": true,
+        "allow_private": true
+      },
+      "web_device_discovery": {
+        "allow_private": true
+      },
+      "web_device_snapshot": {
+        "allow_private": true
+      },
+      "web_health_probe": {
+        "allowed_cidrs": ["1.1.1.1/32", "8.8.8.8/32"]
+      },
+      "tts_download": {
+        "allow_public": true
+      }
+    }
+  },
   "memory": {
     "allow": {
       "memory.read": ["*"]

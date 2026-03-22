@@ -8,6 +8,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
+from gismo.core.trust import (
+    VERIFICATION_STATUS_UNVERIFIED,
+    normalize_trust_labels,
+    trust_metadata_for_source,
+)
 from gismo.memory.store import MemoryItem, list_items_for_snapshot
 
 SNAPSHOT_SCHEMA_VERSION = 1
@@ -23,6 +28,10 @@ class SnapshotItem:
     value_json: str
     confidence: str
     source: str
+    source_type: str
+    verification_status: str
+    trust_labels: list[str]
+    provenance_json: dict[str, Any]
     tags: list[str]
     created_at: str
     updated_at: str
@@ -96,6 +105,10 @@ def memory_item_hash(item: MemoryItem) -> str:
         value=item.value,
         confidence=item.confidence,
         source=item.source,
+        source_type=item.source_type,
+        verification_status=item.verification_status,
+        trust_labels=item.trust_labels,
+        provenance_json=item.provenance_json,
         tags=item.tags,
         created_at=item.created_at,
         updated_at=item.updated_at,
@@ -120,6 +133,10 @@ def _snapshot_item_from_memory(item: MemoryItem) -> dict[str, object]:
         value=item.value,
         confidence=item.confidence,
         source=item.source,
+        source_type=item.source_type,
+        verification_status=item.verification_status,
+        trust_labels=item.trust_labels,
+        provenance_json=item.provenance_json,
         tags=item.tags,
         created_at=item.created_at,
         updated_at=item.updated_at,
@@ -135,6 +152,25 @@ def _snapshot_item_from_payload(payload: dict[str, object]) -> SnapshotItem:
     value_json = _require_str(payload.get("value_json"), "value_json")
     confidence = _require_str(payload.get("confidence"), "confidence")
     source = _require_str(payload.get("source"), "source")
+    source_type = (
+        str(payload.get("source_type")).strip()
+        if payload.get("source_type") is not None
+        else trust_metadata_for_source(source=source).source_type
+    )
+    verification_status = (
+        str(payload.get("verification_status")).strip()
+        if payload.get("verification_status") is not None
+        else VERIFICATION_STATUS_UNVERIFIED
+    )
+    trust_labels_raw = payload.get("trust_labels", trust_metadata_for_source(source=source).trust_labels)
+    if not isinstance(trust_labels_raw, list):
+        raise ValueError("Snapshot item trust_labels must be a list of strings")
+    trust_labels = normalize_trust_labels(trust_labels_raw)
+    provenance_json = payload.get("provenance_json", {})
+    if provenance_json is None:
+        provenance_json = {}
+    if not isinstance(provenance_json, dict):
+        raise ValueError("Snapshot item provenance_json must be an object")
     created_at = _require_str(payload.get("created_at"), "created_at")
     updated_at = _require_str(payload.get("updated_at"), "updated_at")
     is_tombstoned = payload.get("is_tombstoned")
@@ -157,6 +193,10 @@ def _snapshot_item_from_payload(payload: dict[str, object]) -> SnapshotItem:
         value=value,
         confidence=confidence,
         source=source,
+        source_type=source_type,
+        verification_status=verification_status,
+        trust_labels=trust_labels,
+        provenance_json=provenance_json,
         tags=tags,
         created_at=created_at,
         updated_at=updated_at,
@@ -173,6 +213,10 @@ def _snapshot_item_from_payload(payload: dict[str, object]) -> SnapshotItem:
         value_json=normalized_payload["value_json"],
         confidence=confidence,
         source=source,
+        source_type=source_type,
+        verification_status=verification_status,
+        trust_labels=trust_labels,
+        provenance_json=provenance_json,
         tags=normalized_payload["tags"],
         created_at=created_at,
         updated_at=updated_at,
@@ -189,6 +233,10 @@ def _normalized_payload(
     value: Any,
     confidence: str,
     source: str,
+    source_type: str,
+    verification_status: str,
+    trust_labels: Iterable[str],
+    provenance_json: dict[str, Any],
     tags: Iterable[str],
     created_at: str,
     updated_at: str,
@@ -201,6 +249,10 @@ def _normalized_payload(
         "value_json": canonical_value_json(value),
         "confidence": confidence,
         "source": source,
+        "source_type": source_type,
+        "verification_status": verification_status,
+        "trust_labels": sorted(normalize_trust_labels(trust_labels)),
+        "provenance_json": dict(provenance_json),
         "tags": sorted(tags),
         "created_at": created_at,
         "updated_at": updated_at,

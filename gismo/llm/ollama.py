@@ -7,11 +7,25 @@ import shutil
 import socket
 import subprocess
 import sys
-import tempfile
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from typing import Any
+
+from gismo.core.execution import (
+    ExecutionRequest,
+    build_execution_request,
+    build_sandbox_profile,
+    build_worker_command,
+    run_isolated_process,
+    run_sandboxed_process,
+)
+from gismo.core.outbound import check_outbound_target
+from gismo.core.permissions import NetworkPolicy
+from gismo.core.trust_zones import (
+    EXECUTION_MODE_ISOLATED_SUBPROCESS,
+    EXECUTION_MODE_SANDBOXED,
+)
 
 
 DEFAULT_OLLAMA_URL = "http://127.0.0.1:11434"
@@ -174,6 +188,12 @@ def ollama_freeform_chat(
     model: str | None = None,
     host: str | None = None,
     timeout_s: int | None = None,
+    network_policy: NetworkPolicy | None = None,
+    db_path: str | None = None,
+    actor: str = "ollama",
+    related_run_id: str | None = None,
+    related_task_id: str | None = None,
+    related_plan_id: str | None = None,
 ) -> str:
     """Call Ollama chat API with a full message history; no JSON format constraint."""
     config = resolve_ollama_config(url=host, model=model, timeout_s=timeout_s)
@@ -189,35 +209,16 @@ def ollama_freeform_chat(
         "options": {"temperature": 0.7},
         "messages": all_messages,
     }
-    payload_json = json.dumps(payload)
-    if config.transport == "curl":
-        curl_executable = _resolve_curl_executable()
-        if curl_executable:
-            try:
-                return _ollama_chat_via_curl(
-                    url, payload_json,
-                    timeout_s=config.timeout_s, config=config,
-                    curl_executable=curl_executable,
-                )
-            except OllamaError:
-                pass
-    return _ollama_chat_via_urllib(url, payload_json, timeout_s=config.timeout_s, config=config)
-
-
-def ollama_chat(
-    prompt: str,
-    system: str,
-    model: str | None = None,
-    host: str | None = None,
-    timeout_s: int | None = None,
-) -> str:
-    """Call Ollama chat API and return assistant content."""
-    config = resolve_ollama_config(url=host, model=model, timeout_s=timeout_s)
-    url = f"{config.url}/api/chat"
-    payload = build_ollama_chat_payload(
-        prompt,
-        system,
-        model=config.model,
+    check_outbound_target(
+        component="ollama_client",
+        target=url,
+        policy=network_policy,
+        actor=actor,
+        action="model_request",
+        db_path=db_path,
+        related_run_id=related_run_id,
+        related_task_id=related_task_id,
+        related_plan_id=related_plan_id,
     )
     payload_json = json.dumps(payload)
     if config.transport == "curl":
@@ -230,14 +231,100 @@ def ollama_chat(
                     timeout_s=config.timeout_s,
                     config=config,
                     curl_executable=curl_executable,
+                    request=_ollama_execution_request(
+                        mode=EXECUTION_MODE_ISOLATED_SUBPROCESS,
+                        db_path=db_path,
+                        actor=actor,
+                        related_run_id=related_run_id,
+                        related_task_id=related_task_id,
+                        related_plan_id=related_plan_id,
+                    ),
                 )
             except OllamaError:
                 pass
-    return _ollama_chat_via_urllib(
+    return _ollama_chat_via_python_worker(
         url,
         payload_json,
         timeout_s=config.timeout_s,
         config=config,
+        request=_ollama_execution_request(
+            mode=EXECUTION_MODE_SANDBOXED,
+            db_path=db_path,
+            actor=actor,
+            related_run_id=related_run_id,
+            related_task_id=related_task_id,
+            related_plan_id=related_plan_id,
+        ),
+    )
+
+
+def ollama_chat(
+    prompt: str,
+    system: str,
+    model: str | None = None,
+    host: str | None = None,
+    timeout_s: int | None = None,
+    network_policy: NetworkPolicy | None = None,
+    db_path: str | None = None,
+    actor: str = "ollama",
+    related_run_id: str | None = None,
+    related_task_id: str | None = None,
+    related_plan_id: str | None = None,
+) -> str:
+    """Call Ollama chat API and return assistant content."""
+    config = resolve_ollama_config(url=host, model=model, timeout_s=timeout_s)
+    url = f"{config.url}/api/chat"
+    payload = build_ollama_chat_payload(
+        prompt,
+        system,
+        model=config.model,
+    )
+    check_outbound_target(
+        component="ollama_client",
+        target=url,
+        policy=network_policy,
+        actor=actor,
+        action="model_request",
+        db_path=db_path,
+        related_run_id=related_run_id,
+        related_task_id=related_task_id,
+        related_plan_id=related_plan_id,
+    )
+    payload_json = json.dumps(payload)
+    if config.transport == "curl":
+        curl_executable = _resolve_curl_executable()
+        if curl_executable:
+            try:
+                return _ollama_chat_via_curl(
+                    url,
+                    payload_json,
+                    timeout_s=config.timeout_s,
+                    config=config,
+                    curl_executable=curl_executable,
+                    request=_ollama_execution_request(
+                        mode=EXECUTION_MODE_ISOLATED_SUBPROCESS,
+                        db_path=db_path,
+                        actor=actor,
+                        related_run_id=related_run_id,
+                        related_task_id=related_task_id,
+                        related_plan_id=related_plan_id,
+                    ),
+                )
+            except OllamaError:
+                pass
+    return _ollama_chat_via_python_worker(
+        url,
+        payload_json,
+        timeout_s=config.timeout_s,
+        config=config,
+        request=_ollama_execution_request(
+            mode=EXECUTION_MODE_SANDBOXED,
+            db_path=db_path,
+            actor=actor,
+            related_run_id=related_run_id,
+            related_task_id=related_task_id,
+            related_plan_id=related_plan_id,
+        ),
     )
 
 
@@ -278,6 +365,44 @@ def _ollama_chat_via_urllib(
     return _extract_message_content(body, timeout_s=timeout_s, config=config)
 
 
+def _ollama_chat_via_python_worker(
+    url: str,
+    payload_json: str,
+    *,
+    timeout_s: int,
+    config: OllamaConfig,
+    request: ExecutionRequest,
+) -> str:
+    profile = build_sandbox_profile(
+        component="ollama_client",
+        db_path=request.db_path,
+    )
+    try:
+        result = run_sandboxed_process(
+            request,
+            worker_command=build_worker_command("ollama_python"),
+            worker_input={
+                "url": url,
+                "payload_json": payload_json,
+                "timeout_seconds": timeout_s,
+            },
+            timeout_s=timeout_s,
+            sandbox_profile=profile,
+            event_details={"transport": "python", "url": config.url},
+        )
+    except Exception as exc:  # noqa: BLE001
+        raise OllamaError(
+            f"Ollama request failed after {timeout_s}s.",
+            timeout_s=timeout_s,
+            url=config.url,
+        ) from exc
+    return _extract_message_content(
+        str(result.get("body") or ""),
+        timeout_s=timeout_s,
+        config=config,
+    )
+
+
 def _ollama_chat_via_curl(
     url: str,
     payload_json: str,
@@ -285,49 +410,31 @@ def _ollama_chat_via_curl(
     timeout_s: int,
     config: OllamaConfig,
     curl_executable: str,
+    request: ExecutionRequest,
 ) -> str:
-    temp_path = None
     try:
-        with tempfile.NamedTemporaryFile(
-            mode="w",
-            encoding="utf-8",
-            delete=False,
-        ) as temp_file:
-            temp_file.write(payload_json)
-            temp_path = temp_file.name
-        command = [
-            curl_executable,
-            "-sS",
-            url,
-            "-H",
-            "Content-Type: application/json",
-            "--data-binary",
-            f"@{temp_path}",
-        ]
-        result = subprocess.run(
-            command,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            check=False,
-            timeout=timeout_s,
+        result = run_isolated_process(
+            request,
+            worker_command=build_worker_command("curl"),
+            worker_input={
+                "url": url,
+                "payload_json": payload_json,
+                "timeout_seconds": timeout_s,
+                "curl_executable": curl_executable,
+            },
+            timeout_s=timeout_s,
+            event_details={"transport": "curl", "url": config.url},
         )
-    except (OSError, subprocess.TimeoutExpired) as exc:
+    except Exception as exc:  # noqa: BLE001 - wrap boundary failures consistently
         raise OllamaError(
             f"curl failed after {timeout_s}s.",
             timeout_s=timeout_s,
             url=config.url,
         ) from exc
-    finally:
-        if temp_path:
-            try:
-                os.unlink(temp_path)
-            except OSError:
-                pass
-    if result.returncode != 0:
-        stderr = result.stderr.strip()
+    if int(result.get("exit_code") or 0) != 0:
+        stderr = str(result.get("stderr") or "").strip()
         message = (
-            f"curl failed with exit code {result.returncode} "
+            f"curl failed with exit code {result.get('exit_code')} "
             f"after {timeout_s}s. {stderr}"
         ).strip()
         raise OllamaError(
@@ -335,7 +442,7 @@ def _ollama_chat_via_curl(
             timeout_s=timeout_s,
             url=config.url,
         )
-    return _extract_message_content(result.stdout, timeout_s=timeout_s, config=config)
+    return _extract_message_content(str(result.get("stdout") or ""), timeout_s=timeout_s, config=config)
 
 
 def _extract_message_content(body: str, *, timeout_s: int, config: OllamaConfig) -> str:
@@ -356,3 +463,25 @@ def _extract_message_content(body: str, *, timeout_s: int, config: OllamaConfig)
             url=config.url,
         )
     return content
+
+
+def _ollama_execution_request(
+    *,
+    mode: str,
+    db_path: str | None,
+    actor: str,
+    related_run_id: str | None,
+    related_task_id: str | None,
+    related_plan_id: str | None,
+) -> ExecutionRequest:
+    return build_execution_request(
+        component="ollama_client",
+        action="model_request",
+        actor=actor,
+        resource="component:ollama_client",
+        mode=mode,
+        db_path=db_path,
+        related_run_id=related_run_id,
+        related_task_id=related_task_id,
+        related_plan_id=related_plan_id,
+    )

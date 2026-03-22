@@ -1,9 +1,10 @@
 import json
 import subprocess
 import sys
-import tempfile
 import unittest
 from pathlib import Path
+from uuid import uuid4
+import shutil
 
 from gismo.core.agent import SimpleAgent
 from gismo.core.export import export_run_jsonl
@@ -15,6 +16,11 @@ from gismo.core.tools import EchoTool, ToolRegistry, WriteNoteTool
 
 
 class ToolReceiptTest(unittest.TestCase):
+    def _tmpdir(self, label: str) -> Path:
+        path = Path("tmp") / f"{label}-{uuid4().hex}"
+        path.mkdir(parents=True, exist_ok=False)
+        return path
+
     def _build_orchestrator(self, db_path: str, policy: PermissionPolicy) -> Orchestrator:
         state_store = StateStore(db_path)
         registry = ToolRegistry()
@@ -29,8 +35,9 @@ class ToolReceiptTest(unittest.TestCase):
         )
 
     def test_receipt_records_success_and_hashes(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            db_path = str(Path(tmpdir) / "state.db")
+        tmpdir = self._tmpdir("tool-receipts-success")
+        try:
+            db_path = str(tmpdir / "state.db")
             policy = PermissionPolicy(allowed_tools={"echo"})
             orchestrator = self._build_orchestrator(db_path, policy)
             state_store = orchestrator.state_store
@@ -56,6 +63,8 @@ class ToolReceiptTest(unittest.TestCase):
             self.assertEqual(receipt.request_sha256, sha256_payload(expected_request))
             self.assertEqual(receipt.response_payload_json, expected_response)
             self.assertEqual(receipt.response_sha256, sha256_payload(expected_response))
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
 
     def test_receipt_redaction_is_deterministic(self) -> None:
         payload = {
@@ -78,8 +87,9 @@ class ToolReceiptTest(unittest.TestCase):
         self.assertEqual(sha256_payload(first_json), sha256_payload(second_json))
 
     def test_receipt_records_policy_denied(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            db_path = str(Path(tmpdir) / "state.db")
+        tmpdir = self._tmpdir("tool-receipts-denied")
+        try:
+            db_path = str(tmpdir / "state.db")
             policy = PermissionPolicy(allowed_tools=set())
             orchestrator = self._build_orchestrator(db_path, policy)
             state_store = orchestrator.state_store
@@ -100,12 +110,19 @@ class ToolReceiptTest(unittest.TestCase):
             self.assertEqual(receipt.status.value, "error")
             self.assertIsNotNone(receipt.policy_snapshot)
             self.assertFalse(receipt.policy_snapshot["allowed"])
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
 
 
 class ToolReceiptReplayCLITest(unittest.TestCase):
+    def _tmpdir(self, label: str) -> Path:
+        path = Path("tmp") / f"{label}-{uuid4().hex}"
+        path.mkdir(parents=True, exist_ok=False)
+        return path
+
     def test_replay_detects_mismatch(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            tmp_path = Path(tmpdir)
+        tmp_path = self._tmpdir("tool-receipts-replay")
+        try:
             db_path = tmp_path / "state.db"
             policy = PermissionPolicy(allowed_tools={"echo"})
             state_store = StateStore(str(db_path))
@@ -162,3 +179,5 @@ class ToolReceiptReplayCLITest(unittest.TestCase):
 
             mismatch_proc = subprocess.run(cmd, capture_output=True, text=True)
             self.assertEqual(mismatch_proc.returncode, 2, mismatch_proc.stderr)
+        finally:
+            shutil.rmtree(tmp_path, ignore_errors=True)

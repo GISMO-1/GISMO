@@ -118,6 +118,7 @@ class Task:
     error: Optional[str] = None
     failure_type: FailureType = FailureType.NONE
     status_reason: Optional[str] = None
+    capability_token: Optional[str] = None
 
     def mark_running(self) -> None:
         self.status = TaskStatus.RUNNING
@@ -197,6 +198,8 @@ class ToolReceipt:
     error_message: Optional[str] = None
     policy_decision_id: Optional[str] = None
     policy_snapshot: Optional[Dict[str, Any]] = None
+    capability_id: Optional[str] = None
+    capability_summary: Optional[Dict[str, Any]] = None
 
 
 @dataclass
@@ -215,6 +218,7 @@ class QueueItem:
     timeout_seconds: int = 300
     cancel_requested: bool = False
     last_error: Optional[str] = None
+    metadata_json: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass

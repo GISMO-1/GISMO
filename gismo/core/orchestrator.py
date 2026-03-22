@@ -10,6 +10,13 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Dict, Optional, Tuple, Type
 
 from gismo.core.agent import Agent
+from gismo.core.capabilities import (
+    CapabilityClaims,
+    CapabilityError,
+    capability_summary,
+    capability_summary_from_token,
+    verify_tool_capability,
+)
 from gismo.core.models import (
     FailureType,
     Task,
@@ -19,7 +26,7 @@ from gismo.core.models import (
     ToolReceipt,
     ToolReceiptStatus,
 )
-from gismo.core.permissions import PermissionPolicy
+from gismo.core.permissions import NetworkPermissionError, PermissionPolicy
 from gismo.core.state import StateStore
 from gismo.core.tools import ToolRegistry
 from gismo.core.tool_receipts import (
@@ -29,6 +36,7 @@ from gismo.core.tool_receipts import (
     sha256_payload,
     tool_kind_for_name,
 )
+from gismo.core.trust import tool_output_trust_metadata
 
 
 @dataclass
@@ -53,12 +61,32 @@ class Orchestrator:
         normalized_input = _normalize_input(tool_input)
         task.input_hash = _stable_hash(normalized_input)
         run_context = _receipt_run_context(self.state_store, run_id)
+        capability_claims: CapabilityClaims | None = None
 
         prior = self.state_store.find_succeeded_task_by_idempotency(
             task.idempotency_key,
             task.input_hash,
         )
         if prior is not None:
+            try:
+                capability_claims = _verify_task_capability(
+                    self.state_store,
+                    task,
+                    run_id=run_id,
+                    tool_name=tool_name,
+                    tool_input=tool_input,
+                )
+            except CapabilityError as exc:
+                return _record_preflight_failure(
+                    state_store=self.state_store,
+                    policy=self.policy,
+                    task=task,
+                    run_context=run_context,
+                    tool_name=tool_name,
+                    tool_input=tool_input,
+                    failure_type=FailureType.PERMISSION_DENIED,
+                    exc=exc,
+                )
             output = prior.output_json or {}
             task.mark_succeeded(output)
             skip_message = (
@@ -85,9 +113,17 @@ class Orchestrator:
                     "output": output,
                 },
                 status=ToolReceiptStatus.SUCCESS,
-                policy_snapshot=None,
+                policy_snapshot=build_policy_snapshot(
+                    self.policy,
+                    tool_name,
+                    allowed=True,
+                    capability=capability_summary(capability_claims, valid=True),
+                    execution=_extract_execution_snapshot(output),
+                    output_trust=tool_output_trust_metadata(tool_name).to_dict(),
+                ),
                 error_type=None,
                 error_message=None,
+                capability_claims=capability_claims,
             )
             with self.state_store.transaction() as connection:
                 self.state_store.record_tool_call(tool_call, connection=connection)
@@ -114,15 +150,48 @@ class Orchestrator:
                 self.state_store.record_tool_call(tool_call, connection=connection)
 
             try:
+                capability_claims = _verify_task_capability(
+                    self.state_store,
+                    task,
+                    run_id=run_id,
+                    tool_name=tool_name,
+                    tool_input=tool_input,
+                )
                 self.policy.check_tool_allowed(tool_name)
-                output = self.agent.execute(task, tool_name, tool_input)
+                output = self.agent.execute(
+                    task,
+                    tool_name,
+                    tool_input,
+                    context={
+                        "db_path": self.state_store.db_path,
+                        "actor": "worker",
+                        "related_run_id": run_id,
+                        "related_task_id": task.id,
+                        "related_plan_id": run_context.plan_event_id,
+                    },
+                )
             except Exception as exc:  # noqa: BLE001 - fail fast with explicit exception
                 failure_type, can_retry = _classify_exception(exc, retryable)
                 error_message = _safe_error_message(exc)
+                capability_snapshot = (
+                    capability_summary(capability_claims, valid=True)
+                    if capability_claims is not None
+                    else capability_summary_from_token(
+                        task.capability_token,
+                        valid=False,
+                        reason=error_message if isinstance(exc, CapabilityError) else "not-verified",
+                    )
+                )
+                network_decision = exc.decision if isinstance(exc, NetworkPermissionError) else None
                 policy_snapshot = build_policy_snapshot(
                     self.policy,
                     tool_name,
                     allowed=not isinstance(exc, PermissionError),
+                    capability=capability_snapshot,
+                    network=network_decision,
+                    execution=_extract_execution_snapshot(exc),
+                    output_trust=tool_output_trust_metadata(tool_name).to_dict(),
+                    reason=error_message,
                 )
                 tool_call.mark_failed(error_message, failure_type)
                 receipt = _build_tool_receipt(
@@ -137,6 +206,8 @@ class Orchestrator:
                     policy_snapshot=policy_snapshot,
                     error_type=exc.__class__.__name__,
                     error_message=error_message,
+                    capability_claims=capability_claims,
+                    capability_override=capability_snapshot,
                 )
                 with self.state_store.transaction() as connection:
                     self.state_store.update_tool_call(tool_call, connection=connection)
@@ -167,9 +238,13 @@ class Orchestrator:
                     self.policy,
                     tool_name,
                     allowed=True,
+                    capability=capability_summary(capability_claims, valid=True),
+                    execution=_extract_execution_snapshot(output),
+                    output_trust=tool_output_trust_metadata(tool_name).to_dict(),
                 ),
                 error_type=None,
                 error_message=None,
+                capability_claims=capability_claims,
             )
             with self.state_store.transaction() as connection:
                 self.state_store.update_tool_call(tool_call, connection=connection)
@@ -267,6 +342,23 @@ def _stable_hash(normalized_payload: str) -> str:
     return hashlib.sha256(normalized_payload.encode("utf-8")).hexdigest()
 
 
+def _extract_execution_snapshot(source: Any) -> dict[str, Any] | None:
+    if isinstance(source, dict):
+        execution = source.get("execution")
+        if isinstance(execution, dict):
+            return execution
+        return None
+    report = getattr(source, "execution_report", None)
+    if report is None:
+        return None
+    to_dict = getattr(report, "to_dict", None)
+    if callable(to_dict):
+        payload = to_dict()
+        if isinstance(payload, dict):
+            return payload
+    return None
+
+
 def _classify_exception(
     exc: BaseException,
     retryable: Tuple[Type[BaseException], ...],
@@ -328,6 +420,8 @@ def _build_tool_receipt(
     policy_snapshot: Optional[Dict[str, Any]],
     error_type: Optional[str],
     error_message: Optional[str],
+    capability_claims: CapabilityClaims | None = None,
+    capability_override: dict[str, Any] | None = None,
 ) -> ToolReceipt:
     started_at = tool_call.started_at
     finished_at = tool_call.finished_at or _utc_now()
@@ -358,6 +452,14 @@ def _build_tool_receipt(
         error_type=error_type,
         error_message=error_message,
         policy_snapshot=policy_snapshot,
+        capability_id=capability_claims.capability_id if capability_claims is not None else None,
+        capability_summary=(
+            capability_override
+            if capability_override is not None
+            else capability_summary(capability_claims, valid=True)
+            if capability_claims is not None
+            else None
+        ),
     )
 
 
@@ -373,3 +475,108 @@ def _task_tool_spec(task: Task) -> Tuple[Optional[str], Dict[str, Any]]:
     if not tool_name or not isinstance(payload, dict):
         return None, {}
     return tool_name, payload
+
+
+def _verify_task_capability(
+    state_store: StateStore,
+    task: Task,
+    *,
+    run_id: str,
+    tool_name: str,
+    tool_input: Dict[str, Any],
+) -> CapabilityClaims:
+    secret = state_store.get_or_create_capability_secret()
+    try:
+        claims = verify_tool_capability(
+            task.capability_token,
+            secret=secret,
+            run_id=run_id,
+            task_id=task.id,
+            tool_name=tool_name,
+            tool_input=tool_input,
+        )
+    except CapabilityError as exc:
+        snapshot = capability_summary_from_token(
+            task.capability_token,
+            valid=False,
+            reason=str(exc),
+        )
+        state_store.record_security_event(
+            event_type="capability_rejected",
+            actor=str(snapshot.get("subject") or "system"),
+            action="execute",
+            resource=str(snapshot.get("resource") or f"tool:{tool_name}"),
+            payload=snapshot,
+            related_run_id=run_id,
+            related_task_id=task.id,
+            related_plan_id=snapshot.get("plan_event_id") if isinstance(snapshot.get("plan_event_id"), str) else None,
+            related_approval_id=snapshot.get("approval_id") if isinstance(snapshot.get("approval_id"), str) else None,
+        )
+        raise
+    state_store.record_security_event(
+        event_type="capability_verified",
+        actor=claims.subject,
+        action=claims.action,
+        resource=claims.resource,
+        payload=claims.to_dict(),
+        related_run_id=claims.run_id,
+        related_task_id=claims.task_id,
+        related_plan_id=claims.plan_event_id,
+        related_approval_id=claims.approval_id,
+    )
+    return claims
+
+
+def _record_preflight_failure(
+    *,
+    state_store: StateStore,
+    policy: PermissionPolicy,
+    task: Task,
+    run_context: ToolReceiptContext,
+    tool_name: str,
+    tool_input: Dict[str, Any],
+    failure_type: FailureType,
+    exc: BaseException,
+) -> Task:
+    error_message = _safe_error_message(exc)
+    tool_call = ToolCall(
+        run_id=run_context.run_id,
+        task_id=task.id,
+        tool_name=tool_name,
+        input_json=tool_input,
+        attempt_number=1,
+    )
+    tool_call.mark_failed(error_message, failure_type)
+    capability_snapshot = capability_summary_from_token(
+        task.capability_token,
+        valid=False,
+        reason=error_message,
+    )
+    policy_snapshot = build_policy_snapshot(
+        policy,
+        tool_name,
+        allowed=False,
+        capability=capability_snapshot,
+        output_trust=tool_output_trust_metadata(tool_name).to_dict(),
+        reason=error_message,
+    )
+    receipt = _build_tool_receipt(
+        tool_call=tool_call,
+        run_context=run_context,
+        tool_input=tool_input,
+        response_payload={
+            "error": error_message,
+            "error_type": exc.__class__.__name__,
+        },
+        status=ToolReceiptStatus.ERROR,
+        policy_snapshot=policy_snapshot,
+        error_type=exc.__class__.__name__,
+        error_message=error_message,
+        capability_override=capability_snapshot,
+    )
+    task.mark_failed(error_message, failure_type)
+    with state_store.transaction() as connection:
+        state_store.record_tool_call(tool_call, connection=connection)
+        state_store.record_tool_receipt(receipt, connection=connection)
+        state_store.update_task(task, connection=connection)
+    return task

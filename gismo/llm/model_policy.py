@@ -208,6 +208,14 @@ def invalidate_model_discovery() -> None:
         _DISCOVERY_CACHE["payload"] = None
 
 
+def peek_model_discovery() -> dict[str, Any] | None:
+    with _CACHE_LOCK:
+        cached = _DISCOVERY_CACHE.get("payload")
+        if not cached:
+            return None
+        return dict(cached)
+
+
 def _run_ollama_command(args: list[str], *, timeout: int = 4) -> tuple[bool, str]:
     try:
         completed = subprocess.run(

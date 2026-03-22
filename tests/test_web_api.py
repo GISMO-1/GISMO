@@ -26,7 +26,7 @@ def _make_db(tmp: str) -> str:
             run.id,
             title="Echo hello",
             description="desc",
-            input_json={"cmd": "echo hello"},
+            input_json={"tool": "echo", "payload": {"message": "hello"}},
         )
         task.status = TaskStatus.SUCCEEDED
         store.update_task(task)
@@ -622,31 +622,22 @@ class TestChatMessage(unittest.TestCase):
 
 
 class TestDevicesAndSettings(unittest.TestCase):
-    def test_scan_devices_times_out_and_returns_partial_results(self) -> None:
+    def test_scan_devices_uses_isolated_runtime_results(self) -> None:
         tmp = Path("tmp") / f"web-api-{uuid4().hex}"
         tmp.mkdir(parents=True, exist_ok=False)
         try:
             db = _make_db(str(tmp))
-            started = time.monotonic()
-            with mock.patch("gismo.web.api._list_device_models", return_value=[]), mock.patch(
-                "gismo.web.api._local_networks",
-                return_value=[ipaddress.ip_network("192.168.1.0/30")],
-            ), mock.patch(
-                "gismo.web.api._local_ipv4_addresses",
-                return_value=["192.168.1.1"],
-            ), mock.patch(
-                "gismo.web.api._read_arp_table",
-                return_value=["192.168.1.2"],
-            ), mock.patch(
-                "gismo.web.api._safe_hostname",
-                return_value="desk-lamp",
-            ), mock.patch(
-                "gismo.web.api._ping_host",
-                side_effect=lambda *_args, **_kwargs: (time.sleep(0.2), True)[1],
-            ):
+            with mock.patch(
+                "gismo.web.api.execute_device_runtime_action",
+                return_value={
+                    "devices": [
+                        {"ip": "192.168.1.2", "hostname": "desk-lamp", "device_type": "light"},
+                    ],
+                    "execution": {"mode": "sandboxed", "zone": "device_adapter"},
+                },
+            ) as runtime:
                 data = web_api.scan_devices(db, timeout_seconds=0.05)
-            elapsed = time.monotonic() - started
-            self.assertLess(elapsed, 0.2)
+            runtime.assert_called_once()
             self.assertEqual(len(data), 1)
             self.assertEqual(data[0]["ip"], "192.168.1.2")
         finally:
@@ -657,16 +648,29 @@ class TestDevicesAndSettings(unittest.TestCase):
         tmp.mkdir(parents=True, exist_ok=False)
         try:
             db = _make_db(str(tmp))
-            added = web_api.add_device(
-                db,
-                "192.168.1.25",
-                "Front Door",
-                "camera",
-                "Tapo",
-                rtsp_url="rtsp://192.168.1.25:554/stream1",
-                open_ports=[554],
-            )
-            listed = web_api.list_devices(db)
+            with mock.patch(
+                "gismo.web.api.execute_device_runtime_action",
+                side_effect=[
+                    {
+                        "devices": [{"id": "device-1", "status": "online"}],
+                        "execution": {"mode": "sandboxed", "zone": "device_adapter"},
+                    },
+                    {
+                        "devices": [{"id": "device-1", "status": "online"}],
+                        "execution": {"mode": "sandboxed", "zone": "device_adapter"},
+                    },
+                ],
+            ):
+                added = web_api.add_device(
+                    db,
+                    "192.168.1.25",
+                    "Front Door",
+                    "camera",
+                    "Tapo",
+                    rtsp_url="rtsp://192.168.1.25:554/stream1",
+                    open_ports=[554],
+                )
+                listed = web_api.list_devices(db)
             self.assertEqual(len(listed), 1)
             self.assertEqual(listed[0]["ip"], "192.168.1.25")
             self.assertIn("check", listed[0]["actions"])
@@ -744,15 +748,28 @@ class TestDevicesAndSettings(unittest.TestCase):
         tmp.mkdir(parents=True, exist_ok=False)
         try:
             db = _make_db(str(tmp))
-            web_api.add_device(
-                db,
-                "192.168.1.40",
-                "Kitchen Lamp",
-                "light",
-                "FEIT",
-                open_ports=[6668],
-            )
-            listed = web_api.list_devices(db)
+            with mock.patch(
+                "gismo.web.api.execute_device_runtime_action",
+                side_effect=[
+                    {
+                        "devices": [{"id": "device-1", "status": "offline"}],
+                        "execution": {"mode": "sandboxed", "zone": "device_adapter"},
+                    },
+                    {
+                        "devices": [{"id": "device-1", "status": "offline"}],
+                        "execution": {"mode": "sandboxed", "zone": "device_adapter"},
+                    },
+                ],
+            ):
+                web_api.add_device(
+                    db,
+                    "192.168.1.40",
+                    "Kitchen Lamp",
+                    "light",
+                    "FEIT",
+                    open_ports=[6668],
+                )
+                listed = web_api.list_devices(db)
             self.assertEqual(len(listed), 1)
             self.assertIn("turn_on", listed[0]["actions"])
             self.assertTrue(listed[0]["needs_setup"])

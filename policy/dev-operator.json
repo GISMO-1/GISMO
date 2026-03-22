@@ -25,6 +25,21 @@
       "memory.profile.retire": ["*"]
     }
   },
+  "network": {
+    "default_action": "deny",
+    "components": {
+      "device_control": {
+        "allow_private": true
+      },
+      "ollama_client": {
+        "allow_loopback": true,
+        "allow_private": true
+      },
+      "tts_download": {
+        "allow_public": true
+      }
+    }
+  },
   "shell": {
     "base_dir": ".",
     "allowlist": [

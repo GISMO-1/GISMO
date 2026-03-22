@@ -10,7 +10,7 @@ import webbrowser
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import Any
 
-from gismo.core.background_worker import ensure_background_worker
+from gismo.core.background_worker import ensure_background_worker_status
 from gismo.web import api as web_api
 from gismo.web.templates import HTML
 
@@ -22,6 +22,9 @@ _RUN_ID_RE = re.compile(r"^/api/runs/([^/?]+)$")
 _PLAN_ID_RE = re.compile(r"^/api/plans/([^/]+)$")
 _PLAN_ACTION_RE = re.compile(r"^/api/plans/([^/]+)/(approve|reject)$")
 _CAL_EVENT_RE = re.compile(r"^/api/calendar/([^/]+)$")
+_QUARANTINE_ID_RE = re.compile(r"^/api/quarantine/([^/]+)$")
+_QUARANTINE_ACTION_RE = re.compile(r"^/api/quarantine/([^/]+)/(promote|reject)$")
+_SECURITY_EXECUTION_ID_RE = re.compile(r"^/api/security/execution/([^/]+)$")
 
 
 def _json_response(handler: BaseHTTPRequestHandler, data: Any, status: int = 200) -> None:
@@ -157,7 +160,7 @@ def _make_handler(db_path: str) -> type[BaseHTTPRequestHandler]:
                 elif path == "/api/models/health":
                     _json_response(self, web_api.get_models_health(db_path))
                 elif path == "/api/health":
-                    _json_response(self, web_api.get_system_health())
+                    _json_response(self, web_api.get_system_health(db_path))
                 elif path == "/api/devices":
                     _json_response(self, web_api.list_devices(db_path))
                 elif path == "/api/devices/list":
@@ -166,6 +169,69 @@ def _make_handler(db_path: str) -> type[BaseHTTPRequestHandler]:
                     _json_response(self, web_api.scan_devices(db_path))
                 elif path == "/api/activity":
                     _json_response(self, web_api.get_activity_feed(db_path))
+                elif path == "/api/execution/status":
+                    _error(self, "Use POST for execution status.", 405)
+                elif path == "/api/security/events":
+                    from urllib.parse import parse_qs, urlparse
+                    qs = parse_qs(urlparse(self.path).query)
+                    try:
+                        _json_response(
+                            self,
+                            web_api.get_security_events(
+                                db_path,
+                                event_type=qs.get("type", [None])[0],
+                                related_run_id=qs.get("run", [None])[0],
+                                related_task_id=qs.get("task", [None])[0],
+                                related_plan_id=qs.get("plan", [None])[0],
+                                related_approval_id=qs.get("approval", [None])[0],
+                                event_id=qs.get("event", [None])[0],
+                                limit=int(qs.get("limit", ["50"])[0]),
+                            ),
+                        )
+                    except ValueError as exc:
+                        _error(self, str(exc), 404 if "not found" in str(exc).lower() else 400)
+                elif path == "/api/security/verify":
+                    _json_response(self, web_api.verify_security_event_chain(db_path))
+                elif path == "/api/security/execution":
+                    from urllib.parse import parse_qs, urlparse
+                    qs = parse_qs(urlparse(self.path).query)
+                    _json_response(
+                        self,
+                        web_api.get_security_execution(
+                            db_path,
+                            mode=qs.get("mode", [None])[0],
+                            zone=qs.get("zone", [None])[0],
+                            component=qs.get("component", [None])[0],
+                            related_run_id=qs.get("run", [None])[0],
+                            related_task_id=qs.get("task", [None])[0],
+                            related_plan_id=qs.get("plan", [None])[0],
+                            recent=int(qs.get("recent", ["25"])[0]),
+                        ),
+                    )
+                elif m := _SECURITY_EXECUTION_ID_RE.match(path):
+                    try:
+                        _json_response(self, web_api.get_security_execution_detail(db_path, m.group(1)))
+                    except ValueError as exc:
+                        _error(self, str(exc), 404)
+                elif path == "/api/quarantine":
+                    from urllib.parse import parse_qs, urlparse
+                    qs = parse_qs(urlparse(self.path).query)
+                    _json_response(
+                        self,
+                        web_api.list_quarantine_entries(
+                            db_path,
+                            status=qs.get("status", [None])[0],
+                            verification_status=qs.get("verification_status", [None])[0],
+                            source_kind=qs.get("source_kind", [None])[0],
+                            origin_type=qs.get("origin_type", [None])[0],
+                            limit=int(qs.get("limit", ["50"])[0]),
+                        ),
+                    )
+                elif m := _QUARANTINE_ID_RE.match(path):
+                    try:
+                        _json_response(self, web_api.get_quarantine_entry(db_path, m.group(1)))
+                    except ValueError as exc:
+                        _error(self, str(exc), 404)
                 elif path == "/api/calendar":
                     from urllib.parse import parse_qs, urlparse
                     qs = parse_qs(urlparse(self.path).query)
@@ -338,7 +404,28 @@ def _make_handler(db_path: str) -> type[BaseHTTPRequestHandler]:
                         _error(self, "name and voice_id are required", 400)
                         return
                     try:
-                        _json_response(self, web_api.complete_onboarding(db_path, name, voice_id))
+                        _json_response(
+                            self,
+                            web_api.complete_onboarding(
+                                db_path,
+                                name,
+                                voice_id,
+                                performance_mode=body.get("performance_mode"),
+                            ),
+                        )
+                    except ValueError as exc:
+                        _error(self, str(exc), 400)
+                elif path == "/api/execution/status":
+                    body = _read_json_body(self)
+                    try:
+                        _json_response(
+                            self,
+                            web_api.get_execution_status(
+                                db_path,
+                                queue_item_ids=body.get("queue_item_ids") or [],
+                                run_id=body.get("run_id"),
+                            ),
+                        )
                     except ValueError as exc:
                         _error(self, str(exc), 400)
                 elif path == "/api/chat":
@@ -353,6 +440,17 @@ def _make_handler(db_path: str) -> type[BaseHTTPRequestHandler]:
                     except RuntimeError as exc:
                         LOGGER.exception("chat_endpoint_failed", exc_info=(type(exc), exc, exc.__traceback__))
                         _error(self, "GISMO could not answer that right now. Please try again in a moment.", 503)
+                elif m := _QUARANTINE_ACTION_RE.match(path):
+                    record_id, action = m.group(1), m.group(2)
+                    body = _read_json_body(self)
+                    try:
+                        if action == "promote":
+                            _json_response(self, web_api.promote_quarantine_entry(db_path, record_id, body))
+                        else:
+                            _json_response(self, web_api.reject_quarantine_entry(db_path, record_id, body))
+                    except ValueError as exc:
+                        status = 404 if "not found" in str(exc).lower() else 400
+                        _error(self, str(exc), status)
                 else:
                     _error(self, "Not found", 404)
             except Exception as exc:
@@ -404,7 +502,7 @@ def _make_handler(db_path: str) -> type[BaseHTTPRequestHandler]:
 
 def run(db_path: str, host: str = "127.0.0.1", port: int = 7800, open_browser: bool = True) -> None:
     """Start the local web server and optionally open the browser."""
-    ensure_background_worker(db_path)
+    ensure_background_worker_status(db_path, source="web_server")
     handler_cls = _make_handler(db_path)
     server = HTTPServer((host, port), handler_cls)
     url = f"http://{host}:{port}/"

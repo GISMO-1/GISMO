@@ -7,7 +7,7 @@ import threading
 from http.server import HTTPServer
 from pathlib import Path
 
-from gismo.core.background_worker import ensure_background_worker
+from gismo.core.background_worker import ensure_background_worker_status
 
 # ── Splash screen HTML ──────────────────────────────────────────────────────
 
@@ -155,7 +155,7 @@ def launch(db_path: str) -> None:
 
     # Ensure db directory exists
     Path(db_path).parent.mkdir(parents=True, exist_ok=True)
-    ensure_background_worker(db_path)
+    ensure_background_worker_status(db_path, source="desktop_app")
 
     port = _find_free_port()
     server = _start_server(db_path, port)

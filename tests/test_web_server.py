@@ -26,7 +26,7 @@ def _make_db(tmp: str) -> str:
             run.id,
             title="Echo hello",
             description="desc",
-            input_json={"cmd": "echo hello"},
+            input_json={"tool": "echo", "payload": {"message": "hello"}},
         )
         task.status = TaskStatus.SUCCEEDED
         store.update_task(task)
@@ -102,14 +102,22 @@ class TestWebServerEndpoints(unittest.TestCase):
         self.assertIn("gismo", data)
 
     def test_ready_endpoint_shape(self) -> None:
-        data = self._request_json("/api/ready")
+        with mock.patch("gismo.core.readiness.get_model_health", return_value={
+            "issues": [],
+            "degraded_mode": {"active": False, "reason": None},
+            "ollama_available": True,
+        }):
+            data = self._request_json("/api/ready")
         self.assertIn("ready", data)
+        self.assertIn("surface_ready", data)
         self.assertIn("stages", data)
 
     def test_onboarding_endpoint_shape(self) -> None:
         data = self._request_json("/api/onboarding")
         self.assertIn("needs_onboarding", data)
         self.assertIn("operator_name", data)
+        self.assertIn("voice_id", data)
+        self.assertIn("performance_mode", data)
 
     def test_settings_endpoint_shape(self) -> None:
         with mock.patch.object(
@@ -240,6 +248,27 @@ class TestWebServerEndpoints(unittest.TestCase):
             [{"role": "user", "content": "earlier"}],
         )
         self.assertEqual(data["reply"], "hello")
+
+    def test_execution_status_endpoint(self) -> None:
+        with StateStore(self.db) as store:
+            run = store.create_run(label="execution", metadata={"queue_item_id": "queue-1"})
+            task = store.create_task(
+                run.id,
+                title="Echo",
+                description="desc",
+                input_json={"tool": "echo", "payload": {"message": "done"}},
+            )
+            task.mark_succeeded({"summary": "Finished the check."})
+            store.update_task(task)
+            item = store.enqueue_command("echo done", run_id=run.id)
+            store.mark_queue_item_succeeded(item.id)
+        data = self._request_json(
+            "/api/execution/status",
+            method="POST",
+            payload={"queue_item_ids": [item.id]},
+        )
+        self.assertEqual(data["state"], "completed")
+        self.assertTrue(data["final"])
 
     def test_chat_endpoint_hides_runtime_errors(self) -> None:
         with mock.patch.object(

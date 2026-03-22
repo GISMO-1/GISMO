@@ -1,42 +1,83 @@
 """Connected device inspection and control."""
 from __future__ import annotations
 
-import socket
 from typing import Any
 
+from gismo.core.device_runtime import execute_device_runtime_action, serialize_device
+from gismo.core.outbound import check_outbound_scope, check_outbound_target
 from gismo.core.models import ConnectedDevice
+from gismo.core.permissions import NetworkPolicy
 from gismo.core.state import StateStore
 from gismo.core.tools import Tool
 
 
 class DeviceControlTool(Tool):
-    def __init__(self, state_store: StateStore) -> None:
+    def __init__(
+        self,
+        state_store: StateStore,
+        network_policy: NetworkPolicy | None = None,
+    ) -> None:
         super().__init__(
             name="device_control",
             description="Inspect and control saved connected devices",
             schema={"type": "object"},
         )
         self._state_store = state_store
+        self._network_policy = network_policy
 
-    def run(self, tool_input: dict[str, Any]) -> dict[str, Any]:
+    def run(
+        self,
+        tool_input: dict[str, Any],
+        *,
+        context: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         action = str(tool_input.get("action") or "").strip().lower()
         target = str(tool_input.get("target") or "").strip()
         request = str(tool_input.get("request") or "").strip()
+        execution_context = context or {}
 
         if action == "scan":
-            return self._scan_network(request or target or "scan")
+            return self._scan_network(
+                request or target or "scan",
+                context=execution_context,
+            )
         if action == "list":
-            return self._list_devices()
+            return self._list_devices(context=execution_context)
         if action == "check":
-            return self._check_devices(target)
+            return self._check_devices(target, context=execution_context)
         if action in {"turn_on", "turn_off"}:
-            return self._set_power(target, turn_on=action == "turn_on")
+            return self._set_power(
+                target,
+                turn_on=action == "turn_on",
+                context=execution_context,
+            )
         raise ValueError(f"Unsupported device action '{action}'")
 
-    def _scan_network(self, request: str) -> dict[str, Any]:
-        from gismo.web.api import scan_devices
-
-        results = scan_devices(self._state_store.db_path, timeout_seconds=10.0)
+    def _scan_network(
+        self,
+        request: str,
+        *,
+        context: dict[str, Any],
+    ) -> dict[str, Any]:
+        self._require_private_network_scope()
+        execution = execute_device_runtime_action(
+            component="device_control",
+            action="scan_network",
+            actor=_context_actor(context),
+            db_path=self._state_store.db_path,
+            payload={
+                "saved_devices": [
+                    serialize_device(device)
+                    for device in self._state_store.list_devices()
+                ],
+                "timeout_seconds": 10.0,
+            },
+            timeout_s=10.0,
+            related_run_id=_context_optional_str(context, "related_run_id"),
+            related_task_id=_context_optional_str(context, "related_task_id"),
+            related_plan_id=_context_optional_str(context, "related_plan_id"),
+        )
+        results = list(execution.get("devices") or [])
         count = len(results)
         if count == 0:
             summary = "I scanned your network and did not find any devices yet."
@@ -51,9 +92,18 @@ class DeviceControlTool(Tool):
             message=summary,
             json_payload={"request": request, "found": count},
         )
-        return {"summary": summary, "found": count, "devices": results}
+        return {
+            "summary": summary,
+            "found": count,
+            "devices": results,
+            "execution": dict(execution.get("execution") or {}),
+        }
 
-    def _list_devices(self) -> dict[str, Any]:
+    def _list_devices(
+        self,
+        *,
+        context: dict[str, Any],
+    ) -> dict[str, Any]:
         devices = self._state_store.list_devices()
         if not devices:
             payload = {
@@ -62,13 +112,36 @@ class DeviceControlTool(Tool):
             }
             self._record("device_list", payload["summary"], {"count": 0})
             return payload
-        details = [_device_snapshot(device) for device in devices]
+        self._require_private_network_scope()
+        for device in devices:
+            self._require_device_target(device)
+        execution = execute_device_runtime_action(
+            component="device_control",
+            action="device_status",
+            actor=_context_actor(context),
+            db_path=self._state_store.db_path,
+            payload={"devices": [serialize_device(device) for device in devices]},
+            timeout_s=5.0,
+            related_run_id=_context_optional_str(context, "related_run_id"),
+            related_task_id=_context_optional_str(context, "related_task_id"),
+            related_plan_id=_context_optional_str(context, "related_plan_id"),
+        )
+        details = list(execution.get("devices") or [])
         summary = _summarize_device_list(details)
-        payload = {"summary": summary, "devices": details}
+        payload = {
+            "summary": summary,
+            "devices": details,
+            "execution": dict(execution.get("execution") or {}),
+        }
         self._record("device_list", summary, {"count": len(details)})
         return payload
 
-    def _check_devices(self, target: str) -> dict[str, Any]:
+    def _check_devices(
+        self,
+        target: str,
+        *,
+        context: dict[str, Any],
+    ) -> dict[str, Any]:
         devices = self._resolve_devices(target)
         if not devices:
             payload = {
@@ -78,7 +151,21 @@ class DeviceControlTool(Tool):
             self._record("device_check", payload["summary"], {"target": target, "matched": 0})
             return payload
 
-        details = [_device_snapshot(device) for device in devices]
+        self._require_private_network_scope()
+        for device in devices:
+            self._require_device_target(device)
+        execution = execute_device_runtime_action(
+            component="device_control",
+            action="device_status",
+            actor=_context_actor(context),
+            db_path=self._state_store.db_path,
+            payload={"devices": [serialize_device(device) for device in devices]},
+            timeout_s=5.0,
+            related_run_id=_context_optional_str(context, "related_run_id"),
+            related_task_id=_context_optional_str(context, "related_task_id"),
+            related_plan_id=_context_optional_str(context, "related_plan_id"),
+        )
+        details = list(execution.get("devices") or [])
         label = _target_label(target, details)
         online = [item["name"] for item in details if item["status"] == "online"]
         offline = [item["name"] for item in details if item["status"] != "online"]
@@ -89,11 +176,21 @@ class DeviceControlTool(Tool):
         if offline:
             parts.append(f"Offline: {_join_human(offline)}.")
         summary = " ".join(parts)
-        payload = {"summary": summary, "devices": details}
+        payload = {
+            "summary": summary,
+            "devices": details,
+            "execution": dict(execution.get("execution") or {}),
+        }
         self._record("device_check", summary, {"target": target, "matched": len(details)})
         return payload
 
-    def _set_power(self, target: str, *, turn_on: bool) -> dict[str, Any]:
+    def _set_power(
+        self,
+        target: str,
+        *,
+        turn_on: bool,
+        context: dict[str, Any],
+    ) -> dict[str, Any]:
         devices = self._resolve_devices(target)
         if not devices:
             payload = {
@@ -107,28 +204,28 @@ class DeviceControlTool(Tool):
             )
             return payload
 
-        changed: list[str] = []
-        needs_setup: list[str] = []
-        unsupported: list[str] = []
-        failed: list[str] = []
-        details: list[dict[str, Any]] = []
-
+        self._require_private_network_scope()
         for device in devices:
-            snapshot = _device_snapshot(device)
-            if not _looks_like_light(device):
-                unsupported.append(snapshot["name"])
-                snapshot["control"] = "unsupported"
-                details.append(snapshot)
-                continue
-            outcome = _set_light_power(device, turn_on=turn_on)
-            snapshot["control"] = outcome["status"]
-            if outcome["status"] == "changed":
-                changed.append(snapshot["name"])
-            elif outcome["status"] == "needs_setup":
-                needs_setup.append(snapshot["name"])
-            else:
-                failed.append(outcome["message"] or snapshot["name"])
-            details.append(snapshot)
+            self._require_device_target(device)
+        execution = execute_device_runtime_action(
+            component="device_control",
+            action="device_power",
+            actor=_context_actor(context),
+            db_path=self._state_store.db_path,
+            payload={
+                "devices": [serialize_device(device) for device in devices],
+                "turn_on": turn_on,
+            },
+            timeout_s=8.0,
+            related_run_id=_context_optional_str(context, "related_run_id"),
+            related_task_id=_context_optional_str(context, "related_task_id"),
+            related_plan_id=_context_optional_str(context, "related_plan_id"),
+        )
+        details = list(execution.get("devices") or [])
+        changed = list(execution.get("changed") or [])
+        needs_setup = list(execution.get("needs_setup") or [])
+        unsupported = list(execution.get("unsupported") or [])
+        failed = list(execution.get("failed") or [])
 
         verb = "on" if turn_on else "off"
         parts: list[str] = []
@@ -153,6 +250,7 @@ class DeviceControlTool(Tool):
             "changed": changed,
             "needs_setup": needs_setup,
             "failed": failed,
+            "execution": dict(execution.get("execution") or {}),
         }
         self._record(
             "device_power",
@@ -192,53 +290,29 @@ class DeviceControlTool(Tool):
             json_payload=payload,
         )
 
+    def _require_private_network_scope(self) -> None:
+        if self._network_policy is None:
+            return
+        check_outbound_scope(
+            component="device_control",
+            scope="private",
+            policy=self._network_policy,
+            actor="worker",
+            action="device_scan",
+            db_path=self._state_store.db_path,
+        )
 
-def _device_snapshot(device: ConnectedDevice) -> dict[str, Any]:
-    status = "online" if _device_is_online(device) else "offline"
-    actions = ["check"]
-    if "camera" in device.device_type.lower():
-        actions.append("view")
-    if _looks_like_light(device):
-        actions.extend(["turn_on", "turn_off"])
-    return {
-        "id": device.id,
-        "ip": device.ip,
-        "name": _device_name(device),
-        "device_type": device.device_type,
-        "brand": device.brand,
-        "status": status,
-        "actions": actions,
-    }
-
-
-def _device_is_online(device: ConnectedDevice) -> bool:
-    ports = device.metadata_json.get("open_ports")
-    if not isinstance(ports, list) or not ports:
-        if "camera" in device.device_type.lower():
-            ports = [554, 8554, 80, 443]
-        elif _looks_like_light(device):
-            ports = [6668, 80, 443]
-        else:
-            ports = [80, 443, 1883]
-    for port in ports[:4]:
-        try:
-            value = int(port)
-        except (TypeError, ValueError):
-            continue
-        if _scan_port(device.ip, value):
-            return True
-    return False
-
-
-def _scan_port(ip: str, port: int, timeout: float = 0.25) -> bool:
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    sock.settimeout(timeout)
-    try:
-        return sock.connect_ex((ip, port)) == 0
-    except OSError:
-        return False
-    finally:
-        sock.close()
+    def _require_device_target(self, device: ConnectedDevice) -> None:
+        if self._network_policy is None:
+            return
+        check_outbound_target(
+            component="device_control",
+            target=device.ip,
+            policy=self._network_policy,
+            actor="worker",
+            action="device_connect",
+            db_path=self._state_store.db_path,
+        )
 
 
 def _device_matches(device: ConnectedDevice, normalized_target: str) -> bool:
@@ -274,35 +348,6 @@ def _device_search_text(device: ConnectedDevice) -> str:
 def _looks_like_light(device: ConnectedDevice) -> bool:
     text = _device_search_text(device)
     return any(token in text for token in ("light", "lamp", "bulb", "tuya", "feit"))
-
-
-def _set_light_power(device: ConnectedDevice, *, turn_on: bool) -> dict[str, str]:
-    metadata = device.metadata_json if isinstance(device.metadata_json, dict) else {}
-    device_id = str(metadata.get("device_id") or metadata.get("dev_id") or "").strip()
-    local_key = str(metadata.get("local_key") or "").strip()
-    version = metadata.get("version") or metadata.get("protocol_version") or 3.3
-    if not device_id or not local_key:
-        return {
-            "status": "needs_setup",
-            "message": f"{_device_name(device)} is missing local control details.",
-        }
-
-    try:
-        import tinytuya
-    except Exception as exc:  # noqa: BLE001
-        return {"status": "failed", "message": f"{_device_name(device)}: {exc}"}
-
-    controller_type = str(metadata.get("controller_type") or "").strip().lower()
-    cls = tinytuya.BulbDevice if controller_type in {"bulb", ""} else tinytuya.OutletDevice
-    try:
-        controller = cls(device_id, address=device.ip, local_key=local_key, version=float(version))
-        if turn_on:
-            controller.turn_on()
-        else:
-            controller.turn_off()
-    except Exception as exc:  # noqa: BLE001
-        return {"status": "failed", "message": f"{_device_name(device)}: {exc}"}
-    return {"status": "changed", "message": _device_name(device)}
 
 
 def _summarize_device_list(details: list[dict[str, Any]]) -> str:
@@ -356,3 +401,15 @@ def _join_human(items: list[str]) -> str:
 
 def _normalize_text(text: str) -> str:
     return " ".join((text or "").strip().lower().split())
+
+
+def _context_actor(context: dict[str, Any]) -> str:
+    return _context_optional_str(context, "actor") or "worker"
+
+
+def _context_optional_str(context: dict[str, Any], field_name: str) -> str | None:
+    value = context.get(field_name)
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    return text or None

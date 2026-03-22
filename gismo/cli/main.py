@@ -20,6 +20,7 @@ from gismo.cli import memory_profile as memory_profile_cli
 from gismo.cli import memory_preview as memory_preview_cli
 from gismo.cli import memory_snapshot as memory_snapshot_cli
 from gismo.cli import memory_summarize as memory_summarize_cli
+from gismo.cli import security_cli
 from gismo.cli import agent_role as agent_role_cli
 from gismo.tui import app as tui_app
 from gismo.web import server as web_server
@@ -59,9 +60,11 @@ from gismo.core.risk import (
     infer_tools_from_command,
 )
 from gismo.core.state import StateStore
+from gismo.core.trust import TRUST_STATE_SEEN, sha256_text
 from gismo.core.tools import EchoTool, ToolRegistry, WriteNoteTool
 from gismo.core.tool_receipts import ToolReceiptReplayReport, replay_tool_receipts
 from gismo.core.toolpacks.fs_tools import FileSystemConfig, ListDirTool, ReadFileTool, WriteFileTool
+from gismo.core.toolpacks.plugin_tool import PluginRuntimeTool
 from gismo.core.toolpacks.shell_tool import ShellConfig, ShellTool
 from gismo.llm.ollama import OllamaError, ollama_chat, resolve_ollama_config
 from gismo.llm.prompts import build_system_prompt, build_user_prompt
@@ -139,6 +142,10 @@ def _serialize_memory_item(item: MemoryItem) -> dict[str, object]:
         "tags": item.tags,
         "confidence": item.confidence,
         "source": item.source,
+        "source_type": item.source_type,
+        "verification_status": item.verification_status,
+        "trust_labels": item.trust_labels,
+        "provenance_json": item.provenance_json,
         "ttl_seconds": item.ttl_seconds,
         "is_tombstoned": item.is_tombstoned,
         "created_at": item.created_at,
@@ -2241,6 +2248,13 @@ def _apply_memory_suggestions(
             tags=None,
             confidence=suggestion["confidence"],
             source="llm",
+            source_type="model_output",
+            verification_status="unverified",
+            trust_labels=["gismo_inferred"],
+            provenance_json={
+                "ask_event_id": related_event_id,
+                "source": "memory_suggestion",
+            },
             ttl_seconds=None,
             actor=actor,
             policy_hash=policy_hash,
@@ -3489,6 +3503,12 @@ def _request_llm_plan(
     config = resolve_ollama_config(url=host, model=model, timeout_s=timeout_s)
     state_store = StateStore(db_path)
     try:
+        repo_root = Path(__file__).resolve().parents[2]
+        resolved_policy_path, _ = _resolve_default_policy_path(policy_path, repo_root)
+        outbound_policy = load_policy(
+            resolved_policy_path,
+            repo_root=repo_root,
+        ).network
         policy_summary = _load_prompt_policy_summary(policy_path)
         system_prompt = build_system_prompt(
             policy_summary=policy_summary,
@@ -3507,6 +3527,9 @@ def _request_llm_plan(
                 model=config.model,
                 host=config.url,
                 timeout_s=config.timeout_s,
+                network_policy=outbound_policy,
+                db_path=db_path,
+                actor=actor,
             )
         except OllamaError as exc:
             payload = {
@@ -3531,6 +3554,26 @@ def _request_llm_plan(
             if debug:
                 raise
             raise SystemExit(1)
+        state_store.create_quarantine_entry(
+            source_kind="llm_output",
+            source_ref=config.url,
+            origin_type="model_output",
+            content=raw_response,
+            content_sha256=sha256_text(raw_response),
+            actor=actor,
+            trust_labels=["gismo_inferred"],
+            verification_status="unverified",
+            provenance_json={
+                "model": config.model,
+                "transport": config.transport,
+            },
+            metadata_json={
+                "actor": actor,
+                "model": config.model,
+                "enqueue": enqueue,
+                "dry_run": dry_run,
+            },
+        )
         parsed: dict | None = None
         parse_error: str | None = None
         try:
@@ -4554,6 +4597,58 @@ def _handle_tools_replay(args: argparse.Namespace) -> None:
         export_path=args.from_export,
         json_output=args.json,
     )
+
+
+def _handle_security_events(args: argparse.Namespace) -> None:
+    security_cli.run_security_events(args)
+
+
+def _handle_security_zones(args: argparse.Namespace) -> None:
+    security_cli.run_security_zones(args)
+
+
+def _handle_security_execution(args: argparse.Namespace) -> None:
+    security_cli.run_security_execution(args)
+
+
+def _handle_security_execution_inspect(args: argparse.Namespace) -> None:
+    security_cli.run_security_execution_inspect(args)
+
+
+def _handle_security_verify_chain(args: argparse.Namespace) -> None:
+    security_cli.run_security_verify_chain(args)
+
+
+def _handle_quarantine_list(args: argparse.Namespace) -> None:
+    security_cli.run_quarantine_list(args)
+
+
+def _handle_quarantine_inspect(args: argparse.Namespace) -> None:
+    security_cli.run_quarantine_inspect(args)
+
+
+def _handle_quarantine_promote(args: argparse.Namespace) -> None:
+    security_cli.run_quarantine_promote(args)
+
+
+def _handle_quarantine_reject(args: argparse.Namespace) -> None:
+    security_cli.run_quarantine_reject(args)
+
+
+def _handle_trust_inspect_memory(args: argparse.Namespace) -> None:
+    security_cli.run_trust_inspect_memory(args)
+
+
+def _handle_trust_transitions(args: argparse.Namespace) -> None:
+    security_cli.run_trust_transitions(args)
+
+
+def _handle_plugins_verify(args: argparse.Namespace) -> None:
+    security_cli.run_plugins_verify(args)
+
+
+def _handle_plugins_signers(args: argparse.Namespace) -> None:
+    security_cli.run_plugins_signers(args)
 
 
 def _handle_memory_put(args: argparse.Namespace) -> None:
@@ -5598,6 +5693,185 @@ def build_parser() -> argparse.ArgumentParser:
         help="Emit JSON output",
     )
     tools_replay_parser.set_defaults(handler=_handle_tools_replay)
+
+    security_parser = subparsers.add_parser(
+        "security",
+        help="Inspect security events and verify the event chain",
+        parents=[db_parent_optional],
+    )
+    security_subparsers = security_parser.add_subparsers(dest="security_command", required=True)
+
+    security_events_parser = security_subparsers.add_parser(
+        "events",
+        help="List recent security events or inspect one event",
+        parents=[db_parent_optional],
+    )
+    security_events_parser.add_argument("--type", dest="event_type", default=None, help="Filter by event type")
+    security_events_parser.add_argument("--run", dest="run_id", default=None, help="Filter by related run ID")
+    security_events_parser.add_argument("--task", dest="task_id", default=None, help="Filter by related task ID")
+    security_events_parser.add_argument("--plan", dest="plan_id", default=None, help="Filter by related plan ID")
+    security_events_parser.add_argument("--approval", dest="approval_id", default=None, help="Filter by related approval ID")
+    security_events_parser.add_argument("--event", dest="event_id", default=None, help="Inspect one event by ID")
+    security_events_parser.add_argument("--limit", type=int, default=25, help="Maximum events to show")
+    security_events_parser.add_argument("--json", action="store_true", help="Emit JSON output")
+    security_events_parser.set_defaults(handler=_handle_security_events)
+
+    security_zones_parser = security_subparsers.add_parser(
+        "zones",
+        help="Inspect trust zones and execution boundaries",
+        parents=[db_parent_optional],
+    )
+    security_zones_parser.add_argument("--component", default=None, help="Show one component binding")
+    security_zones_parser.add_argument("--json", action="store_true", help="Emit JSON output")
+    security_zones_parser.set_defaults(handler=_handle_security_zones)
+
+    security_execution_parser = security_subparsers.add_parser(
+        "execution",
+        help="Inspect execution-boundary history",
+        parents=[db_parent_optional],
+    )
+    security_execution_parser.add_argument("--recent", type=int, default=25, help="Maximum executions to show")
+    security_execution_parser.add_argument("--mode", default=None, help="Filter by execution mode")
+    security_execution_parser.add_argument("--zone", default=None, help="Filter by trust zone")
+    security_execution_parser.add_argument("--component", default=None, help="Filter by component")
+    security_execution_parser.add_argument("--run", dest="run_id", default=None, help="Filter by related run ID")
+    security_execution_parser.add_argument("--task", dest="task_id", default=None, help="Filter by related task ID")
+    security_execution_parser.add_argument("--plan", dest="plan_id", default=None, help="Filter by related plan ID")
+    security_execution_parser.add_argument("--json", action="store_true", help="Emit JSON output")
+    security_execution_parser.set_defaults(handler=_handle_security_execution)
+    security_execution_subparsers = security_execution_parser.add_subparsers(
+        dest="security_execution_command",
+        required=False,
+    )
+    security_execution_inspect_parser = security_execution_subparsers.add_parser(
+        "inspect",
+        help="Inspect one execution record by ID or unique prefix",
+        parents=[db_parent_optional],
+    )
+    security_execution_inspect_parser.add_argument("selector", help="Execution ID or unique prefix")
+    security_execution_inspect_parser.add_argument("--json", action="store_true", help="Emit JSON output")
+    security_execution_inspect_parser.set_defaults(handler=_handle_security_execution_inspect)
+
+    security_verify_parser = security_subparsers.add_parser(
+        "verify-chain",
+        help="Verify the append-only security event hash chain",
+        parents=[db_parent_optional],
+    )
+    security_verify_parser.add_argument("--json", action="store_true", help="Emit JSON output")
+    security_verify_parser.set_defaults(handler=_handle_security_verify_chain)
+
+    quarantine_parser = subparsers.add_parser(
+        "quarantine",
+        help="Review quarantined content",
+        parents=[db_parent_optional],
+    )
+    quarantine_subparsers = quarantine_parser.add_subparsers(dest="quarantine_command", required=True)
+
+    quarantine_list_parser = quarantine_subparsers.add_parser(
+        "list",
+        help="List quarantine records",
+        parents=[db_parent_optional],
+    )
+    quarantine_list_parser.add_argument("--status", default=None, help="Filter by review status")
+    quarantine_list_parser.add_argument("--verification-status", default=None, help="Filter by verification status")
+    quarantine_list_parser.add_argument("--source-kind", default=None, help="Filter by source kind")
+    quarantine_list_parser.add_argument("--origin-type", default=None, help="Filter by origin type")
+    quarantine_list_parser.add_argument("--limit", type=int, default=50, help="Maximum records to show")
+    quarantine_list_parser.add_argument("--json", action="store_true", help="Emit JSON output")
+    quarantine_list_parser.set_defaults(handler=_handle_quarantine_list)
+
+    quarantine_inspect_parser = quarantine_subparsers.add_parser(
+        "inspect",
+        help="Inspect one quarantine record",
+        parents=[db_parent_optional],
+    )
+    quarantine_inspect_parser.add_argument("record_id", help="Quarantine record ID")
+    quarantine_inspect_parser.add_argument("--json", action="store_true", help="Emit JSON output")
+    quarantine_inspect_parser.set_defaults(handler=_handle_quarantine_inspect)
+
+    quarantine_promote_parser = quarantine_subparsers.add_parser(
+        "promote",
+        help="Promote a quarantine record into memory",
+        parents=[db_parent_optional],
+    )
+    quarantine_promote_parser.add_argument("record_id", help="Quarantine record ID")
+    quarantine_promote_parser.add_argument("--labels", nargs="+", required=True, help="Trust labels to assign")
+    quarantine_promote_parser.add_argument("--reason", required=True, help="Explicit reason for promotion")
+    quarantine_promote_parser.add_argument("--namespace", default=None, help="Target memory namespace")
+    quarantine_promote_parser.add_argument("--key", default=None, help="Target memory key")
+    quarantine_promote_parser.add_argument("--kind", default=None, help="Target memory kind")
+    quarantine_promote_parser.add_argument("--source", default=None, help="Target memory source")
+    quarantine_promote_parser.add_argument("--verification-status", default=None, help="Override verification status")
+    quarantine_promote_parser.add_argument("--value", default=None, help="Override stored content with JSON")
+    quarantine_promote_parser.add_argument("--value-text", default=None, help="Override stored content with text")
+    quarantine_promote_parser.add_argument("--json", action="store_true", help="Emit JSON output")
+    quarantine_promote_parser.set_defaults(handler=_handle_quarantine_promote)
+
+    quarantine_reject_parser = quarantine_subparsers.add_parser(
+        "reject",
+        help="Reject a quarantine record",
+        parents=[db_parent_optional],
+    )
+    quarantine_reject_parser.add_argument("record_id", help="Quarantine record ID")
+    quarantine_reject_parser.add_argument("--reason", required=True, help="Explicit rejection reason")
+    quarantine_reject_parser.add_argument("--json", action="store_true", help="Emit JSON output")
+    quarantine_reject_parser.set_defaults(handler=_handle_quarantine_reject)
+
+    trust_parser = subparsers.add_parser(
+        "trust",
+        help="Inspect memory trust posture and transitions",
+        parents=[db_parent_optional],
+    )
+    trust_subparsers = trust_parser.add_subparsers(dest="trust_command", required=True)
+
+    trust_inspect_parser = trust_subparsers.add_parser(
+        "inspect-memory",
+        help="Inspect trust metadata for one memory record",
+        parents=[db_parent_optional],
+    )
+    trust_inspect_parser.add_argument("selector", help="Memory selector (namespace/key or unique key)")
+    trust_inspect_parser.add_argument("--include-tombstoned", action="store_true", help="Allow tombstoned records")
+    trust_inspect_parser.add_argument("--json", action="store_true", help="Emit JSON output")
+    trust_inspect_parser.set_defaults(handler=_handle_trust_inspect_memory)
+
+    trust_transitions_parser = trust_subparsers.add_parser(
+        "transitions",
+        help="List trust transition events",
+        parents=[db_parent_optional],
+    )
+    trust_transitions_parser.add_argument("--run", dest="run_id", default=None, help="Filter by related run ID")
+    trust_transitions_parser.add_argument("--task", dest="task_id", default=None, help="Filter by related task ID")
+    trust_transitions_parser.add_argument("--plan", dest="plan_id", default=None, help="Filter by related plan ID")
+    trust_transitions_parser.add_argument("--limit", type=int, default=25, help="Maximum transitions to show")
+    trust_transitions_parser.add_argument("--json", action="store_true", help="Emit JSON output")
+    trust_transitions_parser.set_defaults(handler=_handle_trust_transitions)
+
+    plugins_parser = subparsers.add_parser(
+        "plugins",
+        help="Inspect plugin signer trust and manifest signatures",
+        parents=[db_parent_optional],
+    )
+    plugins_subparsers = plugins_parser.add_subparsers(dest="plugins_command", required=True)
+
+    plugins_verify_parser = plugins_subparsers.add_parser(
+        "verify",
+        help="Verify plugin or adapter manifests",
+        parents=[db_parent_optional],
+    )
+    plugins_verify_parser.add_argument("--trust-store", default=None, help="Path to plugin trust store JSON")
+    plugins_verify_parser.add_argument("--manifest", action="append", default=None, help="Manifest path to verify (repeatable)")
+    plugins_verify_parser.add_argument("--manifest-dir", action="append", default=None, help="Directory of manifest JSON files (repeatable)")
+    plugins_verify_parser.add_argument("--json", action="store_true", help="Emit JSON output")
+    plugins_verify_parser.set_defaults(handler=_handle_plugins_verify)
+
+    plugins_signers_parser = plugins_subparsers.add_parser(
+        "signers",
+        help="List trusted plugin signers",
+        parents=[db_parent_optional],
+    )
+    plugins_signers_parser.add_argument("--trust-store", default=None, help="Path to plugin trust store JSON")
+    plugins_signers_parser.add_argument("--json", action="store_true", help="Emit JSON output")
+    plugins_signers_parser.set_defaults(handler=_handle_plugins_signers)
 
     memory_parser = subparsers.add_parser(
         "memory",
@@ -7625,6 +7899,7 @@ def _build_registry(state_store: StateStore, policy: PermissionPolicy) -> ToolRe
         timeout_seconds=policy.shell.timeout_seconds,
     )
     registry.register(ShellTool(shell_config))
+    registry.register(PluginRuntimeTool())
     return registry
 
 

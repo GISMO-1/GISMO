@@ -12,6 +12,7 @@ from gismo.core.permissions import PermissionPolicy
 from gismo.core.state import StateStore
 from gismo.core.toolpacks.device_tool import DeviceControlTool
 from gismo.core.tools import ToolRegistry
+from gismo.core.trust_zones import EXECUTION_MODE_SANDBOXED
 
 
 class DeviceToolTest(unittest.TestCase):
@@ -51,12 +52,33 @@ class DeviceToolTest(unittest.TestCase):
                 description="Check saved cameras",
                 input_json={"tool": "device_control", "payload": {"action": "check", "target": "cameras"}},
             )
-            with mock.patch("gismo.core.toolpacks.device_tool._scan_port", return_value=True):
+            with mock.patch(
+                "gismo.core.toolpacks.device_tool.execute_device_runtime_action",
+                return_value={
+                    "devices": [
+                        {
+                            "id": "camera-1",
+                            "ip": "192.168.1.25",
+                            "name": "Front Door",
+                            "device_type": "camera",
+                            "brand": "Tapo",
+                            "status": "online",
+                            "actions": ["check", "view"],
+                        }
+                    ],
+                    "execution": {"mode": "sandboxed", "zone": "device_adapter"},
+                },
+            ) as runtime:
                 result = orchestrator.run_tool(run.id, task, "device_control", {"action": "check", "target": "cameras"})
             events = state_store.list_events(limit=10)
+            receipts = list(state_store.list_tool_receipts(run.id))
 
             self.assertEqual(result.status, TaskStatus.SUCCEEDED)
             self.assertIn("I checked 1 camera", result.output_json.get("summary", ""))
+            self.assertEqual(result.output_json["execution"]["mode"], EXECUTION_MODE_SANDBOXED)
+            runtime.assert_called_once()
+            self.assertEqual(receipts[0].policy_snapshot["execution"]["mode"], EXECUTION_MODE_SANDBOXED)
+            self.assertEqual(receipts[0].policy_snapshot["execution"]["zone"], "device_adapter")
             self.assertTrue(any(event.event_type == "device_check" for event in events))
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
@@ -111,9 +133,14 @@ class DeviceToolTest(unittest.TestCase):
                 input_json={"tool": "device_control", "payload": {"action": "scan", "target": "network"}},
             )
             with mock.patch(
-                "gismo.web.api.scan_devices",
-                return_value=[{"ip": "192.168.1.9", "hostname": "desk-lamp", "device_type": "light"}],
-            ):
+                "gismo.core.toolpacks.device_tool.execute_device_runtime_action",
+                return_value={
+                    "devices": [
+                        {"ip": "192.168.1.9", "hostname": "desk-lamp", "device_type": "light"},
+                    ],
+                    "execution": {"mode": "sandboxed", "zone": "device_adapter"},
+                },
+            ) as runtime:
                 result = orchestrator.run_tool(
                     run.id,
                     task,
@@ -123,6 +150,8 @@ class DeviceToolTest(unittest.TestCase):
 
             self.assertEqual(result.status, TaskStatus.SUCCEEDED)
             self.assertIn("I found 1 device", result.output_json.get("summary", ""))
+            self.assertEqual(result.output_json["execution"]["mode"], EXECUTION_MODE_SANDBOXED)
+            runtime.assert_called_once()
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
 

@@ -21,6 +21,7 @@ from gismo.core.tools import EchoTool, ToolRegistry, WriteNoteTool
 from gismo.core.toolpacks.calendar_tool import CalendarControlTool
 from gismo.core.toolpacks.device_tool import DeviceControlTool
 from gismo.core.toolpacks.fs_tools import FileSystemConfig, ListDirTool, ReadFileTool, WriteFileTool
+from gismo.core.toolpacks.plugin_tool import PluginRuntimeTool
 from gismo.core.toolpacks.shell_tool import ShellConfig, ShellTool
 
 
@@ -163,6 +164,7 @@ def _run_queue_item_plan(
             input_json={"tool": tool_name, "payload": tool_input},
             depends_on=depends_on,
             idempotency_key=idempotency_key,
+            capability_ttl_seconds=int(item.timeout_seconds) + 60,
         )
         created_tasks.append(task)
         previous_task_id = task.id
@@ -193,6 +195,8 @@ def _resolve_run_id(state: StateStore, item: QueueItem, normalized_command: str)
         "queue_item_id": item.id,
         "source": "daemon",
     }
+    if item.metadata_json:
+        metadata.update(item.metadata_json)
     if item.run_id:
         existing = state.get_run(item.run_id)
         if existing is not None:
@@ -275,7 +279,7 @@ def build_registry(state_store: StateStore, policy: PermissionPolicy) -> ToolReg
     registry.register(EchoTool())
     registry.register(WriteNoteTool(state_store))
     registry.register(CalendarControlTool(state_store))
-    registry.register(DeviceControlTool(state_store))
+    registry.register(DeviceControlTool(state_store, network_policy=policy.network))
     fs_config = FileSystemConfig(base_dir=policy.fs.base_dir)
     registry.register(ReadFileTool(fs_config))
     registry.register(WriteFileTool(fs_config))
@@ -286,6 +290,7 @@ def build_registry(state_store: StateStore, policy: PermissionPolicy) -> ToolReg
         timeout_seconds=policy.shell.timeout_seconds,
     )
     registry.register(ShellTool(shell_config))
+    registry.register(PluginRuntimeTool())
     return registry
 
 

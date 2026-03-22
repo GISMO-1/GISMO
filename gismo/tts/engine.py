@@ -10,6 +10,7 @@ import wave
 from pathlib import Path
 from typing import Callable
 
+from gismo.core.permissions import NetworkPolicy
 from gismo.tts.voices import (
     ENGINE_KOKORO,
     ensure_downloaded,
@@ -76,13 +77,21 @@ def synthesize(
     text: str,
     voice_id: str,
     progress_cb: Callable[[str], None] | None = None,
+    *,
+    network_policy: NetworkPolicy | None = None,
+    db_path: str | None = None,
 ) -> bytes:
     """Synthesize *text* with *voice_id* and return WAV bytes.
 
     Uses kokoro-onnx for kokoro voices, piper-tts for piper voices.
     Downloads model files on first use.
     """
-    ensure_downloaded(voice_id, progress_cb=progress_cb)
+    ensure_downloaded(
+        voice_id,
+        progress_cb=progress_cb,
+        network_policy=network_policy,
+        db_path=db_path,
+    )
 
     if voice_engine(voice_id) == ENGINE_KOKORO:
         return _synthesize_kokoro(text, voice_id)

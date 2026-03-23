@@ -46,7 +46,7 @@ def _setup_run_with_tasks(
                 run.id,
                 title=f"Task {i}",
                 description=f"Description {i}",
-                input_json={"step": i},
+                input_json={"tool": "echo", "payload": {"step": i}},
             )
             # Manually update status
             if i < succeeded:

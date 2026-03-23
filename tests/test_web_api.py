@@ -44,7 +44,7 @@ class TestGetStatus(unittest.TestCase):
             self.assertIn("daemon", data)
             self.assertIn("queue", data)
             self.assertFalse(data["daemon"]["running"])
-            self.assertEqual(data["daemon"]["state"], "ready")
+            self.assertEqual(data["daemon"]["state"], "offline")
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 
@@ -537,23 +537,22 @@ class TestChatMessage(unittest.TestCase):
                     "timeout_seconds": 30,
                     "retries": 0,
                     "why": "scan your network for devices",
-                    "risk": "low",
+                    "risk": "medium",
                 }
             ],
             "notes": [],
         }
-        risk = {"risk_level": "LOW", "risk_flags": [], "rationale": ["safe"]}
+        risk = {"risk_level": "MEDIUM", "risk_flags": ["network_access"], "rationale": ["needs review"]}
         explain = {"summary": "intent=operate actions=1"}
 
         tmp = Path("tmp") / f"web-api-{uuid4().hex}"
         tmp.mkdir(parents=True, exist_ok=False)
         try:
             db = _make_db(str(tmp))
-            with mock.patch.object(web_api, "_request_chat_plan", return_value=(plan, risk, explain)), mock.patch.object(
-                web_api,
-                "_append_chat_record",
-                return_value=None,
-            ):
+            with mock.patch.object(web_api, "_build_device_enqueue_plan", return_value=None), \
+                 mock.patch.object(web_api, "_build_calendar_enqueue_plan", return_value=None), \
+                 mock.patch.object(web_api, "_request_chat_plan", return_value=(plan, risk, explain)), \
+                 mock.patch.object(web_api, "_append_chat_record", return_value=None):
                 data = web_api.chat_message(db, "scan for devices", [])
             with StateStore(db) as store:
                 pending = store.list_pending_plans()
@@ -571,11 +570,10 @@ class TestChatMessage(unittest.TestCase):
         tmp.mkdir(parents=True, exist_ok=False)
         try:
             db = _make_db(str(tmp))
-            with mock.patch.object(web_api, "_request_chat_plan", side_effect=RuntimeError("ollama exploded")), mock.patch.object(
-                web_api,
-                "_append_chat_record",
-                return_value=None,
-            ):
+            with mock.patch.object(web_api, "_build_device_enqueue_plan", return_value=None), \
+                 mock.patch.object(web_api, "_build_calendar_enqueue_plan", return_value=None), \
+                 mock.patch.object(web_api, "_request_chat_plan", side_effect=RuntimeError("ollama exploded")), \
+                 mock.patch.object(web_api, "_append_chat_record", return_value=None):
                 data = web_api.chat_message(db, "scan for devices", [])
         finally:
             shutil.rmtree(tmp, ignore_errors=True)

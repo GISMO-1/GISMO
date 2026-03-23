@@ -7,7 +7,9 @@
     "run_shell",
     "memory.put",
     "memory.delete",
-    "memory.read"
+    "memory.read",
+    "service.install",
+    "service.uninstall"
   ],
   "fs": { "base_dir": "." },
   "memory": {

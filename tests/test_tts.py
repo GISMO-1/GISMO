@@ -31,8 +31,21 @@ class TestVoiceRegistry(unittest.TestCase):
     def test_default_voice_is_in_registry(self) -> None:
         self.assertIn(DEFAULT_VOICE, VOICES)
 
-    def test_all_five_voices_present(self) -> None:
+    def test_all_voices_present(self) -> None:
         expected = {
+            # Kokoro voices (primary)
+            "af_heart",
+            "af_bella",
+            "af_nicole",
+            "af_sarah",
+            "af_sky",
+            "am_adam",
+            "am_michael",
+            "bf_emma",
+            "bf_isabella",
+            "bm_george",
+            "bm_lewis",
+            # Piper voices (fallback)
             "en_GB-northern_english_male-medium",
             "en_GB-alan-medium",
             "en_US-lessac-medium",

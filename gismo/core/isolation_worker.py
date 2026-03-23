@@ -77,18 +77,19 @@ def _run_shell(payload: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("timeout_seconds must be > 0")
 
     run_command = list(command)
+    run_kwargs: dict[str, Any] = {
+        "cwd": cwd,
+        "capture_output": True,
+        "text": True,
+        "encoding": "utf-8",
+        "timeout": float(timeout_seconds),
+        "check": False,
+    }
     if os.name == "nt":
         run_command = ["cmd", "/c", *command]
+        run_kwargs["creationflags"] = int(getattr(subprocess, "CREATE_NO_WINDOW", 0))
     try:
-        completed = subprocess.run(
-            run_command,
-            cwd=cwd,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            timeout=float(timeout_seconds),
-            check=False,
-        )
+        completed = subprocess.run(run_command, **run_kwargs)
     except subprocess.TimeoutExpired as exc:
         return {
             "ok": False,
@@ -139,14 +140,16 @@ def _run_curl(payload: dict[str, Any]) -> dict[str, Any]:
             "--data-binary",
             f"@{temp_path}",
         ]
-        completed = subprocess.run(
-            command,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            timeout=float(timeout_seconds),
-            check=False,
-        )
+        curl_kwargs: dict[str, Any] = {
+            "capture_output": True,
+            "text": True,
+            "encoding": "utf-8",
+            "timeout": float(timeout_seconds),
+            "check": False,
+        }
+        if os.name == "nt":
+            curl_kwargs["creationflags"] = int(getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        completed = subprocess.run(command, **curl_kwargs)
     except subprocess.TimeoutExpired as exc:
         return {
             "ok": False,

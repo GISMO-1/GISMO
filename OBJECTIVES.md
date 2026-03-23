@@ -1,236 +1,106 @@
-Below is a **full, clean rewrite** of the document you provided, updated to reflect **where GISMO actually is now**, not where it *used to be*.
-This version **closes completed work**, **removes obsolete failures**, and **establishes the next real phase**.
-
-You can drop this in as a **direct replacement**.
-
----
-
 # GISMO Objectives, Progress Log, and Next Steps
 
-**Date:** 2025-12-25
-**Environment:** Windows (PowerShell), Python 3.13.x
+**Last updated:** 2026-03-22
+**Environment:** Windows 11, Python 3.14.x
 **Repo:** `GISMO-1/GISMO` (branch: `main`)
-**Local path:** `D:\repos\GISMO`
+**Local path:** `D:\repos\gismo`
 **Virtualenv:** `.venv`
 
 ---
 
-## 1) Current Project Goal (Revised)
+## 1) Project Goal
 
 Build a **persistent, operator-grade orchestration runtime** that can:
 
-* Accept **structured operator commands**
-* Persist **runs, tasks, tool calls, and queue state**
-* Execute work **headlessly and safely**
-* Be **paused, resumed, inspected, and audited** at runtime
-* Run reliably on **Windows-first environments**
+* Accept structured operator commands and natural language requests
+* Persist runs, tasks, tool calls, and queue state
+* Execute work headlessly and safely with zero-trust capability tokens
+* Be paused, resumed, inspected, and audited at runtime
+* Manage memory (facts, preferences, procedures) with policy-gated access
+* Run reliably on Windows-first environments
 
-GISMO is now explicitly scoped as an **execution control plane**, not an assistant or demo system.
-
----
-
-## 2) What Is Working Now (Verified & Stable)
-
-### A) Persistent Queue + Daemon Execution
-
-* Queue items are stored in SQLite (`.gismo/state.db`)
-* `enqueue` creates durable work items
-* Daemon processes items deterministically
-* Items transition cleanly through:
-
-  * `QUEUED → IN_PROGRESS → SUCCEEDED / FAILED`
-* Retry and failure semantics are enforced and persisted
-* Queue inspection commands work reliably:
-
-  * `queue stats`
-  * `queue list`
-  * `queue show`
-* Short-ID / prefix resolution works correctly
-
-This is no longer experimental; it is **operationally sound**.
+GISMO is an **execution control plane** with operator-facing surfaces (TUI, web API, chat).
 
 ---
 
-### B) Operator Command Model
+## 2) Phase Summary
 
-Supported operator prefixes:
+### Phase 1 -- Execution Spine (COMPLETE)
 
-* `echo:` → deterministic output
-* `note:` → stateful write
-* `graph:` → dependency-aware task graph
+* State store, task graph, orchestrator, tool registry
+* SQLite-backed persistence with WAL mode
+* CLI `--db` flag placement, queue inspection
 
-Unsupported prefixes (e.g., `shell:` when not policy-enabled):
+### Phase 2 -- CLI and Daemon (COMPLETE)
 
-* Are rejected explicitly
-* Are marked FAILED
-* Leave an auditable trail
+* `ask`, `agent`, `daemon`, queue management, TUI
+* IPC control plane (local, token-authenticated)
+* Supervisor lifecycle (up/status/down)
+* Windows reliability gate: ShellTool builtins, SQLite locking
 
-This confirms **policy gating is enforced**, not advisory.
+### Phase 3 -- Memory Layer (COMPLETE)
 
----
+* Memory store with namespaces, profiles, injection, selection traces
+* Summarize, explain, snapshot (export/import/diff), doctor (check/repair)
+* Retention rules, tombstoning, trust metadata, provenance tracking
+* Policy-gated memory access (deny-by-default)
 
-### C) IPC Control Plane (Local, Authenticated)
+### Phase 4 -- Operator Surfaces (COMPLETE except Task Scheduler)
 
-GISMO now exposes a **local IPC control plane** with token-based authentication:
+* Web API with deterministic chat routing (calendar/device/conversational/operational)
+* TTS with kokoro (primary, 11 voices) and piper (fallback, 5 voices)
+* Calendar tool, device control, network policy
+* Model policy with deterministic chat routing and fallback chains
+* Onboarding system, plugin runtime
+* **Open:** Always-on Windows service via Task Scheduler integration
 
-* Same-machine only
-* Token required (`GISMO_IPC_TOKEN`)
-* Deterministic endpoint on Windows (derived from `--db` path)
+### Phase 5 -- Zero-Trust Execution (COMPLETE, landed in 700ea9f)
 
-Verified IPC actions:
+* Signed capability tokens (HMAC-SHA256) for every tool execution
+* Deny-by-default policy gating on all tool calls
+* Full audit trail via security_events table
+* Capability claims: subject, action, resource, constraints, TTL, run/task/plan scoping
+* Input-hash binding: tokens bound to exact tool input payloads
+* Token verification at orchestrator execution time
 
-* `ping`
-* `queue-stats`
-* `enqueue`
-* `daemon-status`
-* `daemon-pause`
-* `daemon-resume`
-* `purge-failed`
-* `requeue-stale`
-* `run-show`
+### Phase 6 -- Operator Readiness Surfaces (IN PROGRESS)
 
-IPC is no longer conceptual — it is **actively exercised**.
-
----
-
-### D) Supervisor (IPC + Daemon Lifecycle)
-
-A **supervisor layer** now exists to manage processes coherently:
-
-* `supervise up` → starts IPC + daemon together
-* `supervise status` → reconciles:
-
-  * IPC reachability
-  * daemon state
-  * pause/resume flag
-  * PID metadata (best-effort)
-* `supervise down` → clean shutdown
-
-Windows-safe PID handling is implemented.
-Supervisor state is **diagnostic**, not authoritative (by design).
+* Unified runtime status builder with state machine
+* Readiness stages: state, worker, setup, model, API
+* Model health probing (cached and full modes)
+* Queue health monitoring with stale-running detection
+* **Open:** `starting` state can persist indefinitely after daemon crash
 
 ---
 
-### E) Windows Compatibility (Confirmed)
-
-* SQLite locking issues resolved
-* IPC named pipe collisions fixed
-* Deterministic IPC endpoints derived from DB path
-* Safe cleanup in tests (no WinError 32)
-* Tests pass consistently under Windows PowerShell
-
-This is a **real Windows-native system**, not a Unix port.
-
----
-
-### F) Test Coverage & Validation
-
-* Unit and CLI tests expanded significantly
-* IPC, supervise, daemon, and queue logic covered
-* `python scripts/verify.py` passes cleanly
-* Failures are now meaningful, not environmental
-
----
-
-## 3) What Is Explicitly Complete (Closed Objectives)
-
-The following objectives are **done and should not be revisited** without cause:
+## 3) Closed Objectives (Do Not Revisit)
 
 * CLI `--db` flag placement (global + subcommand-safe)
 * Queue inspection UX
 * SQLite lifecycle correctness
-* IPC authentication & authorization
-* Pause / resume semantics
+* IPC authentication and authorization
+* Pause/resume semantics
 * Supervisor lifecycle coordination
 * Windows IPC reliability
-
-These are **foundation stones**, not active work.
-
----
-
-## 4) Current Phase Status
-
-**Phase 1 — Execution Spine & Control Plane: COMPLETE**
-
-GISMO now has:
-
-* A working nervous system
-* A controllable execution loop
-* A secure local control surface
-* Persistent memory
-* Auditable behavior
-
-At this point, GISMO is **operable**, not just correct.
+* Memory layer completeness (no stubs or TODOs)
 
 ---
 
-## 5) Next Phase: Operator Semantics & Intelligence Layer
+## 4) Non-Goals (Explicit)
 
-The next phase is **not infrastructure-heavy**.
-
-The core question now becomes:
-
-> *What should GISMO decide, and why?*
-
-### Phase 2 Objectives (New)
-
-#### Objective 1 — Operator Intent Model
-
-* Introduce a first-class “intent” or “goal” abstraction
-* Separate **what the operator wants** from **how it executes**
-* Persist intent alongside runs/tasks
-
-#### Objective 2 — Agent Roles & Scopes
-
-* Named agents with bounded authority
-* Explicit lifetimes
-* Clear ownership of tasks
-* Enforced execution scopes
-
-#### Objective 3 — Decision Logging
-
-* Record *why* GISMO chose an action
-* Human-readable reasoning trails
-* Operator-auditable decision paths
-
-#### Objective 4 — Recovery & Escalation Semantics
-
-* Define when GISMO retries
-* Define when GISMO halts
-* Define when GISMO requires operator intervention
-
-This phase introduces **judgment**, not plumbing.
-
----
-
-## 6) Non-Goals (Explicit)
-
-The following remain **out of scope** for now:
-
-* Natural language conversation
-* UI dashboards
-* Networking / remote IPC
+* Remote/networked IPC
 * Robotics or physical actuators
 * Autonomous policy mutation
-
-Those come *after* the system can reason reliably.
+* Multi-user/multi-tenant operation
 
 ---
 
-## 7) Developer Notes (Still Relevant)
+## 5) Developer Notes
 
-* PowerShell ≠ bash — avoid POSIX assumptions
-* SQLite requires strict connection hygiene on Windows
+* PowerShell is not bash -- avoid POSIX assumptions
+* SQLite requires strict connection hygiene on Windows (WinError 32)
 * IPC endpoints must be derived consistently from `--db`
 * Supervisor PID data is diagnostic only
 * Policies must remain deny-by-default
-
----
-
-## 8) Summary (Plain English)
-
-* GISMO’s **body and nervous system are built**
-* It can run unattended
-* It can be paused, resumed, and inspected
-* It enforces authority and policy
-* It leaves an audit trail
+* Capability tokens must be verified before every tool execution
+* Memory operations require policy hash for audit trails

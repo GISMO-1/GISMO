@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+from contextlib import closing
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Callable, Iterable, Sequence
@@ -389,7 +390,7 @@ def _count_items_by_namespace(
         "GROUP BY namespace "
         "ORDER BY namespace ASC"
     )
-    with sqlite3.connect(db_path) as connection:
+    with closing(sqlite3.connect(db_path)) as connection:
         connection.row_factory = sqlite3.Row
         rows = connection.execute(sql, params).fetchall()
     return {row["namespace"]: int(row["count"]) for row in rows}

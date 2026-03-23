@@ -18,6 +18,12 @@ _AUTOSTART_EVENT_TYPES = (
 _AUTOSTART_FAILURE_WINDOW_SECONDS = 300
 _MIN_RUNNING_STALE_SECONDS = 120
 _RUNNING_GRACE_SECONDS = 15
+# If the daemon has a last_seen heartbeat but is not running and the heartbeat
+# is older than this threshold, "starting" transitions to "degraded" so the
+# operator gets a clear signal that something went wrong.  4 × STALE_SECONDS
+# gives the daemon two full stale windows of grace before we escalate.
+_STARTING_STALE_SECONDS = 4 * STALE_SECONDS  # 120 s by default
+_STUCK_STARTING_EVENT_TYPE = "daemon_stuck_starting"
 
 
 def build_runtime_status(
@@ -34,6 +40,9 @@ def build_runtime_status(
     daemon = get_background_worker_status(db_path).to_dict()
     daemon["age_secs"] = daemon.get("age_seconds")
     daemon["state"] = _daemon_state_label(daemon)
+    starting_is_stale = _is_starting_stale(daemon, now)
+    if starting_is_stale and not _recent_stuck_event(recent_events, now):
+        _emit_stuck_starting_event(db_path, daemon=daemon)
     onboarding = _build_onboarding_status(db_path)
     startup = _build_startup_status(recent_events, now=now)
     queue = _build_queue_status(queue_stats, running_items, now=now)
@@ -54,6 +63,7 @@ def build_runtime_status(
         onboarding=onboarding,
         models=models,
         startup=startup,
+        starting_is_stale=starting_is_stale,
     )
     stages = [
         {
@@ -266,6 +276,7 @@ def _build_gismo_status(
     onboarding: dict[str, Any],
     models: dict[str, Any],
     startup: dict[str, Any],
+    starting_is_stale: bool = False,
 ) -> dict[str, Any]:
     state = "ready"
     detail = "Ready."
@@ -274,8 +285,12 @@ def _build_gismo_status(
             state = "blocked"
             detail = "Background service could not start."
         elif daemon["last_seen"]:
-            state = "starting"
-            detail = "Background service is reconnecting."
+            if starting_is_stale:
+                state = "degraded"
+                detail = "Background service is not responding."
+            else:
+                state = "starting"
+                detail = "Background service is reconnecting."
         else:
             state = "offline"
             detail = "Background service is offline."
@@ -318,6 +333,69 @@ def _build_gismo_status(
         "detail": detail,
         "summary": summary,
     }
+
+
+def _is_starting_stale(daemon: dict[str, Any], now: datetime) -> bool:
+    """Return True when the daemon has a stale heartbeat and is overdue to resume.
+
+    This detects the case where the daemon was seen before (``last_seen`` is set)
+    but is no longer running and has not produced a new heartbeat within
+    ``_STARTING_STALE_SECONDS``.  The ordinary "starting" grace period uses
+    ``STALE_SECONDS``; we give the daemon four full intervals before escalating.
+    """
+    if daemon.get("running") or not daemon.get("last_seen"):
+        return False
+    try:
+        last_seen = datetime.fromisoformat(daemon["last_seen"])
+        if last_seen.tzinfo is None:
+            last_seen = last_seen.replace(tzinfo=timezone.utc)
+        age_seconds = max(0, int((now - last_seen).total_seconds()))
+        return age_seconds > _STARTING_STALE_SECONDS
+    except (ValueError, TypeError):
+        return False
+
+
+def _recent_stuck_event(events: list[Any], now: datetime) -> bool:
+    """Return True when a stuck-starting event was already emitted within the stale window.
+
+    Prevents duplicate events on every status poll when the daemon is stuck.
+    """
+    for event in events:
+        if getattr(event, "event_type", None) != _STUCK_STARTING_EVENT_TYPE:
+            continue
+        ts = getattr(event, "ts", None)
+        if ts is None:
+            continue
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        age = max(0, int((now - ts).total_seconds()))
+        if age <= _STARTING_STALE_SECONDS:
+            return True
+    return False
+
+
+def _emit_stuck_starting_event(db_path: str, *, daemon: dict[str, Any]) -> None:
+    """Write a security event when the stuck-starting threshold is crossed.
+
+    Opens a new StateStore connection rather than re-using the caller's context
+    so the event is flushed immediately and is visible on the next poll.
+    Silently swallows exceptions so a write failure never prevents readiness
+    from being served.
+    """
+    try:
+        with StateStore(db_path) as store:
+            store.record_event(
+                actor="system",
+                event_type=_STUCK_STARTING_EVENT_TYPE,
+                message="Background service did not resume within the expected window.",
+                json_payload={
+                    "last_seen": daemon.get("last_seen"),
+                    "age_seconds": daemon.get("age_seconds"),
+                    "stale_threshold_seconds": _STARTING_STALE_SECONDS,
+                },
+            )
+    except Exception:  # noqa: BLE001 - never raise from readiness computation
+        pass
 
 
 def _build_summary(

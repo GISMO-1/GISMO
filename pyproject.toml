@@ -17,6 +17,7 @@ dependencies = [
     "psutil>=5.9",
     "pytapo>=3.3",
     "tinytuya>=1.16",
+    "python-kasa>=0.10",
 ]
 
 [project.scripts]

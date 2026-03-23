@@ -62,6 +62,7 @@ class CalendarToolTest(unittest.TestCase):
                         "title": "Dinner",
                         "start_at": "2026-03-20T18:00:00",
                         "end_at": "2026-03-20T19:00:00",
+                        "event_type": "event",
                     },
                 },
             )

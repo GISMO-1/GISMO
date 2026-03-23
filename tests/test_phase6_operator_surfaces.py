@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import shutil
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 from uuid import uuid4
 
+from gismo.core.background_worker import BackgroundWorkerStatus
 from gismo.core.models import QueueStatus, TaskStatus
+from gismo.core.readiness import _STARTING_STALE_SECONDS, _STUCK_STARTING_EVENT_TYPE
 from gismo.core.state import StateStore
 from gismo.web import api as web_api
 
@@ -278,3 +280,115 @@ class TestPhase6OnboardingAndDevices(unittest.TestCase):
             shutil.rmtree(tmp, ignore_errors=True)
 
         self.assertEqual(devices[0]["capabilities"], ["status", "stream", "snapshot"])
+
+
+class TestReadinessStartingTimeout(unittest.TestCase):
+    """Verify that a daemon stuck in 'starting' transitions to 'degraded' after the timeout."""
+
+    def _tmpdir(self, prefix: str) -> Path:
+        path = Path("tmp") / f"{prefix}-{uuid4().hex}"
+        path.mkdir(parents=True, exist_ok=False)
+        return path
+
+    def _model_health_patch(self) -> mock.MagicMock:
+        return mock.patch(
+            "gismo.core.readiness.get_model_health",
+            return_value={
+                "issues": [],
+                "degraded_mode": {"active": False, "reason": None},
+                "ollama_available": True,
+            },
+        )
+
+    def _stale_worker_status(self, age_seconds: int) -> BackgroundWorkerStatus:
+        """Return a BackgroundWorkerStatus that looks stale-not-running."""
+        last_seen = (datetime.now(timezone.utc) - timedelta(seconds=age_seconds)).isoformat()
+        return BackgroundWorkerStatus(
+            running=False,
+            stale=True,
+            paused=False,
+            pid=None,
+            started_at=None,
+            last_seen=last_seen,
+            age_seconds=age_seconds,
+        )
+
+    def test_fresh_starting_stays_starting(self) -> None:
+        """Daemon was seen 10 s ago (well within threshold) → 'starting', not 'degraded'."""
+        tmp = self._tmpdir("readiness-fresh-starting")
+        try:
+            db = _make_db(str(tmp))
+            status = self._stale_worker_status(age_seconds=10)
+            with (
+                mock.patch("gismo.core.readiness.get_background_worker_status", return_value=status),
+                mock.patch("gismo.core.readiness.get_operator_name", return_value="Mike"),
+                self._model_health_patch(),
+            ):
+                data = web_api.get_status(db)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+        self.assertEqual(data["gismo"]["state"], "starting")
+
+    def test_stuck_starting_transitions_to_degraded(self) -> None:
+        """Daemon was seen more than _STARTING_STALE_SECONDS ago → 'degraded'."""
+        tmp = self._tmpdir("readiness-stuck-starting")
+        try:
+            db = _make_db(str(tmp))
+            age = _STARTING_STALE_SECONDS + 60
+            status = self._stale_worker_status(age_seconds=age)
+            with (
+                mock.patch("gismo.core.readiness.get_background_worker_status", return_value=status),
+                mock.patch("gismo.core.readiness.get_operator_name", return_value="Mike"),
+                self._model_health_patch(),
+            ):
+                data = web_api.get_status(db)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+        self.assertEqual(data["gismo"]["state"], "degraded")
+        self.assertNotEqual(data["gismo"]["state"], "starting")
+
+    def test_stuck_starting_emits_security_event(self) -> None:
+        """Crossing the stuck-starting threshold writes a daemon_stuck_starting event."""
+        tmp = self._tmpdir("readiness-stuck-event")
+        try:
+            db = _make_db(str(tmp))
+            age = _STARTING_STALE_SECONDS + 60
+            status = self._stale_worker_status(age_seconds=age)
+            with (
+                mock.patch("gismo.core.readiness.get_background_worker_status", return_value=status),
+                mock.patch("gismo.core.readiness.get_operator_name", return_value="Mike"),
+                self._model_health_patch(),
+            ):
+                web_api.get_status(db)
+            # Event should now be in the store
+            with StateStore(db) as store:
+                events = store.list_events(limit=20)
+            event_types = [getattr(e, "event_type", None) for e in events]
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+        self.assertIn(_STUCK_STARTING_EVENT_TYPE, event_types)
+
+    def test_stuck_starting_does_not_emit_duplicate_events(self) -> None:
+        """A second poll within the stale window does not emit a second event."""
+        tmp = self._tmpdir("readiness-stuck-dedup")
+        try:
+            db = _make_db(str(tmp))
+            age = _STARTING_STALE_SECONDS + 60
+            status = self._stale_worker_status(age_seconds=age)
+            with (
+                mock.patch("gismo.core.readiness.get_background_worker_status", return_value=status),
+                mock.patch("gismo.core.readiness.get_operator_name", return_value="Mike"),
+                self._model_health_patch(),
+            ):
+                web_api.get_status(db)
+                web_api.get_status(db)  # second poll
+            with StateStore(db) as store:
+                events = store.list_events(limit=50)
+            stuck_events = [e for e in events if getattr(e, "event_type", None) == _STUCK_STARTING_EVENT_TYPE]
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+        self.assertEqual(len(stuck_events), 1, "expected exactly one stuck-starting event")

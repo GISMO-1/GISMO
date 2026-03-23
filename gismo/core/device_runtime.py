@@ -16,7 +16,14 @@ from gismo.core.execution import (
     build_worker_command,
     run_sandboxed_process,
 )
+from gismo.core.device_adapters.config import (
+    find_configured_device,
+    load_configured_devices,
+    normalize_platform_name,
+    ordered_identifiers,
+)
 from gismo.core.models import ConnectedDevice
+from gismo.core.paths import resolve_devices_config_path
 
 
 def serialize_device(device: ConnectedDevice) -> dict[str, Any]:
@@ -73,6 +80,11 @@ def execute_device_runtime_action(
     profile = build_sandbox_profile(
         component=component,
         db_path=db_path,
+        extra_env={
+            "GISMO_DEVICES_CONFIG": str(resolve_devices_config_path(db_path)),
+        }
+        if db_path
+        else None,
     )
     return run_sandboxed_process(
         request,
@@ -109,6 +121,13 @@ def run_device_worker(payload: dict[str, Any]) -> dict[str, Any]:
             "ok": True,
             **runtime_set_power(devices, turn_on=turn_on),
         }
+    if action in {"device_command", "kasa_command"}:
+        return runtime_device_command(
+            adapter_name=str(payload.get("adapter") or ("kasa" if action == "kasa_command" else "")).strip(),
+            device_ref=str(payload.get("device_ref") or payload.get("device_id") or ""),
+            command=str(payload.get("command") or ""),
+            params=payload.get("params") or {},
+        )
     raise ValueError(f"Unsupported device runtime action: {action}")
 
 
@@ -194,6 +213,52 @@ def runtime_set_power(
     }
 
 
+def runtime_device_command(
+    *,
+    adapter_name: str,
+    device_ref: str,
+    command: str,
+    params: dict[str, Any],
+) -> dict[str, Any]:
+    """Execute a command through the adapter registry (runs inside worker subprocess)."""
+    from gismo.core.device_adapters.registry import get_registry
+
+    if not adapter_name:
+        raise ValueError("adapter is required for device commands")
+    registry = get_registry()
+    adapter = registry.get_adapter(adapter_name)
+    result = adapter.send_command(device_ref, command, params)
+    return {
+        "ok": result.ok,
+        "result": {
+            "ok": result.ok,
+            "device_ref": device_ref,
+            "device_id": result.device_id,
+            "command": result.command,
+            "state_before": result.state_before,
+            "state_after": result.state_after,
+            "error": result.error,
+            "error_type": result.error_type,
+            "raw_response": result.raw_response,
+        },
+    }
+
+
+def runtime_kasa_command(
+    *,
+    adapter_name: str,
+    device_ref: str,
+    command: str,
+    params: dict[str, Any],
+) -> dict[str, Any]:
+    return runtime_device_command(
+        adapter_name=adapter_name,
+        device_ref=device_ref,
+        command=command,
+        params=params,
+    )
+
+
 def _load_devices(raw: Any) -> list[ConnectedDevice]:
     if not isinstance(raw, list):
         raise ValueError("devices must be a list")
@@ -264,32 +329,45 @@ def _looks_like_light(device: ConnectedDevice) -> bool:
 
 
 def _set_light_power(device: ConnectedDevice, *, turn_on: bool) -> dict[str, str]:
-    metadata = device.metadata_json if isinstance(device.metadata_json, dict) else {}
-    device_id = str(metadata.get("device_id") or metadata.get("dev_id") or "").strip()
-    local_key = str(metadata.get("local_key") or "").strip()
-    version = metadata.get("version") or metadata.get("protocol_version") or 3.3
-    if not device_id or not local_key:
+    adapter_name = _resolve_adapter_name(device)
+    if not adapter_name:
         return {
             "status": "needs_setup",
             "message": f"{_device_name(device)} is missing local control details.",
         }
 
-    try:
-        import tinytuya
-    except Exception as exc:  # noqa: BLE001
-        return {"status": "failed", "message": f"{_device_name(device)}: {exc}"}
+    setup_error = f"{_device_name(device)} is missing local control details."
+    for device_ref in _device_ref_candidates(device):
+        try:
+            result = runtime_device_command(
+                adapter_name=adapter_name,
+                device_ref=device_ref,
+                command="turn_on" if turn_on else "turn_off",
+                params={},
+            ).get("result") or {}
+        except Exception as exc:  # noqa: BLE001
+            return {
+                "status": "failed",
+                "message": f"{_device_name(device)}: {exc}",
+            }
+        if bool(result.get("ok")):
+            return {"status": "changed", "message": _device_name(device)}
 
-    controller_type = str(metadata.get("controller_type") or "").strip().lower()
-    cls = tinytuya.BulbDevice if controller_type in {"bulb", ""} else tinytuya.OutletDevice
-    try:
-        controller = cls(device_id, address=device.ip, local_key=local_key, version=float(version))
-        if turn_on:
-            controller.turn_on()
-        else:
-            controller.turn_off()
-    except Exception as exc:  # noqa: BLE001
-        return {"status": "failed", "message": f"{_device_name(device)}: {exc}"}
-    return {"status": "changed", "message": _device_name(device)}
+        error = str(result.get("error") or "").strip()
+        if _is_setup_error(result):
+            if error:
+                setup_error = error
+            continue
+
+        return {
+            "status": "failed",
+            "message": f"{_device_name(device)}: {error or 'unknown error'}",
+        }
+
+    return {
+        "status": "needs_setup",
+        "message": setup_error,
+    }
 
 
 def _device_name(device: ConnectedDevice) -> str:
@@ -317,6 +395,80 @@ def _device_search_text(device: ConnectedDevice) -> str:
 
 def _normalize_text(text: str) -> str:
     return " ".join((text or "").strip().lower().split())
+
+
+def _device_ref_candidates(device: ConnectedDevice) -> list[str]:
+    metadata = device.metadata_json if isinstance(device.metadata_json, dict) else {}
+    return ordered_identifiers(
+        metadata.get("device_id"),
+        metadata.get("gismo_device_id"),
+        device.id,
+        device.ip,
+    )
+
+
+def _resolve_adapter_name(device: ConnectedDevice) -> str | None:
+    metadata = device.metadata_json if isinstance(device.metadata_json, dict) else {}
+    configured_device = _resolve_configured_device(device)
+    if configured_device is not None:
+        platform = normalize_platform_name(configured_device)
+        if platform in {"tuya", "feit", "feit electric"}:
+            return "tuya"
+        if platform == "kasa":
+            return "kasa"
+        if str(configured_device.get("device_id") or "").strip() and str(configured_device.get("local_key") or "").strip():
+            return "tuya"
+
+    adapter_name = _normalize_text(metadata.get("adapter"))
+    if adapter_name:
+        return adapter_name
+
+    controller = _normalize_text(metadata.get("controller"))
+    if controller in {"tuya", "kasa"}:
+        return controller
+
+    platform_text = " ".join(
+        _normalize_text(value)
+        for value in (
+            metadata.get("platform"),
+            device.brand,
+            device.device_type,
+            metadata.get("label"),
+        )
+        if value
+    )
+    if any(token in platform_text for token in ("tuya", "feit")):
+        return "tuya"
+    if "kasa" in platform_text:
+        return "kasa"
+    return None
+
+
+def _resolve_configured_device(device: ConnectedDevice) -> dict[str, Any] | None:
+    metadata = device.metadata_json if isinstance(device.metadata_json, dict) else {}
+    try:
+        _, configured = load_configured_devices()
+    except RuntimeError:
+        return None
+    return find_configured_device(
+        configured,
+        identifiers=(
+            device.ip,
+            device.hostname or "",
+            str(metadata.get("label") or ""),
+            str(metadata.get("gismo_device_id") or ""),
+            str(metadata.get("device_id") or metadata.get("dev_id") or ""),
+            device.id,
+        ),
+    )
+
+
+def _is_setup_error(result: dict[str, Any]) -> bool:
+    error_type = str(result.get("error_type") or "").strip()
+    error = _normalize_text(result.get("error") or "")
+    if error_type.endswith("ConfigurationError"):
+        return True
+    return "configured tuya" in error or "local control details" in error or "missing local control" in error
 
 
 def _local_ipv4_addresses() -> list[str]:

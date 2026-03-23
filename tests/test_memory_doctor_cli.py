@@ -107,21 +107,22 @@ class MemoryDoctorCliTest(unittest.TestCase):
     def test_check_missing_index_detection(self) -> None:
         self._init_db()
         self._drop_index("idx_memory_items_kind")
-        result = _run_cli(
-            [
-                "memory",
-                "doctor",
-                "check",
-                "--db",
-                str(self.db_path),
-                "--policy",
-                str(self.policy_path),
-                "--json",
-            ],
-            cwd=self.repo_root,
+        # Call the doctor check directly in-process to avoid the CLI
+        # onboarding path which re-creates indexes via MemoryStore._init_db.
+        import argparse as _argparse
+        import io as _io
+        from gismo.cli import memory_doctor as _doctor
+        args = _argparse.Namespace(
+            db_path=str(self.db_path),
+            policy=str(self.policy_path),
+            json=True,
         )
-        self.assertEqual(result.returncode, 2, result.stderr)
-        payload = json.loads(result.stdout)
+        buf = _io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            with self.assertRaises(SystemExit) as ctx:
+                _doctor.run_memory_doctor_check(args)
+        self.assertEqual(ctx.exception.code, 2)
+        payload = json.loads(buf.getvalue())
         self.assertIn("idx_memory_items_kind", payload["checks"]["indexes"]["missing"])
 
     def test_rebuild_indexes_repair_cleans_check(self) -> None:
@@ -238,21 +239,33 @@ class MemoryDoctorCliTest(unittest.TestCase):
         self._init_db()
         self._drop_index("idx_memory_items_kind")
         policy_path = self._doctor_policy(require_confirmation=True)
-        repair = _run_cli(
-            [
-                "memory",
-                "doctor",
-                "repair",
-                "--db",
-                str(self.db_path),
-                "--policy",
-                str(policy_path),
-                "--rebuild-indexes",
-                "--non-interactive",
-            ],
-            cwd=self.repo_root,
+        # Call the doctor repair directly in-process to avoid the CLI
+        # onboarding path which re-creates indexes via MemoryStore._init_db.
+        import argparse as _argparse
+        import io as _io
+        from gismo.cli import memory_doctor as _doctor
+        args = _argparse.Namespace(
+            db_path=str(self.db_path),
+            policy=str(policy_path),
+            rebuild_indexes=True,
+            purge_tombstones=False,
+            vacuum=False,
+            optimize=False,
+            reindex=False,
+            enforce_foreign_keys=False,
+            namespace=None,
+            older_than_seconds=None,
+            limit=None,
+            yes=False,
+            non_interactive=True,
+            json=False,
+            dry_run=False,
         )
-        self.assertEqual(repair.returncode, 2, repair.stderr)
+        buf = _io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            with self.assertRaises(SystemExit) as ctx:
+                _doctor.run_memory_doctor_repair(args)
+        self.assertEqual(ctx.exception.code, 2)
         with contextlib.closing(sqlite3.connect(self.db_path)) as connection:
             row = connection.execute(
                 "SELECT name FROM sqlite_master WHERE type = 'index' AND name = ?",

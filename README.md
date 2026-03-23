@@ -3,37 +3,64 @@
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-lightgrey.svg)]()
-[![GitHub Stars](https://img.shields.io/github/stars/GISMO-1/GISMO?style=social)](https://github.com/GISMO-1/GISMO/stargazers)
 
-> Your personal AI. Local. Private. Yours.
+GISMO is a local-first orchestration system for day-to-day operator work.
 
-GISMO (General Intelligent System for Multiflow Operations) is a local-first personal AI assistant that runs entirely on your hardware. No cloud. No subscriptions. No data leaving your machine.
+It keeps state in SQLite, routes actions through a durable queue and daemon, gates side effects with policy, and records receipts and audit events. Desktop, web, TUI, and CLI surfaces all sit on top of that same execution core.
 
-Talk to GISMO naturally. Control your smart home. Monitor your cameras. Manage your tasks. Everything private, everything logged, everything under your control.
+The first real local device path is now in place: GISMO has a device adapter architecture, and a Feit Electric smart bulb on the Tuya platform has been controlled over the local LAN with `tinytuya`. The live smoke test that has been verified so far is `get_state`, `turn_off`, and `turn_on` through the Tuya adapter/runtime path.
 
-## What GISMO Can Do
+## What GISMO Is
 
-- **Chat naturally** — Talk to GISMO by text or voice. It understands context and remembers your preferences.
-- **Control smart devices** — Connect cameras, smart lights, thermostats, and sensors. GISMO discovers devices on your network automatically.
-- **Monitor your home** — Live camera feeds, system health, activity alerts — all in one command center dashboard.
-- **Manage tasks** — Queue up operations, review plans before they execute, track everything.
-- **Stay private** — Everything runs locally. Your conversations, your device data, your preferences — nothing leaves your machine. Ever.
-- **Speak to you** — GISMO has a voice (Kokoro TTS with 11 voices to choose from).
-- **Remember things** — Persistent memory stores your preferences, notes, and context across sessions.
-- **First-run onboarding** — GISMO introduces itself, learns your name, lets you pick a voice, and personalizes your experience.
+- Local-first orchestration core
+- SQLite-backed state, queue, daemon, and exports
+- Policy-controlled execution with capability checks and audit trails
+- Persistent memory and settings
+- Desktop app, web dashboard, CLI, and TUI surfaces
+- Extensible device adapter layer for LAN devices
 
-## Screenshot
+## What GISMO Can Do Today
 
-<img width="1920" height="1032" alt="image" src="https://github.com/user-attachments/assets/f202ca68-507a-4f95-bdd8-1bd4ccb2f987" />
+- Run immediate or queued work through the same auditable execution path
+- Plan and gate operational work instead of acting silently
+- Keep persistent memory, settings, receipts, runs, and event history
+- Serve desktop, web, chat, and terminal operator surfaces
+- Discover and inspect saved devices on the local network
+- Switch configured saved lights on and off through `device_control` when local device details are present
+- Control a real Feit/Tuya bulb locally through the Tuya adapter
+
+## Current Device Status
+
+- Tuya / Feit is the primary live adapter path
+- Kasa remains present as a secondary compatibility adapter
+- Tuya local credentials are loaded from `.gismo/devices.json`
+- Shared device routing now uses `device_ref` as the lookup token
+- Resolved vendor `device_id` remains the protocol identity
+- IP address is treated as a locator and fallback, not canonical identity
+
+What is proven today:
+
+- Direct Tuya adapter/runtime smoke on a real bulb for `get_state`, `turn_off`, and `turn_on`
+- Saved-device on/off routing through the generic adapter architecture in targeted tests
+- Mocked and targeted test coverage for discovery, brightness, color temperature, RGB, policy gating, security events, and trust-zone execution
+
+What is not finished yet:
+
+- No first-party editor for `.gismo/devices.json`
+- Richer light controls are not yet broadly exposed through the normal operator/chat flow
+- The ideal "say it and it acts" device experience still needs more live end-to-end validation
+- Scenes, groups, and higher-level home automation flows are not complete
 
 ## Quick Start
 
 ### Prerequisites
+
 - Python 3.11+
-- Ollama (for the AI brain)
-- Windows 10/11, Linux, or macOS
+- Ollama for local model-backed planning/chat
+- Windows is the reference platform
 
 ### Install
+
 ```bash
 git clone https://github.com/GISMO-1/GISMO.git
 cd GISMO
@@ -49,63 +76,66 @@ pip install -e .
 ```
 
 ### Launch
+
 ```bash
-# Desktop app (recommended)
+# Desktop app
 gismo app
 
 # Web dashboard
 gismo web
 
-# CLI
-gismo ask "What can you do?"
+# Terminal dashboard
+gismo tui
+
+# CLI ask flow
+gismo ask "What can you do?" --dry-run
 ```
 
-On first launch, GISMO walks you through setup — your name, preferred voice, and you're ready to go.
+## Device Setup
 
-## The Command Center
+For Tuya / Feit local control, keep device credentials in:
 
-GISMO opens as a desktop application with a mission control layout:
+```text
+.gismo/devices.json
+```
 
-- **Left panel** — Connected devices with live status
-- **Center** — Chat with GISMO (the main interaction)
-- **Right panel** — Activity feed and task queue
-- **Top bar** — System status, search, your name
+Expected fields per Tuya device:
 
-## Architecture
+- `device_id`
+- `local_key`
+- `ip`
+- `version`
 
-- **Python** codebase, **SQLite** for state, **Ollama** for the AI brain
-- **Kokoro TTS** for voice (with Piper as fallback)
-- **pywebview** for the native desktop window
-- Policy-gated execution — GISMO only does what you allow
-- Full audit trail — every action is logged
+Keep that file local. Do not commit secrets.
 
-## For Developers
+See [docs/DEVICE_ADAPTERS.md](docs/DEVICE_ADAPTERS.md) for the adapter contract, config format, and `tinytuya` credential flow.
 
-See [docs/OPERATOR.md](docs/OPERATOR.md) for detailed CLI commands, policy configuration, memory management, agent loops, and the full technical reference.
+## Operator Surfaces
 
-## Status
+- `gismo app`: desktop window
+- `gismo web`: local web dashboard and chat surface
+- `gismo tui`: terminal dashboard
+- `gismo run`, `gismo ask`, `gismo agent`, `gismo queue`, `gismo export`: CLI/operator entry points
 
-- **Phase 0-2** — Foundation, planner, guardrails ✅
-- **Phase 3** — Memory and context ✅
-- **Phase 4** — Interactive experience (command center, voice, desktop app, onboarding) 🔄
-- **Phase 5** — Device connections (cameras, lights, sensors) 🔄
-- **Future** — Always-on service, installer, mobile access, Earthship integration
+Chat -> plan/queue -> execute remains the strategic front door. Device requests are wired into that broader flow for scan, list, check, and simple on/off requests, but the live physical proof for the first bulb milestone is the adapter/runtime path rather than a polished end-to-end chat demo.
 
-## Origin
+## Project State
 
-GISMO was born on Christmas Day 2025. Built by a factory worker who runs industrial robots by day and codes by night. The name is a nod to Gizmo from Gremlins — friendly and helpful, but with rules to keep things safe.
+- Phase 1-4 core execution, memory, and operator surfaces: done
+- Phase 5 zero-trust execution: done
+- Phase 5b device adapter architecture: landed
+- Phase 5b first live device milestone: real Feit/Tuya bulb controlled locally
+- Phase 6 operator readiness surfaces: in progress
+
+See [STATUS.md](STATUS.md) for the current source-of-truth status and [HANDOFF.md](HANDOFF.md) for maintainer context.
+
+## Docs
+
+- [docs/OPERATOR.md](docs/OPERATOR.md)
+- [docs/DEVICE_ADAPTERS.md](docs/DEVICE_ADAPTERS.md)
+- [STATUS.md](STATUS.md)
+- [HANDOFF.md](HANDOFF.md)
 
 ## License
 
-MIT License — free to use, modify, and distribute.
-
-## Links
-
-- [Operator Guide](docs/OPERATOR.md)
-- [GitHub Sponsors](https://github.com/sponsors/GISMO-1)
-- [Dev.to Article](https://dev.to/leo_burns_f4fa35f1cc6eeba/i-built-a-local-first-ai-orchestration-system-on-a-7-year-old-laptop-1nl9)
-- [@GISMO_ai on X](https://twitter.com/GISMO_ai)
-
----
-
-*Policy before power. No silent actions. Everything yours.*
+MIT License.

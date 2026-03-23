@@ -35,6 +35,7 @@ from gismo.cli.operator import (
 )
 from gismo.cli import ipc as ipc_cli
 from gismo.cli import supervise as supervise_cli
+from gismo.cli.service_cli import run_service_install, run_service_status, run_service_uninstall
 from gismo.cli.windows_startup import (
     install_windows_startup_launcher,
     uninstall_windows_startup_launcher,
@@ -4919,6 +4920,18 @@ def _handle_daemon_uninstall_windows_startup(args: argparse.Namespace) -> None:
     run_daemon_uninstall_windows_startup(args.name, yes=args.yes)
 
 
+def _handle_service_install(args: argparse.Namespace) -> None:
+    run_service_install(args.db_path, policy_path=getattr(args, "policy", None))
+
+
+def _handle_service_uninstall(args: argparse.Namespace) -> None:
+    run_service_uninstall(args.db_path, policy_path=getattr(args, "policy", None))
+
+
+def _handle_service_status(args: argparse.Namespace) -> None:
+    run_service_status(args.db_path)
+
+
 def _handle_queue_stats(args: argparse.Namespace) -> None:
     with _open_state_store(args.db_path) as state_store:
         stats = state_store.queue_stats()
@@ -7853,6 +7866,41 @@ def build_parser() -> argparse.ArgumentParser:
         help="Run ID to show",
     )
     ipc_run_show_parser.set_defaults(handler=_handle_ipc_run_show)
+
+    service_parser = subparsers.add_parser(
+        "service",
+        help="Manage the GISMO daemon as a Windows scheduled task",
+        parents=[db_parent_optional],
+    )
+    service_subparsers = service_parser.add_subparsers(dest="service_command")
+    service_install_parser = service_subparsers.add_parser(
+        "install",
+        help="Install the GISMO daemon as a Windows Task Scheduler task",
+        parents=[db_parent_optional],
+    )
+    service_install_parser.add_argument(
+        "--policy",
+        default=None,
+        help="Policy file to check for service.install permission",
+    )
+    service_install_parser.set_defaults(handler=_handle_service_install)
+    service_uninstall_parser = service_subparsers.add_parser(
+        "uninstall",
+        help="Remove the GISMO daemon scheduled task",
+        parents=[db_parent_optional],
+    )
+    service_uninstall_parser.add_argument(
+        "--policy",
+        default=None,
+        help="Policy file to check for service.uninstall permission",
+    )
+    service_uninstall_parser.set_defaults(handler=_handle_service_uninstall)
+    service_status_parser = service_subparsers.add_parser(
+        "status",
+        help="Show the GISMO daemon scheduled task status",
+        parents=[db_parent_optional],
+    )
+    service_status_parser.set_defaults(handler=_handle_service_status)
 
     return parser
 

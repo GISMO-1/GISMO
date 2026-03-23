@@ -45,6 +45,9 @@ tokens.json
 devices.json
 devices_local.json
 network_scan.json
+tinytuya.json
+tuya-raw.json
+snapshot.json
 
 # Voice / embeddings
 voice/

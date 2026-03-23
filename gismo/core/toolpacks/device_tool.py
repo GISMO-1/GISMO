@@ -51,6 +51,12 @@ class DeviceControlTool(Tool):
                 turn_on=action == "turn_on",
                 context=execution_context,
             )
+        if action in {"device_command", "kasa_command", "tuya_command"}:
+            return self._device_command(
+                tool_input,
+                action=action,
+                context=execution_context,
+            )
         raise ValueError(f"Unsupported device action '{action}'")
 
     def _scan_network(
@@ -264,6 +270,102 @@ class DeviceControlTool(Tool):
             },
         )
         return payload
+
+    def _device_command(
+        self,
+        tool_input: dict[str, Any],
+        *,
+        action: str,
+        context: dict[str, Any],
+    ) -> dict[str, Any]:
+        default_adapter = "kasa" if action == "kasa_command" else "tuya" if action == "tuya_command" else ""
+        adapter_name = str(tool_input.get("adapter") or default_adapter).strip()
+        device_ref = str(tool_input.get("device_ref") or tool_input.get("device_id") or "").strip()
+        command = str(tool_input.get("command") or "").strip()
+        params = tool_input.get("params") or {}
+        if not isinstance(params, dict):
+            params = {}
+
+        if not adapter_name:
+            raise ValueError("adapter is required for device_command")
+        if not device_ref:
+            raise ValueError("device_ref is required for device_command")
+        if not command:
+            raise ValueError("command is required for device_command")
+
+        self._require_private_network_scope()
+        self._record(
+            "device_command_sent",
+            f"Sending {command} to {device_ref} via {adapter_name}",
+            {
+                "adapter": adapter_name,
+                "device_ref": device_ref,
+                "device_id": tool_input.get("device_id") or device_ref,
+                "command": command,
+            },
+        )
+
+        execution = execute_device_runtime_action(
+            component="device_control",
+            action="device_command",
+            actor=_context_actor(context),
+            db_path=self._state_store.db_path,
+            payload={
+                "adapter": adapter_name,
+                "device_ref": device_ref,
+                "command": command,
+                "params": params,
+            },
+            timeout_s=15.0,
+            related_run_id=_context_optional_str(context, "related_run_id"),
+            related_task_id=_context_optional_str(context, "related_task_id"),
+            related_plan_id=_context_optional_str(context, "related_plan_id"),
+        )
+
+        result = execution.get("result") or {}
+        ok = bool(result.get("ok", False))
+        error = result.get("error")
+        if ok:
+            summary = f"Successfully sent {command} to {device_ref}."
+            self._record(
+                "device_command_succeeded",
+                summary,
+                {
+                    "adapter": adapter_name,
+                    "device_ref": device_ref,
+                    "device_id": result.get("device_id") or tool_input.get("device_id") or device_ref,
+                    "command": command,
+                    "result": result,
+                },
+            )
+        else:
+            summary = f"Failed to send {command} to {device_ref}: {error or 'unknown error'}"
+            self._record(
+                "device_command_failed",
+                summary,
+                {
+                    "adapter": adapter_name,
+                    "device_ref": device_ref,
+                    "device_id": tool_input.get("device_id") or device_ref,
+                    "command": command,
+                    "error": error,
+                },
+            )
+
+        return {
+            "summary": summary,
+            "ok": ok,
+            "result": result,
+            "execution": dict(execution.get("execution") or {}),
+        }
+
+    def _kasa_command(
+        self,
+        tool_input: dict[str, Any],
+        *,
+        context: dict[str, Any],
+    ) -> dict[str, Any]:
+        return self._device_command(tool_input, action="kasa_command", context=context)
 
     def _resolve_devices(self, target: str) -> list[ConnectedDevice]:
         devices = self._state_store.list_devices()

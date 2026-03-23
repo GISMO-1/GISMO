@@ -33,7 +33,7 @@ Completed:
 - Phase 1 (Local LLM Planner): DONE
 - Phase 2 (Control & Guardrails): DONE
 - Phase 3 (Memory & Context): DONE
-- Phase 4 (Interactive GISMO): IN PROGRESS — TUI, web UI, TTS, and plan approval complete
+- Phase 4 (Interactive GISMO): DONE — TUI, web UI, TTS, plan approval, Windows Task Scheduler service
 
 -------------------------------------------------------------------------------
 
@@ -165,54 +165,71 @@ INTENTIONAL LIMITATIONS (NOT BUGS)
 
 -------------------------------------------------------------------------------
 
-RECENT NOTABLE CHANGES (PHASE 4)
+RECENT NOTABLE CHANGES
 
-Phase 4 delivered four major capabilities, all behind the standard CLI and web surfaces:
+Phase 5 -- Zero-Trust Execution (landed in 700ea9f):
+- Signed capability tokens (HMAC-SHA256) for every tool execution
+- Deny-by-default policy gating on all tool calls
+- Full audit trail via security_events table (capability_issued, capability_verified, capability_rejected)
+- Capability claims: subject, action, resource, constraints, TTL, run/task/plan scoping
+- Input-hash binding: capability tokens are bound to exact tool input payloads
+- Task creation now requires input_json to have {"tool": "...", "payload": {...}} structure
+- Token verification at orchestrator execution time with strict resource/input matching
 
-1. Terminal dashboard (TUI)
-   - `gismo tui`: live curses dashboard with queue, runs, daemon status; 3s auto-refresh.
-   - Pure stdlib, no external TUI library.
+Phase 5b -- Device Adapter Architecture:
+- Pluggable adapter layer in gismo/core/device_adapters/ with abstract DeviceAdapter base class
+- AdapterRegistry singleton maps adapter names and device types to implementations
+- TuyaAdapter: Feit/Tuya local LAN bulb control via tinytuya
+- Tuya credentials now load from a sidecar config resolved from `.gismo/devices.json`
+- Shared control path generalized to `device_command` with `kasa_command` kept as a compatibility alias
+- Shared adapter/runtime lookup now uses `device_ref` for the incoming lookup token; vendor `device_id` remains the canonical protocol identity when resolved
+- Saved-device `turn_on` / `turn_off` now route through adapter lookup instead of calling tinytuya directly in shared runtime code
+- KasaAdapter remains available for TP-Link Kasa devices
+- Security events emitted at command send/succeed/fail with full audit payload
+- All execution goes through existing device_adapter trust zone with sandboxed boundary
+- tinytuya remains in dependencies for Tuya/Feit support; python-kasa remains for Kasa support
+- See docs/DEVICE_ADAPTERS.md for architecture, pipeline, and how to add new adapters
 
-2. Local web dashboard
-   - `gismo web [--port N] [--no-browser]`: opens browser to 127.0.0.1:7800.
-   - Tabs: Queue (cancel/purge), Runs (task/tool detail), Memory (namespaces + items), Plans, Settings (TTS).
-   - Daemon sidebar: live status, pause/resume controls.
-   - Zero external HTTP dependencies: stdlib http.server only.
-   - Single-file embedded HTML/JS/CSS in gismo/web/templates.py.
-   - REST endpoints: GET/POST/PATCH in gismo/web/server.py; pure data layer in gismo/web/api.py.
+What just became real:
+- First successful local physical device control via Tuya adapter: a real Feit Electric / Tuya smart bulb was controlled over the local LAN with live `get_state`, `turn_off`, and `turn_on` smoke tests.
+- The known-good path for that bulb is `.gismo/devices.json` -> `TuyaAdapter` / device runtime -> tinytuya local LAN control.
+- Shared routing now uses `device_ref` as the lookup token; resolved vendor `device_id` remains the protocol identity and IP stays a locator/fallback.
+- Kasa remains in the repo as a secondary compatibility path, not the primary live device story.
 
-3. TTS voice support
-   - `gismo tts voices list/set/download`, `gismo tts speak`.
-   - Backend: piper-tts; models download on first use to ~/.cache/gismo/tts/.
-   - 5 voices: en_GB-northern_english_male-medium (default), en_GB-alan-medium,
-     en_US-lessac-medium, en_US-ryan-high, en_US-amy-medium.
-   - Preprocessing: GISMO → GHIZMO (word-boundary regex) for hard-G pronunciation.
-   - Voice preference stored in memory (namespace gismo:settings, key tts.voice).
-   - Voice selection and test playback available in web Settings tab.
+What is wired versus what is live-verified:
+- Wired now: `device_control`, sandboxed device runtime, adapter registry, Tuya adapter, Kasa compatibility, web chat/device parsing for scan/list/check/simple on-off requests.
+- Live-verified now: direct Tuya adapter/runtime smoke for `get_state`, `turn_off`, and `turn_on` on one real Feit/Tuya bulb.
+- Not yet broadly live-verified: brightness, color temperature, and RGB on the physical bulb through the broader orchestration path; polished end-to-end chat/device UX on the physical bulb.
 
-4. Interactive plan approval
-   - `gismo ask --defer`: saves LLM plan as a PendingPlan (status=PENDING) instead of enqueueing.
-   - `gismo plan list/show/approve/reject/edit`: full CLI lifecycle.
-     - approve: enqueues plan actions via shared enqueue_plan_actions(), marks APPROVED.
-     - reject: records optional reason, marks REJECTED.
-     - edit: per-action command replacement or removal (PENDING only, 1-based index).
-   - Web UI Plans tab: table view + inline editing (editable action inputs, remove buttons).
-   - Data model: PendingPlan dataclass + PlanStatus enum in models.py; pending_plans SQLite table
-     in state.py with full CRUD + prefix resolution.
-   - Shared enqueue logic in core/plan_store.py (avoids circular imports between web and CLI).
-   - 27 tests: TestPendingPlanStateStore, TestEnqueuePlanActions, TestWebApiPlans.
+Phase 6 -- Operator Readiness Surfaces (in progress):
+- readiness.py: unified runtime status builder with state machine
+  (ready, starting, degraded, approval_needed, blocked, offline)
+- Readiness stages: state, worker, setup, model, API
+- Model health probing (cached and full modes)
+- Queue health monitoring with stale-running detection
+- get_status API returns offline when no daemon is running
 
-Operator smoke scripts + handle guardrail (pre-Phase 4):
-- Windows-friendly smoke scripts: operator_smoke.ps1 and e2e_smoke.ps1.
-- CLI subprocess regression test: daemon --once with DB handle release assertion.
+Phase 4 completion -- Windows Task Scheduler service (always-on daemon):
+- `gismo service install` / `uninstall` / `status` CLI commands
+- Policy-gated (service.install / service.uninstall in allowed_tools, deny-by-default)
+- Audit trail: service_install and service_uninstall security events with full payload
+- Task Scheduler ONLOGON trigger, pythonw.exe for no console window
+- Refuses to overwrite existing task (must uninstall first)
+- Status shows both Task Scheduler state and daemon heartbeat
 
-Next steps:
-- Always-on local service behavior (Phase 4 remainder).
-- Run operator_smoke.ps1 and e2e_smoke.ps1 on Windows after CLI changes.
-- Validate ask/agent subprocess flows on Windows for handle hygiene at higher concurrency.
+Phase 4 highlights (completed earlier):
+- TUI, web dashboard, TTS (kokoro primary + piper fallback, 16 voices), plan approval
+- Deterministic chat routing for calendar/device queries
+- Model policy with fallback chains
+- Onboarding system, plugin runtime
 
-Tests run:
-- python -m pytest (330 passed, 9 pre-existing Windows tempfile teardown failures unrelated to Phase 4)
+Device-path validation (2026-03-23): 50 targeted tests passed, 0 failed
+
+Immediate next device work:
+- Re-run the real bulb through the normal saved-device orchestration path, not just the direct adapter/runtime smoke.
+- Live-test brightness, color temperature, and RGB on the physical bulb.
+- Tighten the operator/chat path so the real adapter capability is easier to use without manual setup steps.
+- Add a first-party way to create or edit `.gismo/devices.json`.
 
 -------------------------------------------------------------------------------
 
@@ -255,21 +272,24 @@ Phase 4 is complete when:
 - No regressions in queue/daemon/policy/memory
 - Tests pass on Windows reliably
 
-Currently done: TUI, web UI, TTS, plan approval.
-Remaining: always-on service hardening.
+Currently done: TUI, web UI, TTS, plan approval, Windows Task Scheduler service.
+Phase 4 is complete.
 
 -------------------------------------------------------------------------------
 
 NEXT ENGINEERING TARGET (RECOMMENDED)
 
-Phase 4 remainder:
-- Always-on local service behavior: auto-start on login, service-style lifecycle.
-- Windows Task Scheduler / launchd integration.
+Phase 6 completion:
+- Fix readiness.py starting state persistence after daemon crash.
+- Model status defaults to unknown which allows ready state even when model is unreachable.
 
-After Phase 4:
-- Evaluate operator feedback on plan approval UX (approval rate, edit patterns).
+After Phase 6:
+- Add a first-party way to edit `.gismo/devices.json` from GISMO instead of manual file edits.
+- Teach planner/device routing to express brightness, color temperature, and RGB actions in natural language.
+- Improve known-device reconciliation if Tuya IPs change and only the cloud-derived vendor device ID is stable.
 - Harden Windows handle hygiene at higher concurrency (agent loops + web server + daemon).
 - Consider notification hooks (e.g. desktop toast on plan ready for approval).
+- Evaluate operator feedback on plan approval UX (approval rate, edit patterns).
 
 -------------------------------------------------------------------------------
 

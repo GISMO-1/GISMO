@@ -1,4 +1,5 @@
 import contextlib
+import gc
 import io
 import json
 import os
@@ -47,7 +48,7 @@ class AskCliTest(unittest.TestCase):
                 "notes": [],
             }
         )
-        with tempfile.TemporaryDirectory() as tmpdir:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
             db_path = str(Path(tmpdir) / "state.db")
             with mock.patch.dict(
                 os.environ,
@@ -110,7 +111,7 @@ class AskCliTest(unittest.TestCase):
                 "notes": [],
             }
         )
-        with tempfile.TemporaryDirectory() as tmpdir:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
             db_path = str(Path(tmpdir) / "state.db")
             with mock.patch.dict(
                 os.environ,
@@ -171,7 +172,7 @@ class AskCliTest(unittest.TestCase):
                 ],
             }
         )
-        with tempfile.TemporaryDirectory() as tmpdir:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
             db_path = str(Path(tmpdir) / "state.db")
             with mock.patch.dict(
                 os.environ,
@@ -230,7 +231,7 @@ class AskCliTest(unittest.TestCase):
                 "notes": [],
             }
         )
-        with tempfile.TemporaryDirectory() as tmpdir:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
             db_path = str(Path(tmpdir) / "state.db")
             with mock.patch.dict(
                 os.environ,
@@ -270,7 +271,7 @@ class AskCliTest(unittest.TestCase):
                 "notes": [],
             }
         )
-        with tempfile.TemporaryDirectory() as tmpdir:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
             db_path = str(Path(tmpdir) / "state.db")
             policy_hash = memory_policy_hash_for_path(None)
             memory_upsert_item_with_timestamps(
@@ -373,7 +374,7 @@ class AskCliTest(unittest.TestCase):
                 "notes": [],
             }
         )
-        with tempfile.TemporaryDirectory() as tmpdir:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
             db_path = str(Path(tmpdir) / "state.db")
             profile = memory_create_profile(
                 db_path,
@@ -481,7 +482,7 @@ class AskCliTest(unittest.TestCase):
                 ],
             }
         )
-        with tempfile.TemporaryDirectory() as tmpdir:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
             db_path = str(Path(tmpdir) / "state.db")
             with mock.patch.dict(
                 os.environ,
@@ -537,7 +538,7 @@ class AskCliTest(unittest.TestCase):
                 ],
             }
         )
-        with tempfile.TemporaryDirectory() as tmpdir:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
             db_path = str(Path(tmpdir) / "state.db")
             with StateStore(db_path):
                 pass
@@ -594,7 +595,7 @@ class AskCliTest(unittest.TestCase):
                 ],
             }
         )
-        with tempfile.TemporaryDirectory() as tmpdir:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
             db_path = str(Path(tmpdir) / "state.db")
             policy_path = self._write_policy(
                 tmpdir,
@@ -673,7 +674,7 @@ class AskCliTest(unittest.TestCase):
                 ],
             }
         )
-        with tempfile.TemporaryDirectory() as tmpdir:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
             db_path = str(Path(tmpdir) / "state.db")
             policy_path = self._write_policy(
                 tmpdir,
@@ -740,7 +741,7 @@ class AskCliTest(unittest.TestCase):
                 ],
             }
         )
-        with tempfile.TemporaryDirectory() as tmpdir:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
             db_path = str(Path(tmpdir) / "state.db")
             policy_path = self._write_policy(
                 tmpdir,
@@ -805,7 +806,7 @@ class AskCliTest(unittest.TestCase):
                 ],
             }
         )
-        with tempfile.TemporaryDirectory() as tmpdir:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
             db_path = str(Path(tmpdir) / "state.db")
             memory_retire_namespace(
                 db_path,
@@ -865,7 +866,7 @@ class AskCliTest(unittest.TestCase):
 
     def test_ask_invalid_json_fails_cleanly(self) -> None:
         response = "not json"
-        with tempfile.TemporaryDirectory() as tmpdir:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
             db_path = str(Path(tmpdir) / "state.db")
             with mock.patch.dict(
                 os.environ,
@@ -911,7 +912,7 @@ class AskCliTest(unittest.TestCase):
             "```\n"
             "Thanks."
         )
-        with tempfile.TemporaryDirectory() as tmpdir:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
             db_path = str(Path(tmpdir) / "state.db")
             with mock.patch.dict(
                 os.environ,
@@ -955,7 +956,7 @@ class AskCliTest(unittest.TestCase):
             "// trailing comment"
             "}"
         )
-        with tempfile.TemporaryDirectory() as tmpdir:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
             db_path = str(Path(tmpdir) / "state.db")
             with mock.patch.dict(
                 os.environ,
@@ -994,7 +995,7 @@ class AskCliTest(unittest.TestCase):
             "GISMO_OLLAMA_TIMEOUT_S": "42",
             "GISMO_OLLAMA_URL": "http://127.0.0.1:11434",
         }
-        with tempfile.TemporaryDirectory() as tmpdir:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
             db_path = str(Path(tmpdir) / "state.db")
             with mock.patch.dict(os.environ, env, clear=False):
                 with mock.patch.object(
@@ -1025,7 +1026,7 @@ class AskCliTest(unittest.TestCase):
             "GISMO_OLLAMA_TIMEOUT_S": "",
             "GISMO_OLLAMA_URL": "http://127.0.0.1:11434",
         }
-        with tempfile.TemporaryDirectory() as tmpdir:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
             db_path = str(Path(tmpdir) / "state.db")
             with mock.patch.dict(os.environ, env, clear=False):
                 with mock.patch.object(
@@ -1050,7 +1051,7 @@ class AskCliTest(unittest.TestCase):
         response = json.dumps(
             {"intent": "ping", "assumptions": [], "actions": [], "notes": []}
         )
-        with tempfile.TemporaryDirectory() as tmpdir:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
             db_path = str(Path(tmpdir) / "state.db")
             with mock.patch.dict(os.environ, {"GISMO_OLLAMA_TIMEOUT_S": "120"}, clear=False):
                 with mock.patch.object(
@@ -1075,7 +1076,7 @@ class AskCliTest(unittest.TestCase):
         response = json.dumps(
             {"intent": "ping", "assumptions": [], "actions": [], "notes": []}
         )
-        with tempfile.TemporaryDirectory() as tmpdir:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
             db_path = str(Path(tmpdir) / "state.db")
             with mock.patch.dict(os.environ, {"GISMO_OLLAMA_TIMEOUT_S": "120"}, clear=False):
                 with mock.patch.object(cli_main, "ollama_chat", return_value=response):
@@ -1107,7 +1108,7 @@ class AskCliTest(unittest.TestCase):
                 "notes": [],
             }
         )
-        with tempfile.TemporaryDirectory() as tmpdir:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
             db_path = str(Path(tmpdir) / "state.db")
             with mock.patch.dict(
                 os.environ,
@@ -1164,7 +1165,7 @@ class AskCliTest(unittest.TestCase):
                 "notes": [],
             }
         )
-        with tempfile.TemporaryDirectory() as tmpdir:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
             db_path = str(Path(tmpdir) / "state.db")
             with mock.patch.object(cli_main, "ollama_chat", return_value=response):
                 cli_main.run_ask(
@@ -1209,7 +1210,7 @@ class AskCliTest(unittest.TestCase):
                 "notes": [],
             }
         )
-        with tempfile.TemporaryDirectory() as tmpdir:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
             db_path = str(Path(tmpdir) / "state.db")
             policy_hash = memory_policy_hash_for_path(None)
             memory_put_item(
@@ -1300,7 +1301,7 @@ class AskCliTest(unittest.TestCase):
                 "notes": [],
             }
         )
-        with tempfile.TemporaryDirectory() as tmpdir:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
             db_path = str(Path(tmpdir) / "state.db")
             with mock.patch.dict(
                 os.environ,
@@ -1355,7 +1356,7 @@ class AskCliTest(unittest.TestCase):
                 "notes": [],
             }
         )
-        with tempfile.TemporaryDirectory() as tmpdir:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
             db_path = str(Path(tmpdir) / "state.db")
             with mock.patch.object(cli_main, "ollama_chat", return_value=response):
                 cli_main.run_ask(
@@ -1398,7 +1399,7 @@ class AskCliTest(unittest.TestCase):
                 "notes": [],
             }
         )
-        with tempfile.TemporaryDirectory() as tmpdir:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
             db_path = str(Path(tmpdir) / "state.db")
             policy_path = self._write_policy(
                 tmpdir,
@@ -1440,7 +1441,7 @@ class AskCliTest(unittest.TestCase):
                 "notes": [],
             }
         )
-        with tempfile.TemporaryDirectory() as tmpdir:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
             db_path = str(Path(tmpdir) / "state.db")
             with mock.patch.dict(
                 os.environ,
@@ -1477,7 +1478,7 @@ class AskCliTest(unittest.TestCase):
                 )
 
     def test_ask_failure_writes_failed_event(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
             db_path = str(Path(tmpdir) / "state.db")
             with mock.patch.dict(
                 os.environ,
@@ -1585,7 +1586,7 @@ class AskCliTest(unittest.TestCase):
         response = json.dumps(
             {"intent": "queue notes", "assumptions": [], "actions": actions, "notes": []}
         )
-        with tempfile.TemporaryDirectory() as tmpdir:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
             db_path = str(Path(tmpdir) / "state.db")
             with mock.patch.dict(
                 os.environ,
@@ -1635,7 +1636,7 @@ class AskCliTest(unittest.TestCase):
         response = json.dumps(
             {"intent": "queue notes", "assumptions": [], "actions": actions, "notes": []}
         )
-        with tempfile.TemporaryDirectory() as tmpdir:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
             db_path = str(Path(tmpdir) / "state.db")
             with mock.patch.dict(
                 os.environ,
@@ -1683,7 +1684,7 @@ class AskCliTest(unittest.TestCase):
         response = json.dumps(
             {"intent": "queue notes", "assumptions": [], "actions": actions, "notes": []}
         )
-        with tempfile.TemporaryDirectory() as tmpdir:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
             db_path = str(Path(tmpdir) / "state.db")
             with mock.patch.dict(
                 os.environ,
@@ -1736,7 +1737,7 @@ class AskCliTest(unittest.TestCase):
         response = json.dumps(
             {"intent": "queue notes", "assumptions": [], "actions": actions, "notes": []}
         )
-        with tempfile.TemporaryDirectory() as tmpdir:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
             db_path = str(Path(tmpdir) / "state.db")
             with mock.patch.dict(
                 os.environ,
@@ -1771,7 +1772,7 @@ class AskCliTest(unittest.TestCase):
 
     def test_ask_without_memory_has_no_audit_metadata(self) -> None:
         response = json.dumps({"intent": "noop", "assumptions": [], "actions": [], "notes": []})
-        with tempfile.TemporaryDirectory() as tmpdir:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
             db_path = str(Path(tmpdir) / "state.db")
             with mock.patch.dict(
                 os.environ,
@@ -1806,7 +1807,7 @@ class AskCliTest(unittest.TestCase):
 
     def test_ask_memory_injection_filters_and_orders(self) -> None:
         response = json.dumps({"intent": "noop", "assumptions": [], "actions": [], "notes": []})
-        with tempfile.TemporaryDirectory() as tmpdir:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
             db_path = str(Path(tmpdir) / "state.db")
             memory_put_item(
                 db_path,
@@ -1953,11 +1954,15 @@ class AskCliTest(unittest.TestCase):
                     ],
                 )
                 self.assertLessEqual(payload["memory_injected_bytes"], 8192)
-            os.remove(db_path)
+            gc.collect()
+            try:
+                os.remove(db_path)
+            except OSError:
+                pass  # Windows: SQLite handles may still be finalising
 
     def test_ask_memory_enforces_item_and_byte_caps(self) -> None:
         response = json.dumps({"intent": "noop", "assumptions": [], "actions": [], "notes": []})
-        with tempfile.TemporaryDirectory() as tmpdir:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
             db_path = str(Path(tmpdir) / "state.db")
             for index in range(25):
                 memory_put_item(

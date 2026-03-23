@@ -1,4 +1,3 @@
-```markdown
 # OPERATOR GUIDE — GISMO
 
 This document is for operators running GISMO day-to-day. It focuses on how to run the system, how to inspect it, how to recover it, and how to keep it safe. This is not a contributor guide and not an architecture deep dive.
@@ -15,6 +14,18 @@ GISMO is a local orchestration core.
 - Policy gates every action.
 - Nothing runs silently.
 - If it did not log, it did not happen.
+
+-------------------------------------------------------------------------------
+
+CURRENT OPERATOR REALITY
+
+- GISMO is a local-first execution system with durable state, queueing, a daemon, and audit trails.
+- Desktop, web, TUI, and CLI surfaces are all present and point at the same underlying state.
+- Memory, plan approval, receipts, status surfaces, and exports are operational now.
+- Device adapters are part of the real system now, not just a placeholder interface.
+- The first live physical device milestone is a Feit Electric / Tuya smart bulb controlled locally over LAN.
+- The live bulb smoke verified so far is `get_state`, `turn_off`, and `turn_on` through the Tuya adapter/runtime path.
+- Broader device UX is still being tightened. Do not assume every natural-language light command has been live-verified end to end yet.
 
 -------------------------------------------------------------------------------
 
@@ -52,6 +63,9 @@ STATE & FILE LOCATIONS
 Default state database:
   .gismo/state.db
 
+Device credentials config:
+  .gismo/devices.json
+
 Exports directory:
   .gismo/exports/
 
@@ -63,6 +77,11 @@ Important:
 Example:
   --db D:\gismo\data\state.db
   Exports -> D:\gismo\data\exports\
+
+Device config resolution:
+- By default GISMO looks for `.gismo/devices.json` next to the active database.
+- If you move `--db`, the expected device config moves with it.
+- Keep secrets in that local file only. Do not commit it.
 
 -------------------------------------------------------------------------------
 
@@ -82,6 +101,39 @@ ENQUEUE A COMMAND:
 
 - Adds item to durable queue
 - Requires daemon to execute
+
+-------------------------------------------------------------------------------
+
+DEVICES (CURRENT STATE)
+
+Operator-facing device actions today:
+
+  gismo run "device: scan"
+  gismo run "device: list"
+  gismo run "device: check front door camera"
+  gismo run "device: turn off dad's room light"
+
+What is live today:
+- A real Feit Electric / Tuya bulb has been controlled locally with GISMO's Tuya adapter.
+- The verified live smoke so far is `get_state`, `turn_off`, and `turn_on`.
+
+What is wired and tested:
+- Saved-device power routing goes through the generic `device_control` tool, sandboxed device runtime, and adapter registry.
+
+What local Tuya control requires:
+- A local `.gismo/devices.json` file with device credentials
+- At minimum: `device_id`, `local_key`, `ip`, and `version`
+- The device must be reachable on the local network
+
+Practical setup boundary:
+- GISMO does not store Tuya secrets in source code.
+- There is no first-party editor for `.gismo/devices.json` yet.
+- Discovery is helpful, but it is not the source of truth for Tuya credentials.
+
+Current adapter status:
+- Tuya / Feit is the primary real device path.
+- Kasa is still present as a secondary compatibility path.
+- Richer Tuya commands such as brightness, color temperature, and RGB exist in the adapter, but they are not yet broadly proven through the normal operator/chat flow.
 
 -------------------------------------------------------------------------------
 
@@ -531,7 +583,7 @@ STARTING THE CHAT INTERFACE:
 - Uses the gismo Ollama model (local, no cloud)
 - Full conversation history is maintained within the session
 - Informational requests can be answered directly
-- Operational requests route through the real execution path: planning, approval if needed, queue, worker, execution, and receipt-backed result reporting
+- Operational requests can route into the real execution path: planning, approval if needed, queue, worker, execution, and receipt-backed result reporting
 
 SENDING A MESSAGE:
 
@@ -577,7 +629,8 @@ Chat result language:
 - `unverified source`: the request depended on content that is not trusted yet.
 
 Device actions in chat:
-- Device requests such as scan, status checks, and power actions go through the same queue and worker path as other operational work.
+- Device requests such as scan, status checks, and simple power actions can be turned into queued device work through the same execution path as other operational requests.
+- The live physical proof for the first Tuya bulb milestone was adapter/runtime control, not a polished full chat smoke.
 - Device cards show only capabilities GISMO can actually resolve from current metadata, such as `status`, `on/off`, `stream`, and `snapshot`.
 - If capability detection is partial, the card reflects only what is currently known.
 
@@ -710,4 +763,3 @@ Policy before power.
 Explicit over implicit.
 State is truth.
 Audit everything.
-```

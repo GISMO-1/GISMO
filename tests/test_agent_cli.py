@@ -58,7 +58,7 @@ class AgentCliTest(unittest.TestCase):
                 "notes": [],
             }
         )
-        with tempfile.TemporaryDirectory() as tmpdir:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
             db_path = str(Path(tmpdir) / "state.db")
             with mock.patch.dict(os.environ, self._mock_env(), clear=False):
                 with mock.patch.object(cli_main, "ollama_chat", return_value=response):
@@ -110,7 +110,7 @@ class AgentCliTest(unittest.TestCase):
                     if item.status == QueueStatus.QUEUED:
                         state_store.mark_queue_item_succeeded(item.id)
 
-        with tempfile.TemporaryDirectory() as tmpdir:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
             db_path = str(Path(tmpdir) / "state.db")
             with mock.patch.dict(os.environ, self._mock_env(), clear=False):
                 with mock.patch.object(cli_main, "ollama_chat", return_value=response):
@@ -159,7 +159,7 @@ class AgentCliTest(unittest.TestCase):
                     if item.status == QueueStatus.QUEUED:
                         state_store.mark_queue_item_succeeded(item.id)
 
-        with tempfile.TemporaryDirectory() as tmpdir:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
             db_path = str(Path(tmpdir) / "state.db")
             memory_put_item(
                 db_path,
@@ -232,7 +232,7 @@ class AgentCliTest(unittest.TestCase):
                 "notes": [],
             }
         )
-        with tempfile.TemporaryDirectory() as tmpdir:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
             db_path = str(Path(tmpdir) / "state.db")
             with mock.patch.dict(os.environ, self._mock_env(), clear=False):
                 with mock.patch.object(cli_main, "ollama_chat", return_value=response):
@@ -270,7 +270,7 @@ class AgentCliTest(unittest.TestCase):
                 ],
             }
         )
-        with tempfile.TemporaryDirectory() as tmpdir:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
             db_path = str(Path(tmpdir) / "state.db")
             with mock.patch.dict(os.environ, self._mock_env(), clear=False):
                 with mock.patch.object(cli_main, "ollama_chat", return_value=response):
@@ -303,7 +303,7 @@ class AgentCliTest(unittest.TestCase):
                 "notes": [],
             }
         )
-        with tempfile.TemporaryDirectory() as tmpdir:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
             db_path = str(Path(tmpdir) / "state.db")
             policy_hash = memory_policy_hash_for_path(None)
             memory_upsert_item_with_timestamps(
@@ -393,7 +393,7 @@ class AgentCliTest(unittest.TestCase):
                 "notes": [],
             }
         )
-        with tempfile.TemporaryDirectory() as tmpdir:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
             db_path = str(Path(tmpdir) / "state.db")
             policy_hash = memory_policy_hash_for_path(None)
             memory_upsert_item_with_timestamps(
@@ -513,7 +513,7 @@ class AgentCliTest(unittest.TestCase):
                 ],
             }
         )
-        with tempfile.TemporaryDirectory() as tmpdir:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
             db_path = str(Path(tmpdir) / "state.db")
             policy_path = self._write_policy(
                 tmpdir,
@@ -565,7 +565,7 @@ class AgentCliTest(unittest.TestCase):
                 "notes": [],
             }
         )
-        with tempfile.TemporaryDirectory() as tmpdir:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
             db_path = Path(tmpdir) / "state.db"
             with StateStore(str(db_path)) as state_store:
                 role = state_store.create_agent_role(
@@ -611,7 +611,7 @@ class AgentCliTest(unittest.TestCase):
                 ],
             }
         )
-        with tempfile.TemporaryDirectory() as tmpdir:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
             db_path = str(Path(tmpdir) / "state.db")
             policy_path = self._write_policy(
                 tmpdir,
@@ -662,7 +662,7 @@ class AgentCliTest(unittest.TestCase):
                 ],
             }
         )
-        with tempfile.TemporaryDirectory() as tmpdir:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
             db_path = str(Path(tmpdir) / "state.db")
             memory_retire_namespace(
                 db_path,

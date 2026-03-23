@@ -2285,13 +2285,44 @@ def _device_supports_power(device: ConnectedDevice) -> bool:
     return any(token in text for token in ("light", "lamp", "bulb", "tuya", "feit"))
 
 
-def _device_power_ready(device: ConnectedDevice) -> bool:
+def _device_power_ready(device: ConnectedDevice, *, db_path: str | None = None) -> bool:
     if not _device_supports_power(device):
         return False
     meta = device.metadata_json if isinstance(device.metadata_json, dict) else {}
-    return bool(str(meta.get("device_id") or meta.get("dev_id") or "").strip()) and bool(
+    if bool(str(meta.get("device_id") or meta.get("dev_id") or "").strip()) and bool(
         str(meta.get("local_key") or "").strip()
+    ):
+        return True
+    if not db_path:
+        return False
+
+    try:
+        from gismo.core.device_adapters.config import (
+            find_configured_device,
+            load_configured_devices,
+            normalize_platform_name,
+        )
+        _, configured = load_configured_devices(db_path=db_path)
+    except RuntimeError:
+        return False
+
+    entry = find_configured_device(
+        configured,
+        identifiers=(
+            device.id,
+            device.ip,
+            device.hostname or "",
+            str(meta.get("label") or ""),
+            str(meta.get("device_id") or meta.get("dev_id") or ""),
+        ),
     )
+    if entry is None:
+        return False
+
+    platform = normalize_platform_name(entry)
+    if platform and platform not in {"tuya", "feit", "feit electric"}:
+        return False
+    return bool(str(entry.get("device_id") or "").strip()) and bool(str(entry.get("local_key") or "").strip())
 
 
 def _planner_device_context(db_path: str) -> str:
@@ -2302,7 +2333,7 @@ def _planner_device_context(db_path: str) -> str:
     for device in devices[:12]:
         actions = ", ".join(_device_actions(device))
         power_hint = ""
-        if _device_supports_power(device) and not _device_power_ready(device):
+        if _device_supports_power(device) and not _device_power_ready(device, db_path=db_path):
             power_hint = " (power control needs more setup)"
         lines.append(
             f"- {_device_name(device.hostname, device.brand, device.device_type, device.ip)} "
@@ -2311,7 +2342,12 @@ def _planner_device_context(db_path: str) -> str:
     return "Saved devices:\n" + "\n".join(lines)
 
 
-def _serialize_device(device: ConnectedDevice, *, status: str | None = None) -> dict[str, Any]:
+def _serialize_device(
+    device: ConnectedDevice,
+    *,
+    status: str | None = None,
+    db_path: str | None = None,
+) -> dict[str, Any]:
     label = device.hostname or device.metadata_json.get("label") or f"{device.brand} {device.device_type}"
     stream_url = f"/api/devices/{device.id}/stream" if "camera" in device.device_type else None
     return {
@@ -2328,7 +2364,7 @@ def _serialize_device(device: ConnectedDevice, *, status: str | None = None) -> 
         "stream_url": stream_url,
         "actions": _device_actions(device),
         "capabilities": _device_capabilities(device, stream_url=stream_url),
-        "needs_setup": _device_supports_power(device) and not _device_power_ready(device),
+        "needs_setup": _device_supports_power(device) and not _device_power_ready(device, db_path=db_path),
         "created_at": _dt(device.created_at),
         "updated_at": _dt(device.updated_at),
         "metadata": device.metadata_json,
@@ -2577,7 +2613,7 @@ def list_devices(db_path: str) -> list[dict[str, Any]]:
     devices = _list_device_models(db_path)
     if not can_probe:
         return [
-            _serialize_device(device, status="offline")
+            _serialize_device(device, status="offline", db_path=db_path)
             for device in devices
         ]
     execution = execute_device_runtime_action(
@@ -2597,6 +2633,7 @@ def list_devices(db_path: str) -> list[dict[str, Any]]:
         _serialize_device(
             device,
             status=statuses.get(device.id, "offline"),
+            db_path=db_path,
         )
         for device in devices
     ]
@@ -2668,7 +2705,7 @@ def add_device(
     except PermissionError:
         can_probe = False
     if not can_probe:
-        return _serialize_device(stored, status="offline")
+        return _serialize_device(stored, status="offline", db_path=db_path)
     execution = execute_device_runtime_action(
         component="web_device_discovery",
         action="device_status",
@@ -2681,7 +2718,7 @@ def add_device(
     status = "offline"
     if runtime_devices and isinstance(runtime_devices[0], dict):
         status = str(runtime_devices[0].get("status") or "offline")
-    return _serialize_device(stored, status=status)
+    return _serialize_device(stored, status=status, db_path=db_path)
 
 
 def remove_device(db_path: str, device_id: str) -> dict[str, Any]:

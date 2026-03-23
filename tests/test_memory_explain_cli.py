@@ -34,7 +34,11 @@ class MemoryExplainCliTest(unittest.TestCase):
         self.policy_path = self.repo_root / "policy" / "dev-safe.json"
 
     def tearDown(self) -> None:
-        self.temp_dir.cleanup()
+        gc.collect()
+        try:
+            self.temp_dir.cleanup()
+        except OSError:
+            pass  # Windows: SQLite handles may still be finalising
 
     def _run_ask(self, *args: str) -> None:
         response = json.dumps(

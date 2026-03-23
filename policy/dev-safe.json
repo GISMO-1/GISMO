@@ -7,7 +7,10 @@
     "run_shell",
     "memory.put",
     "memory.delete",
-    "memory.read"
+    "memory.read",
+    "service.install",
+    "service.uninstall",
+    "device_control"
   ],
   "fs": { "base_dir": "." },
   "memory": {

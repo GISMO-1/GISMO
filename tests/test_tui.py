@@ -16,7 +16,7 @@ def _make_db(tmp: str) -> str:
             run.id,
             title="Echo hello",
             description="desc",
-            input_json={"cmd": "echo hello"},
+            input_json={"tool": "echo", "payload": {"cmd": "echo hello"}},
         )
         task.status = TaskStatus.SUCCEEDED
         store.update_task(task)

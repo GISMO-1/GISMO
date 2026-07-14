@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no">
 <meta name="theme-color" content="#07110f">
 <title>CrowdBeacon</title>
-<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="style.css?v=3">
 </head>
 <body>
 <video id="camera" autoplay muted playsinline></video><canvas id="scene"></canvas><div class="shade"></div>
@@ -16,9 +16,25 @@
   <p class="lead">Create a room, send the link, and point your phone toward your people when a map only gets you close.</p>
   <div class="field"><label>YOUR DISPLAY NAME</label><input id="nameInput" maxlength="18" placeholder="Mike"></div>
   <div class="row"><button class="primary" id="createBtn">CREATE GROUP</button><button class="secondary" id="demoBtn">TRY DEMO</button></div>
+  <div class="pricebar"><strong>$1.99 LIFETIME</strong><span>PAID IN SOL · FRIENDS JOIN FREE</span></div>
   <div class="field"><label>JOIN WITH ROOM CODE</label><div class="row"><input id="roomInput" maxlength="8" placeholder="ABC123"><button class="secondary" id="joinBtn">JOIN</button></div></div>
   <div id="landingError" class="error"></div>
   <div class="tiny">No account. No saved history. The creator’s phone acts as the temporary room host and must stay open.</div>
+ </div>
+</section>
+<section id="paywall" aria-modal="true" role="dialog">
+ <div class="paycard">
+  <button id="payClose" aria-label="Close">×</button>
+  <div class="eyebrow">CROWDBEACON LIFETIME PASS</div>
+  <h2>PAY ONCE.<br>FIND YOUR PEOPLE FOREVER.</h2>
+  <p>Create unlimited temporary groups. Anyone you invite can join free.</p>
+  <div class="payprice"><div><strong>$1.99</strong><span>ONE-TIME</span></div><div><strong id="solQuote">FETCHING LIVE SOL PRICE…</strong><span>CONVERTED AT CHECKOUT</span></div></div>
+  <div id="walletLine" class="walletline">WALLET NOT CONNECTED</div>
+  <button id="payMain" class="paymain">OPEN IN PHANTOM</button>
+  <button id="restoreBtn" class="restore">RESTORE PURCHASE</button>
+  <div id="payStatus" class="paystatus">Payments go directly to the CrowdBeacon creator wallet.</div>
+  <div id="receiptBox" class="receipt hidden"><span>SOLANA RECEIPT</span><code></code><button id="copyReceipt">COPY</button></div>
+  <div class="payfine">Demo and joining are free. The pass unlocks group creation for the connected Phantom wallet. Network fees are shown by Phantom before approval.</div>
  </div>
 </section>
 <main id="app" class="hidden">
@@ -42,9 +58,11 @@
 </section>
 <div id="pulseOverlay"><div class="pulseCard" id="pulseText">MIKE IS PINGING YOU</div></div><div id="notice"></div>
 <script src="https://unpkg.com/peerjs@1.5.5/dist/peerjs.min.js"></script>
-<script src="app1.js"></script>
-<script src="app2.js"></script>
-<script src="app3.js"></script>
-<script src="app4.js"></script>
+<script src="https://unpkg.com/@solana/web3.js@1.98.4/lib/index.iife.min.js"></script>
+<script src="app1.js?v=3"></script>
+<script src="app2.js?v=3"></script>
+<script src="app3.js?v=3"></script>
+<script src="pay.js?v=3"></script>
+<script src="app4.js?v=3"></script>
 </body>
 </html>

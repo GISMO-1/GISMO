@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no">
+<meta name="theme-color" content="#07110f">
+<title>CrowdBeacon</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<video id="camera" autoplay muted playsinline></video><canvas id="scene"></canvas><div class="shade"></div>
+<section id="landing">
+ <div class="card">
+  <div class="eyebrow">TEMPORARY LIVE LOCATION · CAMERA COMPASS</div>
+  <h1>CROWD<span>BEACON</span></h1>
+  <p class="lead">Create a room, send the link, and point your phone toward your people when a map only gets you close.</p>
+  <div class="field"><label>YOUR DISPLAY NAME</label><input id="nameInput" maxlength="18" placeholder="Mike"></div>
+  <div class="row"><button class="primary" id="createBtn">CREATE GROUP</button><button class="secondary" id="demoBtn">TRY DEMO</button></div>
+  <div class="field"><label>JOIN WITH ROOM CODE</label><div class="row"><input id="roomInput" maxlength="8" placeholder="ABC123"><button class="secondary" id="joinBtn">JOIN</button></div></div>
+  <div id="landingError" class="error"></div>
+  <div class="tiny">No account. No saved history. The creator’s phone acts as the temporary room host and must stay open.</div>
+ </div>
+</section>
+<main id="app" class="hidden">
+ <div class="topbar">
+  <div class="brand glass"><strong>CROWD​BEACON</strong><span id="roomReadout">ROOM —</span></div>
+  <div style="display:flex;gap:8px;align-items:center"><div class="status glass" id="netStatus">CONNECTING</div><button class="iconbtn glass" id="menuBtn">•••</button></div>
+ </div>
+ <div id="targetPanel"><div class="target glass hidden" id="targetCard"><div class="name" id="targetName">NO TARGET</div><div class="meta" id="targetMeta">—</div></div></div>
+ <div class="bottombar" style="flex-direction:column;align-items:stretch">
+  <div class="memberstrip" id="members"></div>
+  <div style="display:flex;justify-content:space-between;align-items:end;gap:8px">
+   <div class="controls glass"><button class="action pulse" id="pulseBtn">PULSE</button><button class="action wide" id="dropBtn">DROP SPOT</button><button class="action" id="viewBtn">RADAR</button></div>
+   <button class="iconbtn glass" id="shareBtn">↗</button>
+  </div>
+ </div>
+</main>
+<section id="sheet" class="glass">
+ <h2>Room controls</h2><div class="codebox"><input id="shareCode" readonly><button class="action" id="copyBtn">COPY</button></div>
+ <div class="sheetgrid"><button id="sheetShare">SHARE INVITE</button><button id="cameraBtn">CAMERA ON</button><button id="renameBtn">RENAME</button><button id="leaveBtn">LEAVE ROOM</button></div>
+ <div class="privacy">Live coordinates pass through a direct peer connection after the room handshake. Closing the host ends the room.</div>
+</section>
+<div id="pulseOverlay"><div class="pulseCard" id="pulseText">MIKE IS PINGING YOU</div></div><div id="notice"></div>
+<script src="https://unpkg.com/peerjs@1.5.5/dist/peerjs.min.js"></script>
+<script src="app1.js"></script>
+<script src="app2.js"></script>
+<script src="app3.js"></script>
+<script src="app4.js"></script>
+</body>
+</html>

@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no" />
+  <meta name="theme-color" content="#030509" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <title>Reality Breach AR</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <video id="camera" autoplay muted playsinline></video>
+  <canvas id="fx"></canvas>
+  <div id="veil"></div>
+  <div id="hud">
+    <div class="top">
+      <div class="brand"><strong>REALITY BREACH</strong><span id="readout">NO SIGNAL</span></div>
+      <div class="status" id="status">STANDBY</div>
+    </div>
+    <div class="bottom">
+      <div id="tip">Tap the world to place a breach. Move the phone to see it hold direction. Pinch to resize.</div>
+      <div class="controls">
+        <button id="mode" aria-label="Change anomaly mode">BREACH</button>
+        <button id="shutter" aria-label="Capture image"></button>
+        <button id="clear" aria-label="Clear anomalies">×</button>
+      </div>
+    </div>
+  </div>
+  <div id="gate">
+    <div class="gate-card">
+      <div class="kicker">CAMERA-SPACE EXPERIMENT 01</div>
+      <h1>BREAK<br>REALITY.</h1>
+      <p>Point your rear camera into a room, tap a surface, then physically move the phone. The entities are procedural and rendered live.</p>
+      <button id="start">OPEN THE CAMERA</button>
+      <div id="error"></div>
+    </div>
+  </div>
+  <div id="flash"></div>
+  <div id="toast"></div>
+
+<script src="app.js"></script>
+</body>
+</html>

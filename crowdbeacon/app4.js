@@ -1,0 +1,4 @@
+'use strict';
+requestAnimationFrame(draw);
+el.create.onclick=createRoom;el.join.onclick=()=>joinRoom(el.room.value);el.demo.onclick=demo;el.menu.onclick=()=>document.body.classList.toggle('sheetopen');el.share.onclick=shareInvite;el.sheetShare.onclick=shareInvite;el.copy.onclick=()=>navigator.clipboard?.writeText(roomCode).then(()=>notify('ROOM CODE COPIED'));el.drop.onclick=dropSpot;el.pulse.onclick=pulseTarget;el.rename.onclick=rename;el.leave.onclick=leave;el.cameraBtn.onclick=()=>cameraOn?stopCamera():startCamera();el.view.onclick=()=>{radarOnly=!radarOnly;el.view.textContent=radarOnly?'AR':'RADAR'};
+el.name.value=localStorage.cbName||'';const incoming=new URLSearchParams(location.search).get('room');if(incoming){el.room.value=incoming.toUpperCase();setTimeout(()=>el.room.focus(),200)}

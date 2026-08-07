@@ -1,6 +1,7 @@
 """Central readiness/status helpers for operator-facing GISMO surfaces."""
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone
 from typing import Any
 
@@ -9,6 +10,8 @@ from gismo.core.models import PlanStatus, QueueStatus
 from gismo.core.state import StateStore
 from gismo.llm.model_policy import get_model_health, load_model_policy, peek_model_discovery
 from gismo.onboarding import get_operator_name
+
+LOGGER = logging.getLogger(__name__)
 
 _AUTOSTART_EVENT_TYPES = (
     "daemon_autostart_failed",
@@ -32,29 +35,85 @@ def build_runtime_status(
     model_probe: str = "cached",
 ) -> dict[str, Any]:
     now = datetime.now(timezone.utc)
-    with StateStore(db_path) as store:
-        queue_stats = store.queue_stats()
-        pending_plans = list(store.list_pending_plans(status=PlanStatus.PENDING, limit=100))
-        running_items = list(store.list_queue_items_by_status(QueueStatus.IN_PROGRESS))
-        recent_events = store.list_events(limit=80)
-    daemon = get_background_worker_status(db_path).to_dict()
+    state_error = False
+    try:
+        with StateStore(db_path) as store:
+            queue_stats = store.queue_stats()
+            pending_plans = list(store.list_pending_plans(status=PlanStatus.PENDING, limit=100))
+            running_items = list(store.list_queue_items_by_status(QueueStatus.IN_PROGRESS))
+            recent_events = store.list_events(limit=80)
+    except Exception:  # noqa: BLE001 - readiness must report state failure, not claim success
+        LOGGER.exception("readiness_state_query_failed")
+        state_error = True
+        queue_stats = {"total": 0, "by_status": {}}
+        pending_plans = []
+        running_items = []
+        recent_events = []
+    database = {
+        "ready": not state_error,
+        "state": "ready" if not state_error else "blocked",
+        "detail": "Ready" if not state_error else "State is unavailable",
+    }
+    try:
+        daemon = get_background_worker_status(db_path).to_dict()
+        daemon["available"] = bool(daemon)
+    except Exception:  # noqa: BLE001 - surface the worker-status failure deterministically
+        LOGGER.exception("readiness_worker_status_failed")
+        daemon = {
+            "running": False,
+            "stale": False,
+            "paused": False,
+            "pid": None,
+            "started_at": None,
+            "last_seen": None,
+            "age_seconds": None,
+            "available": False,
+        }
     daemon["age_secs"] = daemon.get("age_seconds")
     daemon["state"] = _daemon_state_label(daemon)
     starting_is_stale = _is_starting_stale(daemon, now)
     if starting_is_stale and not _recent_stuck_event(recent_events, now):
         _emit_stuck_starting_event(db_path, daemon=daemon)
-    onboarding = _build_onboarding_status(db_path)
+    try:
+        onboarding = _build_onboarding_status(db_path)
+    except Exception:  # noqa: BLE001 - setup state is part of readiness reporting
+        LOGGER.exception("readiness_onboarding_status_failed")
+        onboarding = {
+            "completed": False,
+            "needs_onboarding": False,
+            "operator_name": None,
+            "state": "blocked",
+            "detail": "Setup state is unavailable",
+        }
     startup = _build_startup_status(recent_events, now=now)
     queue = _build_queue_status(queue_stats, running_items, now=now)
-    models = _build_model_status(db_path, probe=model_probe)
+    try:
+        models = _build_model_status(db_path, probe=model_probe)
+    except Exception:  # noqa: BLE001 - model configuration failure is not readiness
+        LOGGER.exception("readiness_model_status_failed")
+        models = {
+            "state": "degraded",
+            "detail": "Model status is unavailable",
+            "required": False,
+            "blocking": False,
+            "health": None,
+        }
+    if state_error:
+        approval_state = "unavailable"
+        approval_detail = "Approval state is unavailable."
+    elif pending_plans:
+        approval_state = "needs_approval"
+        approval_detail = (
+            f"{len(pending_plans)} request"
+            f"{'s' if len(pending_plans) != 1 else ''} need approval."
+        )
+    else:
+        approval_state = "ready"
+        approval_detail = "No approvals are waiting."
     approvals = {
         "pending_count": len(pending_plans),
-        "state": "needs_approval" if pending_plans else "ready",
-        "detail": (
-            f"{len(pending_plans)} request{'s' if len(pending_plans) != 1 else ''} need approval."
-            if pending_plans
-            else "No approvals are waiting."
-        ),
+        "state": approval_state,
+        "detail": approval_detail,
     }
     gismo = _build_gismo_status(
         daemon=daemon,
@@ -63,14 +122,20 @@ def build_runtime_status(
         onboarding=onboarding,
         models=models,
         startup=startup,
+        database=database,
         starting_is_stale=starting_is_stale,
     )
+    api = {
+        "ready": bool(database["ready"]),
+        "state": "ready" if database["ready"] else "degraded",
+        "detail": "Listening" if database["ready"] else "State access failed",
+    }
     stages = [
         {
             "key": "state",
             "label": "State",
-            "ready": bool(gismo["surface_ready"]),
-            "detail": gismo["detail"],
+            "ready": bool(database["ready"]),
+            "detail": database["detail"],
         },
         {
             "key": "worker",
@@ -87,21 +152,21 @@ def build_runtime_status(
         {
             "key": "model",
             "label": "Model",
-            "ready": models["state"] == "ready",
+            "ready": not bool(models.get("blocking")),
             "detail": models["detail"],
         },
         {
             "key": "api",
             "label": "API",
-            "ready": True,
-            "detail": "Listening",
+            "ready": bool(api["ready"]),
+            "detail": api["detail"],
         },
     ]
     return {
         "daemon": daemon,
         "queue": queue,
-        "database": {"ready": True, "state": "ready"},
-        "api": {"ready": True, "state": "ready"},
+        "database": database,
+        "api": api,
         "startup": startup,
         "onboarding": onboarding,
         "approvals": approvals,
@@ -118,7 +183,7 @@ def build_runtime_status(
 
 
 def build_readiness_payload(db_path: str) -> dict[str, Any]:
-    return dict(build_runtime_status(db_path, model_probe="full")["readiness"])
+    return dict(build_runtime_status(db_path, model_probe="cached")["readiness"])
 
 
 def _build_onboarding_status(db_path: str) -> dict[str, Any]:
@@ -143,6 +208,7 @@ def _build_startup_status(events: list[Any], *, now: datetime) -> dict[str, Any]
             "state": "unknown",
             "detail": "No recent startup event.",
             "recent_failure": False,
+            "recent_start": False,
             "event_type": None,
             "timestamp": None,
             "payload": {},
@@ -153,6 +219,10 @@ def _build_startup_status(events: list[Any], *, now: datetime) -> dict[str, Any]
     age_seconds = max(0, int((now - timestamp).total_seconds()))
     recent_failure = (
         selected.event_type == "daemon_autostart_failed"
+        and age_seconds <= _AUTOSTART_FAILURE_WINDOW_SECONDS
+    )
+    recent_start = (
+        selected.event_type == "daemon_autostart_started"
         and age_seconds <= _AUTOSTART_FAILURE_WINDOW_SECONDS
     )
     detail = selected.message
@@ -170,6 +240,7 @@ def _build_startup_status(events: list[Any], *, now: datetime) -> dict[str, Any]
         ),
         "detail": detail,
         "recent_failure": recent_failure,
+        "recent_start": recent_start,
         "event_type": selected.event_type,
         "timestamp": timestamp.isoformat(),
         "payload": selected.json_payload or {},
@@ -208,16 +279,21 @@ def _build_model_status(db_path: str, *, probe: str) -> dict[str, Any]:
     if probe == "cached":
         cached = peek_model_discovery()
         if cached is None:
+            policy = load_model_policy(db_path)
             return {
                 "state": "unknown",
                 "detail": "Checking availability",
-                "health": None,
+                "required": bool(policy.primary_assistant_model),
+                "blocking": False,
+                "health": {"policy": policy.to_dict(), "probe": "cached"},
             }
         return _build_cached_model_status(db_path, cached)
     health = get_model_health(db_path)
     issues = list(health.get("issues") or [])
     degraded = bool((health.get("degraded_mode") or {}).get("active"))
     ollama_available = bool(health.get("ollama_available"))
+    policy = dict(health.get("policy") or {})
+    required = bool(str(policy.get("primary_assistant_model") or "").strip())
     if degraded:
         state = "degraded"
         detail = str((health.get("degraded_mode") or {}).get("reason") or "Reduced mode")
@@ -233,6 +309,8 @@ def _build_model_status(db_path: str, *, probe: str) -> dict[str, Any]:
     return {
         "state": state,
         "detail": detail,
+        "required": required,
+        "blocking": bool(required and (degraded or not ollama_available)),
         "health": health,
     }
 
@@ -240,12 +318,16 @@ def _build_model_status(db_path: str, *, probe: str) -> dict[str, Any]:
 def _build_cached_model_status(db_path: str, discovery: dict[str, Any]) -> dict[str, Any]:
     policy = load_model_policy(db_path)
     installed = set(discovery.get("installed_models") or [])
+    required = bool(policy.primary_assistant_model)
+    blocking = False
     if not discovery.get("ollama_available"):
         state = "offline"
         detail = "Model service unavailable"
+        blocking = required
     elif policy.primary_assistant_model not in installed:
         state = "degraded"
         detail = "Main model is not installed"
+        blocking = required
     elif policy.planner_model not in installed:
         state = "degraded"
         detail = "Planner model is not installed"
@@ -258,6 +340,8 @@ def _build_cached_model_status(db_path: str, discovery: dict[str, Any]) -> dict[
     return {
         "state": state,
         "detail": detail,
+        "required": required,
+        "blocking": blocking,
         "health": {
             "installed_models": list(discovery.get("installed_models") or []),
             "loaded_models": list(discovery.get("loaded_models") or []),
@@ -276,14 +360,35 @@ def _build_gismo_status(
     onboarding: dict[str, Any],
     models: dict[str, Any],
     startup: dict[str, Any],
+    database: dict[str, Any],
     starting_is_stale: bool = False,
 ) -> dict[str, Any]:
+    daemon_available = bool(
+        daemon.get(
+            "available",
+            all(key in daemon for key in ("running", "stale", "paused")),
+        )
+    )
+    worker_ready = bool(
+        daemon_available
+        and daemon.get("running")
+        and not daemon.get("stale")
+    )
     state = "ready"
     detail = "Ready."
-    if not daemon["running"]:
+    if not database.get("ready"):
+        state = "blocked"
+        detail = "Local state is unavailable."
+    elif not daemon_available:
+        state = "offline"
+        detail = "Background service status is unavailable."
+    elif not worker_ready:
         if startup["recent_failure"]:
             state = "blocked"
             detail = "Background service could not start."
+        elif daemon.get("stale") and daemon.get("running"):
+            state = "degraded"
+            detail = "Background service is not responding."
         elif daemon["last_seen"]:
             if starting_is_stale:
                 state = "degraded"
@@ -291,6 +396,9 @@ def _build_gismo_status(
             else:
                 state = "starting"
                 detail = "Background service is reconnecting."
+        elif startup.get("recent_start"):
+            state = "starting"
+            detail = "Background service is starting."
         else:
             state = "offline"
             detail = "Background service is offline."
@@ -314,6 +422,11 @@ def _build_gismo_status(
     elif models["state"] not in {"ready", "unknown"}:
         state = "degraded"
         detail = models["detail"]
+    surface_ready = bool(
+        database.get("ready")
+        and worker_ready
+        and not models.get("blocking", False)
+    )
     summary = _build_summary(
         state=state,
         detail=detail,
@@ -321,12 +434,13 @@ def _build_gismo_status(
         daemon=daemon,
         approvals=approvals,
         onboarding=onboarding,
+        database=database,
     )
     return {
         "state": state,
         "label": _state_label(state),
         "ready": state == "ready",
-        "surface_ready": state != "starting",
+        "surface_ready": surface_ready,
         "working": queue["running"] > 0,
         "paused": bool(daemon["paused"]),
         "approval_needed": approvals["pending_count"] > 0,
@@ -406,6 +520,7 @@ def _build_summary(
     daemon: dict[str, Any],
     approvals: dict[str, Any],
     onboarding: dict[str, Any],
+    database: dict[str, Any] | None = None,
 ) -> str:
     if state == "ready":
         if queue["running"] > 0:
@@ -413,6 +528,8 @@ def _build_summary(
         return "GISMO is ready."
     if state == "approval_needed":
         return approvals["detail"]
+    if database is not None and not database.get("ready"):
+        return detail
     if state == "blocked" and onboarding["needs_onboarding"]:
         return "Finish setup to continue."
     if state == "blocked" and daemon["paused"]:
@@ -425,6 +542,14 @@ def _build_summary(
 
 
 def _worker_detail(daemon: dict[str, Any], startup: dict[str, Any]) -> str:
+    daemon_available = bool(
+        daemon.get(
+            "available",
+            all(key in daemon for key in ("running", "stale", "paused")),
+        )
+    )
+    if not daemon_available:
+        return "Status unavailable"
     if daemon["running"] and not daemon["stale"]:
         if daemon["paused"]:
             return "Paused"

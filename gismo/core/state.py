@@ -18,6 +18,7 @@ from gismo.core.models import (
     CalendarEvent,
     DaemonHeartbeat,
     ConnectedDevice,
+    ChatExchange,
     Event,
     FailureType,
     PendingPlan,
@@ -32,6 +33,7 @@ from gismo.core.models import (
     ToolReceipt,
     ToolReceiptStatus,
 )
+from gismo.core.paths import normalize_database_path
 from gismo.core.capabilities import (
     DEFAULT_CAPABILITY_TTL_SECONDS,
     build_tool_capability,
@@ -134,8 +136,10 @@ class QuarantineRecord:
 
 
 class StateStore:
+    STATE_SCHEMA_VERSION = 1
+
     def __init__(self, db_path: str) -> None:
-        self.db_path = db_path
+        self.db_path = normalize_database_path(db_path)
         self._open_connections: set[sqlite3.Connection] = set()
         self._init_db()
 
@@ -369,6 +373,32 @@ class StateStore:
                         event_type TEXT NOT NULL,
                         message TEXT NOT NULL,
                         json_payload TEXT
+                    )
+                    """
+                )
+                cursor.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS chat_exchanges (
+                        id TEXT PRIMARY KEY,
+                        created_at TEXT NOT NULL,
+                        user_text TEXT NOT NULL,
+                        assistant_text TEXT NOT NULL
+                    )
+                    """
+                )
+                cursor.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_chat_exchanges_created_at
+                    ON chat_exchanges (created_at)
+                    """
+                )
+                cursor.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS runtime_metadata (
+                        id INTEGER PRIMARY KEY CHECK (id = 1),
+                        instance_id TEXT NOT NULL,
+                        schema_version INTEGER NOT NULL,
+                        created_at TEXT NOT NULL
                     )
                     """
                 )
@@ -619,7 +649,73 @@ class StateStore:
                     """,
                     (_utc_now().isoformat(),),
                 )
+                cursor.execute(
+                    """
+                    INSERT OR IGNORE INTO runtime_metadata (
+                        id, instance_id, schema_version, created_at
+                    ) VALUES (1, ?, ?, ?)
+                    """,
+                    (
+                        str(uuid4()),
+                        self.STATE_SCHEMA_VERSION,
+                        _utc_now().isoformat(),
+                    ),
+                )
             connection.commit()
+
+    def get_runtime_identity(self) -> dict[str, Any]:
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT instance_id, schema_version FROM runtime_metadata WHERE id = 1"
+            ).fetchone()
+        if row is None:
+            raise RuntimeError("Database runtime identity is unavailable.")
+        return {
+            "instance_id": str(row["instance_id"]),
+            "schema_version": int(row["schema_version"]),
+        }
+
+    def append_chat_exchange(self, user_text: str, assistant_text: str) -> ChatExchange:
+        exchange = ChatExchange(user_text=user_text, assistant_text=assistant_text)
+        with self._connection() as connection:
+            connection.execute(
+                """
+                INSERT INTO chat_exchanges (
+                    id, created_at, user_text, assistant_text
+                ) VALUES (?, ?, ?, ?)
+                """,
+                (
+                    exchange.id,
+                    exchange.created_at.isoformat(),
+                    exchange.user_text,
+                    exchange.assistant_text,
+                ),
+            )
+            connection.commit()
+        return exchange
+
+    def list_chat_exchanges(self, limit: int = 100) -> list[ChatExchange]:
+        if limit <= 0:
+            raise ValueError("limit must be > 0")
+        with self._connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT id, created_at, user_text, assistant_text
+                FROM chat_exchanges
+                ORDER BY created_at DESC, id DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+        return [
+            ChatExchange(
+                id=str(row["id"]),
+                created_at=datetime.fromisoformat(str(row["created_at"])),
+                user_text=str(row["user_text"]),
+                assistant_text=str(row["assistant_text"]),
+            )
+            for row in rows
+        ]
 
     def _ensure_columns(self, connection: sqlite3.Connection) -> None:
         self._ensure_column(

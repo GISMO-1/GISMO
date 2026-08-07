@@ -4,6 +4,13 @@ from __future__ import annotations
 from pathlib import Path
 
 
+def normalize_database_path(db_path: str | Path | None) -> str:
+    """Return an absolute database path or fail closed when scope is missing."""
+    if db_path is None or not str(db_path).strip():
+        raise ValueError("An explicit database path is required.")
+    return str(Path(db_path).expanduser().resolve(strict=False))
+
+
 def resolve_exports_dir(db_path: str | Path) -> Path:
     base_dir = Path(db_path).resolve().parent.parent
     exports_dir = base_dir / "exports"

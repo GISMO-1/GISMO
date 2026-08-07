@@ -8,6 +8,7 @@ from uuid import uuid4
 
 from gismo.core import background_worker
 from gismo.core.background_worker import BackgroundWorkerStatus
+from gismo.core.paths import normalize_database_path
 from gismo.core.state import StateStore
 from gismo.desktop import app as desktop_app
 from gismo.web import server as web_server
@@ -60,6 +61,7 @@ class TestBackgroundWorker(unittest.TestCase):
         self.assertTrue(started)
         argv = popen_mock.call_args.args[0]
         self.assertEqual(argv[1:4], ["-m", "gismo.cli.main", "daemon"])
+        self.assertEqual(argv[argv.index("--db") + 1], normalize_database_path("tmp/state.db"))
 
     def test_worker_is_healthy_rejects_stale_dead_pid(self) -> None:
         heartbeat = SimpleNamespace(
@@ -126,7 +128,7 @@ class TestLaunchHooks(unittest.TestCase):
         ):
             web_server.run("tmp/state.db", open_browser=False)
 
-        ensure_mock.assert_called_once_with("tmp/state.db", source="web_server")
+        ensure_mock.assert_called_once_with(normalize_database_path("tmp/state.db"), source="web_server")
         fake_server.server_close.assert_called_once()
 
     def test_desktop_launch_ensures_background_worker(self) -> None:

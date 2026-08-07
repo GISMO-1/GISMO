@@ -232,6 +232,14 @@ class Event:
 
 
 @dataclass
+class ChatExchange:
+    user_text: str
+    assistant_text: str
+    id: str = field(default_factory=lambda: str(uuid4()))
+    created_at: datetime = field(default_factory=_utc_now)
+
+
+@dataclass
 class ConnectedDevice:
     ip: str
     device_type: str

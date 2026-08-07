@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from gismo.core.state import StateStore
+from gismo.core.paths import normalize_database_path
 
 STALE_SECONDS = 30
 LOGGER = logging.getLogger(__name__)
@@ -134,7 +135,7 @@ def ensure_background_worker_status(
     source: str = "system",
 ) -> BackgroundWorkerStartResult:
     """Start the GISMO worker if no healthy worker is already running."""
-    db_file = Path(db_path)
+    db_file = Path(normalize_database_path(db_path))
     db_file.parent.mkdir(parents=True, exist_ok=True)
     if _worker_is_healthy(str(db_file)):
         status = get_background_worker_status(str(db_file))

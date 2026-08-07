@@ -1,7 +1,7 @@
 """GISMO web dashboard — mission control layout."""
 from __future__ import annotations
 
-HTML = """\
+HTML = r"""
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -76,6 +76,8 @@ body{background:var(--bg);color:var(--text);font-family:var(--font);font-size:13
 
 /* DEVICES */
 #dev-scroll{flex:1;overflow-y:auto;padding:8px;min-height:0;display:flex;flex-direction:column;gap:8px}
+.inv-group{display:flex;flex-direction:column;gap:8px;margin-bottom:10px}
+.inv-label{font-size:10px;color:var(--dim);letter-spacing:1px;text-transform:uppercase;padding:2px 4px}
 .dev-card{padding:10px;border:1px solid var(--border);border-radius:10px;background:rgba(255,255,255,.02)}
 .dev-head{display:flex;gap:10px;align-items:flex-start}
 .dev-thumb{width:84px;height:52px;border-radius:8px;overflow:hidden;background:var(--bg);border:1px solid var(--border);flex-shrink:0;cursor:pointer}
@@ -96,6 +98,17 @@ body{background:var(--bg);color:var(--text);font-family:var(--font);font-size:13
 .mini-btn[disabled]{opacity:.45;cursor:default;border-color:var(--border);color:var(--dim)}
 #add-dev-btn{margin:6px;padding:8px;background:transparent;border:1px dashed var(--border);color:var(--dim);border-radius:7px;cursor:pointer;font-family:var(--font);font-size:11px;text-align:center;transition:all .2s;flex-shrink:0}
 #add-dev-btn:hover{border-color:var(--accent);color:var(--accent)}
+.inv-empty{font-size:11px;color:var(--dim);padding:6px 4px 2px}
+
+/* STATUS */
+.status-sec{padding:12px 14px;border-top:1px solid var(--border);flex-shrink:0}
+.status-list{display:flex;flex-direction:column;gap:8px}
+.status-row{display:flex;align-items:center;justify-content:space-between;gap:12px;font-size:11px}
+.status-key{color:var(--dim)}
+.status-state{font-size:10px;letter-spacing:1px;text-transform:uppercase}
+.tone-good{color:var(--green)}
+.tone-warn{color:var(--yellow)}
+.tone-bad{color:var(--red)}
 
 /* HEALTH */
 .health-sec{padding:12px 14px;border-top:1px solid var(--border);flex-shrink:0}
@@ -231,6 +244,17 @@ body{background:var(--bg);color:var(--text);font-family:var(--font);font-size:13
 .viewer-frame{width:100%;height:min(70vh,520px);border:1px solid var(--border);border-radius:12px;overflow:hidden;background:var(--bg)}
 .viewer-frame img{width:100%;height:100%;object-fit:contain;display:block}
 .dev-cap{font-size:10px;color:var(--dim);margin-top:6px;line-height:1.5}
+.ctl-group{display:flex;flex-direction:column;gap:8px}
+.ctl-row{display:flex;gap:8px;flex-wrap:wrap}
+.ctl-chip{padding:8px 10px;border-radius:8px;border:1px solid var(--border);background:var(--bg);color:var(--text);font-family:var(--font);font-size:11px;cursor:pointer}
+.ctl-chip:hover{border-color:var(--accent);color:var(--accent)}
+.ctl-chip.color{min-width:60px;text-align:center}
+.ctl-chip.red{background:rgba(248,113,113,.12);color:#fca5a5}
+.ctl-chip.blue{background:rgba(96,165,250,.12);color:#93c5fd}
+.ctl-chip.green{background:rgba(74,222,128,.12);color:#86efac}
+.ctl-chip.purple{background:rgba(168,85,247,.14);color:#d8b4fe}
+.ctl-note{font-size:11px;color:var(--dim);line-height:1.5}
+.ctl-result{padding:10px 12px;border:1px solid var(--border);border-radius:10px;background:var(--bg);font-size:11px;line-height:1.5}
 .settings-grid{display:flex;flex-direction:column;gap:12px}
 .field-label{font-size:10px;color:var(--dim);letter-spacing:1px;text-transform:uppercase}
 .field-note{font-size:11px;color:var(--dim)}
@@ -283,9 +307,55 @@ body{background:var(--bg);color:var(--text);font-family:var(--font);font-size:13
 .cal-danger-btn{padding:9px 12px;border-radius:7px;border:1px solid rgba(248,113,113,.25);background:rgba(248,113,113,.08);color:var(--red);font-family:var(--font);font-size:12px;cursor:pointer}
 .cal-danger-btn[disabled]{opacity:.35;cursor:default}
 
+/* LIGHTS */
+#lights-view{flex:1;min-height:0;background:var(--bg)}
+#lights-shell{height:100%;display:grid;grid-template-columns:320px 1fr;gap:18px;padding:18px;min-height:0}
+.lights-list,.lights-detail{background:var(--panel);border:1px solid var(--border);border-radius:16px;min-height:0;display:flex;flex-direction:column;overflow:hidden}
+.lights-list-scroll,.lights-detail-body{flex:1;overflow-y:auto;min-height:0}
+.lights-list-scroll{padding:14px;display:flex;flex-direction:column;gap:10px}
+.lights-detail-body{padding:18px;display:flex;flex-direction:column;gap:16px}
+.light-card{padding:12px;border:1px solid var(--border);border-radius:12px;background:rgba(255,255,255,.02);cursor:pointer;transition:border-color .15s,background .15s}
+.light-card:hover,.light-card.active{border-color:var(--accent);background:rgba(78,205,196,.05)}
+.light-card-head{display:flex;align-items:flex-start;justify-content:space-between;gap:10px}
+.light-card-name{font-size:12px}
+.light-card-meta{font-size:10px;color:var(--dim);margin-top:4px;line-height:1.5}
+.light-card-status{font-size:10px;color:var(--dim);margin-top:8px;line-height:1.5}
+.light-empty{padding:24px;color:var(--dim);font-size:11px;text-align:center}
+.light-head{display:flex;align-items:flex-start;justify-content:space-between;gap:18px}
+.light-title{font-size:20px}
+.light-sub{font-size:11px;color:var(--dim);line-height:1.6;margin-top:6px}
+.light-badges{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
+.light-badge{padding:5px 9px;border-radius:999px;border:1px solid var(--border);font-size:10px;letter-spacing:1px;text-transform:uppercase}
+.light-badge.good{color:var(--green);border-color:rgba(74,222,128,.28);background:rgba(74,222,128,.10)}
+.light-badge.warn{color:var(--yellow);border-color:rgba(251,191,36,.28);background:rgba(251,191,36,.10)}
+.light-badge.bad{color:var(--red);border-color:rgba(248,113,113,.28);background:rgba(248,113,113,.10)}
+.light-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
+.light-stat{padding:12px;border:1px solid var(--border);border-radius:12px;background:var(--bg)}
+.light-stat-key{font-size:10px;color:var(--dim);letter-spacing:1px;text-transform:uppercase}
+.light-stat-val{font-size:12px;line-height:1.5;margin-top:8px}
+.light-section{display:flex;flex-direction:column;gap:10px}
+.light-section-head{display:flex;align-items:center;justify-content:space-between;gap:12px}
+.light-section-note{font-size:11px;color:var(--dim)}
+.light-slider-row{display:flex;align-items:center;gap:10px}
+.light-slider{flex:1;accent-color:var(--accent)}
+.light-slider-val{min-width:42px;text-align:right;font-size:12px}
+.light-presets{display:flex;gap:8px;flex-wrap:wrap}
+.light-color-grid,.light-preset-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px}
+.light-chip{padding:9px 10px;border-radius:10px;border:1px solid var(--border);background:var(--bg);color:var(--text);font-family:var(--font);font-size:11px;cursor:pointer}
+.light-chip:hover{border-color:var(--accent);color:var(--accent)}
+.light-chip.color{display:flex;align-items:center;justify-content:center;gap:8px}
+.light-swatch{width:10px;height:10px;border-radius:50%;display:inline-block}
+.light-note{padding:12px;border:1px solid var(--border);border-radius:12px;background:var(--bg);font-size:11px;line-height:1.6}
+.light-command.good{color:var(--green)}
+.light-command.warn{color:var(--yellow)}
+.light-command.bad{color:var(--red)}
+
 @media (max-width: 1100px){
   #grid{grid-template-columns:220px 1fr 220px}
   .calendar-body{grid-template-columns:1fr}
+  #lights-shell{grid-template-columns:1fr}
+  .light-grid{grid-template-columns:1fr}
+  .light-color-grid,.light-preset-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
 }
 
 /* SCROLLBARS */
@@ -306,6 +376,7 @@ body{background:var(--bg);color:var(--text);font-family:var(--font);font-size:13
   </div>
   <div id="top-tabs">
     <button class="shell-tab active" id="tab-command" onclick="setActiveTab('command')">Command Center</button>
+    <button class="shell-tab" id="tab-lights" onclick="setActiveTab('lights')">Controls</button>
     <button class="shell-tab" id="tab-calendar" onclick="setActiveTab('calendar')">Calendar</button>
   </div>
   <input id="search" type="text" placeholder="Search commands, runs, memory…" oninput="onSearch(this.value)" />
@@ -324,6 +395,7 @@ body{background:var(--bg);color:var(--text);font-family:var(--font);font-size:13
     <button class="menu-btn" onclick="toggleMenu('file', event)">File</button>
     <div class="menu-dd" id="menu-file">
       <button class="menu-item" onclick="setActiveTab('command'); closeMenus();">Command Center</button>
+      <button class="menu-item" onclick="setActiveTab('lights'); closeMenus();">Controls</button>
       <button class="menu-item" onclick="setActiveTab('calendar'); closeMenus();">Calendar</button>
       <div class="menu-sep"></div>
       <button class="menu-item" onclick="refreshAllNow(); closeMenus();">Refresh Now</button>
@@ -340,7 +412,7 @@ body{background:var(--bg);color:var(--text);font-family:var(--font);font-size:13
     <button class="menu-btn" onclick="toggleMenu('devices', event)">Devices</button>
     <div class="menu-dd" id="menu-devices">
       <button class="menu-item" onclick="openAddDev(); closeMenus();">Scan Network</button>
-      <button class="menu-item" onclick="refreshDevices(); closeMenus();">Refresh Device List</button>
+      <button class="menu-item" onclick="refreshDevices(); closeMenus();">Refresh Controls</button>
     </div>
   </div>
   <div class="menu-wrap">
@@ -373,9 +445,19 @@ body{background:var(--bg);color:var(--text);font-family:var(--font);font-size:13
 
   <!-- LEFT: DEVICES + HEALTH -->
   <div class="panel" id="left-panel">
-    <div class="sec-hdr"><div class="sec-ttl">Connected Devices</div></div>
+    <div class="sec-hdr"><div class="sec-ttl">Systems</div></div>
     <div id="dev-scroll"></div>
-    <button id="add-dev-btn" onclick="openAddDev()">+ Add Device</button>
+    <button id="add-dev-btn" onclick="openAddDev()">+ Scan Network</button>
+
+    <div class="status-sec">
+      <div class="sec-ttl" style="margin-bottom:10px">System Status</div>
+      <div class="status-list">
+        <div class="status-row"><span class="status-key">Web UI</span><span class="status-state tone-bad" id="status-web-ui">OFFLINE</span></div>
+        <div class="status-row"><span class="status-key">API</span><span class="status-state tone-bad" id="status-api">OFFLINE</span></div>
+        <div class="status-row"><span class="status-key">Worker</span><span class="status-state tone-bad" id="status-worker">OFFLINE</span></div>
+        <div class="status-row"><span class="status-key">Local System</span><span class="status-state tone-warn" id="status-local">CHECKING</span></div>
+      </div>
+    </div>
 
     <div class="health-sec">
       <div class="sec-ttl" style="margin-bottom:10px">System Health</div>
@@ -446,6 +528,19 @@ body{background:var(--bg);color:var(--text);font-family:var(--font);font-size:13
   </div>
 
 
+</div>
+
+<div id="lights-view" class="app-view hidden">
+  <div id="lights-shell">
+    <div class="lights-list">
+      <div class="sec-hdr"><div class="sec-ttl">Saved Controls</div></div>
+      <div class="lights-list-scroll" id="lights-list"></div>
+    </div>
+    <div class="lights-detail">
+      <div class="sec-hdr"><div class="sec-ttl">Light Detail</div></div>
+      <div class="lights-detail-body" id="lights-detail"></div>
+    </div>
+  </div>
 </div>
 
 <div id="calendar-view" class="app-view hidden">
@@ -583,7 +678,6 @@ body{background:var(--bg);color:var(--text);font-family:var(--font);font-size:13
   </div>
 </div>
 
-
 <!-- CALENDAR EDITOR -->
 <div class="overlay hidden" id="calendar-editor-overlay">
   <div class="modal">
@@ -711,6 +805,9 @@ var ttsEnabled    = true;   // operator can toggle via mic mute concept
 var currentAudio  = null;
 var lastScan      = [];
 var scanController = null;
+var latestActuators = [];
+var activeActuatorRef = null;
+var lightCommandState = {};
 var pendingPlanId = null;
 var pendingPlanActions = null;
 var activeTab = 'command';
@@ -725,11 +822,14 @@ var latestHealth = null;
 var apiReachable = false;
 var openMenuName = null;
 var bootStartedAt = Date.now();
+var activeInstanceId = null;
+var activeStateSchemaVersion = null;
 
 // -- Boot --------------------------------------------------------------------
 async function init() {
   if ($('settings-btn')) $('settings-btn').onclick = function() { openSettings(); };
   if ($('tab-command')) $('tab-command').onclick = function() { setActiveTab('command'); };
+  if ($('tab-lights')) $('tab-lights').onclick = function() { setActiveTab('lights'); };
   if ($('tab-calendar')) $('tab-calendar').onclick = function() { setActiveTab('calendar'); };
   document.addEventListener('click', function(ev) {
     if (!ev.target.closest('#menu-bar')) closeMenus();
@@ -760,10 +860,12 @@ async function init() {
 }
 
 async function waitForBootReady() {
+  var maxWaitMs = 15000;
   while (true) {
     var ready = await get('/api/ready');
     updateBootStages(ready);
-    if (ready && ready.surface_ready && (Date.now() - bootStartedAt) >= 1200) {
+    var elapsed = Date.now() - bootStartedAt;
+    if ((ready && ready.surface_ready && elapsed >= 1200) || elapsed >= maxWaitMs) {
       $('boot-overlay').classList.add('hidden');
       return;
     }
@@ -838,18 +940,28 @@ function showHelp(topic) {
 // -- Daemon status + queue stats ---------------------------------------------
 async function refreshStatus() {
   var data = await get('/api/status');
-  if (!data) {
+  if (!data || !data.instance_id || data.schema_version == null) {
     latestStatus = null;
     apiReachable = false;
     setStatusOffline();
     updateLocalSystemCard();
+    updateSubsystemStatus();
     return;
   }
+  var instanceChanged = activeInstanceId !== null && (
+    activeInstanceId !== data.instance_id
+    || activeStateSchemaVersion !== data.schema_version
+  );
+  activeInstanceId = data.instance_id;
+  activeStateSchemaVersion = data.schema_version;
+  if (instanceChanged) resetInstanceScopedUi();
+  if (latestStatus === null || instanceChanged) await loadServerChatHistory();
   latestStatus = data;
   apiReachable = true;
   updatePill(data.daemon || {}, data.queue || {}, data.gismo || {});
   updateStats(data.queue || {});
   updateLocalSystemCard();
+  updateSubsystemStatus();
 }
 
 function updatePill(d, q, g) {
@@ -909,6 +1021,42 @@ function updateLocalSystemCard() {
   $('local-device-ip').textContent = state.meta;
 }
 
+function setSubsystemStatus(id, text, tone) {
+  var el = $(id);
+  if (!el) return;
+  el.textContent = String(text || '').toUpperCase();
+  el.className = 'status-state tone-' + tone;
+}
+
+function updateSubsystemStatus() {
+  setSubsystemStatus('status-web-ui', apiReachable ? 'Connected' : 'Offline', apiReachable ? 'good' : 'bad');
+
+  var apiState = (apiReachable && latestStatus && latestStatus.api && latestStatus.api.state) || (apiReachable ? 'ready' : 'offline');
+  var apiTone = !apiReachable ? 'bad' : (apiState === 'ready' ? 'good' : 'warn');
+  setSubsystemStatus('status-api', statusStateLabel(apiState), apiTone);
+
+  var workerState = 'offline';
+  var workerTone = 'bad';
+  if (latestStatus && latestStatus.daemon) {
+    if (latestStatus.daemon.paused) {
+      workerState = 'paused';
+      workerTone = 'warn';
+    } else {
+      workerState = latestStatus.daemon.state || 'offline';
+      workerTone = workerState === 'running' ? 'good' : workerState === 'starting' ? 'warn' : 'bad';
+    }
+  }
+  setSubsystemStatus('status-worker', workerState, workerTone);
+
+  var localState = 'checking';
+  var localTone = 'warn';
+  if (latestHealth) {
+    localState = latestHealth.lan_connected ? 'lan ready' : 'offline';
+    localTone = latestHealth.lan_connected ? 'good' : 'bad';
+  }
+  setSubsystemStatus('status-local', localState, localTone);
+}
+
 function updateStats(q) {
   var b = q.by_status || {};
   $('q-queued').textContent  = q.queued  != null ? q.queued  : (b.QUEUED      != null ? b.QUEUED      : 0);
@@ -952,6 +1100,7 @@ async function refreshHealth() {
     ? (latency != null ? 'Reachable (' + latency + ' ms)' : 'Reachable')
     : 'Offline';
   updateLocalSystemCard();
+  updateSubsystemStatus();
 }
 
 function signalGlyph(signal, lanType, connected) {
@@ -970,14 +1119,19 @@ function bar(k, pct, label) {
 
 // -- Shell tabs ---------------------------------------------------------------
 function setActiveTab(name) {
-  activeTab = name === 'calendar' ? 'calendar' : 'command';
+  if (name === 'lights') activeTab = 'lights';
+  else if (name === 'calendar') activeTab = 'calendar';
+  else activeTab = 'command';
   $('tab-command').classList.toggle('active', activeTab === 'command');
+  $('tab-lights').classList.toggle('active', activeTab === 'lights');
   $('tab-calendar').classList.toggle('active', activeTab === 'calendar');
   $('grid').classList.toggle('hidden', activeTab !== 'command');
+  $('lights-view').classList.toggle('hidden', activeTab !== 'lights');
   $('calendar-view').classList.toggle('hidden', activeTab !== 'calendar');
-  $('search').placeholder = activeTab === 'calendar'
-    ? 'Search your day, events, reminders...'
-    : 'Search commands, runs, memory...';
+  if (activeTab === 'calendar') $('search').placeholder = 'Search your day, events, reminders...';
+  else if (activeTab === 'lights') $('search').placeholder = 'Search saved controls, status, receipts...';
+  else $('search').placeholder = 'Search commands, runs, memory...';
+  if (activeTab === 'lights') renderLightsView();
   if (activeTab === 'calendar') refreshCalendar();
 }
 
@@ -1241,13 +1395,39 @@ function calendarTimeLabel(iso) {
 
 // -- Devices -----------------------------------------------------------------
 async function refreshDevices() {
-  var devs = await get('/api/devices/list') || [];
+  var inventory = await Promise.all([get('/api/actuators/list'), get('/api/devices/list')]);
+  latestActuators = Array.isArray(inventory[0]) ? inventory[0] : [];
+  var devs = Array.isArray(inventory[1]) ? inventory[1] : [];
+  if (activeActuatorRef && !findActuator(activeActuatorRef) && latestActuators.length) {
+    activeActuatorRef = latestActuators[0].device_ref;
+  }
+  if (!activeActuatorRef && latestActuators.length) {
+    activeActuatorRef = latestActuators[0].device_ref;
+  }
   var el = $('dev-scroll');
   var localState = computeLocalSystemState();
-  var html = '<div class="dev-card"><div class="dev-head">'
+  var html = '<div class="inv-group"><div class="inv-label">This System</div><div class="dev-card"><div class="dev-head">'
     + '<div class="dev-thumb"><div class="dev-thumb-empty">GISMO</div></div>'
     + '<div class="d-info"><div class="d-title"><div class="d-dot ' + localState.dot + '" id="local-device-dot"></div><div class="d-name">This computer</div></div>'
-    + '<div class="d-type" id="local-device-type">' + esc(localState.type) + '</div><div class="d-ip" id="local-device-ip">' + esc(localState.meta) + '</div></div></div></div>';
+    + '<div class="d-type" id="local-device-type">' + esc(localState.type) + '</div><div class="d-ip" id="local-device-ip">' + esc(localState.meta) + '</div></div></div></div></div>';
+
+  html += '<div class="inv-group"><div class="inv-label">Saved Controls</div>';
+  if (!latestActuators.length) {
+    html += '<div class="inv-empty">No saved controls yet. Add them in .gismo/devices.json next to your active database.</div>';
+  } else {
+    html += '<div class="dev-card"><div class="dev-head">'
+      + '<div class="dev-thumb"><div class="dev-thumb-empty">LGT</div></div>'
+      + '<div class="d-info"><div class="d-title"><div class="d-dot d-on"></div><div class="d-name">' + latestActuators.length + ' saved control' + (latestActuators.length === 1 ? '' : 's') + '</div></div>'
+      + '<div class="d-type">Use the Controls tab for direct actions and status.</div>'
+      + '<div class="d-ip">Configured through .gismo/devices.json</div>'
+      + '<div class="dev-actions"><button class="mini-btn js-open-lights">Open Controls</button></div></div></div></div>';
+  }
+  html += '</div>';
+
+  html += '<div class="inv-group"><div class="inv-label">Connected Systems</div>';
+  if (!devs.length) {
+    html += '<div class="inv-empty">No discovered systems are saved yet.</div>';
+  }
   devs.forEach(function(device) {
     var dot = device.status === 'online' ? 'd-on' : 'd-off';
     var caps = Array.isArray(device.capabilities) ? device.capabilities.join(', ') : '';
@@ -1271,9 +1451,12 @@ async function refreshDevices() {
       + '<button class="mini-btn js-remove-device" data-device-id="' + esc(device.id) + '">Remove</button>'
       + '</div></div></div></div>';
   });
+  html += '</div>';
   el.innerHTML = html;
   updateLocalSystemCard();
   bindDeviceActions();
+  bindSidebarActions();
+  renderLightsView();
 }
 
 function setScanLoading(active) {
@@ -1370,6 +1553,14 @@ function bindDeviceActions() {
   });
 }
 
+function bindSidebarActions() {
+  document.querySelectorAll('#dev-scroll .js-open-lights').forEach(function(el) {
+    el.addEventListener('click', function() {
+      setActiveTab('lights');
+    });
+  });
+}
+
 function bindScanActions() {
   document.querySelectorAll('#scan-results .js-connect-device').forEach(function(el) {
     el.addEventListener('click', function() {
@@ -1387,6 +1578,270 @@ function openViewer(url, title) {
 function closeViewer() {
   $('viewer-overlay').classList.add('hidden');
   $('viewer-image').src = '';
+}
+
+function findActuator(deviceRef) {
+  var wanted = String(deviceRef || '').trim().toLowerCase();
+  return latestActuators.find(function(item) {
+    return String(item.device_ref || '').trim().toLowerCase() === wanted;
+  }) || null;
+}
+
+function actuatorRefKey(deviceRef) {
+  return String(deviceRef || '').trim().toLowerCase();
+}
+
+function displayedActuatorCommand(actuator) {
+  if (!actuator) return null;
+  return lightCommandState[actuatorRefKey(actuator.device_ref)] || actuator.current_command || null;
+}
+
+function actuatorCommandTone(commandState) {
+  var state = String((commandState && commandState.state) || '').toLowerCase();
+  if (state === 'succeeded') return 'good';
+  if (state === 'failed') return 'bad';
+  if (state === 'pending' || state === 'executing') return 'warn';
+  return 'warn';
+}
+
+function reachabilityTone(actuator) {
+  if (!actuator) return 'warn';
+  if (actuator.reachability === 'reachable') return 'good';
+  if (actuator.reachability === 'unreachable') return 'bad';
+  return 'warn';
+}
+
+function stateFreshTone(actuator) {
+  var state = actuator && actuator.current_state ? actuator.current_state : null;
+  if (!state) return 'warn';
+  return state.stale ? 'warn' : 'good';
+}
+
+function setLightCommandState(deviceRef, state, summary) {
+  lightCommandState[actuatorRefKey(deviceRef)] = {
+    state: state,
+    summary: summary,
+    updated_at: new Date().toISOString()
+  };
+  renderLightsView();
+}
+
+function clearLightCommandState(deviceRef) {
+  delete lightCommandState[actuatorRefKey(deviceRef)];
+}
+
+function selectLight(deviceRef) {
+  activeActuatorRef = deviceRef;
+  renderLightsView();
+}
+
+function openActuator(deviceRef) {
+  selectLight(deviceRef);
+  setActiveTab('lights');
+}
+
+function renderLightsView() {
+  if (!$('lights-list') || !$('lights-detail')) return;
+  if (!latestActuators.length) {
+    $('lights-list').innerHTML = '<div class="light-empty">No saved controls yet. Add them in .gismo/devices.json next to your active database.</div>';
+    $('lights-detail').innerHTML = '<div class="light-empty">Select or configure a saved control to use it here.</div>';
+    return;
+  }
+
+  var actuator = findActuator(activeActuatorRef) || latestActuators[0];
+  activeActuatorRef = actuator.device_ref;
+  $('lights-list').innerHTML = latestActuators.map(function(item) {
+    var isActive = actuatorRefKey(item.device_ref) === actuatorRefKey(actuator.device_ref);
+    var command = displayedActuatorCommand(item);
+    var commandSummary = command && command.summary ? command.summary : 'No command running.';
+    var stateSummary = item.current_state && item.current_state.summary
+      ? item.current_state.summary
+      : 'No confirmed device state yet.';
+    return '<button class="light-card js-select-light ' + (isActive ? 'active' : '') + '" data-device-ref="' + esc(item.device_ref) + '">'
+      + '<div class="light-card-head"><div><div class="light-card-name">' + esc(item.name) + '</div>'
+      + '<div class="light-card-meta">' + esc(item.platform + ' / ' + item.device_type + ' / ' + (item.ip || item.device_ref)) + '</div></div>'
+      + '<div class="light-badge ' + reachabilityTone(item) + '">' + esc(item.reachability || 'unknown') + '</div></div>'
+      + '<div class="light-card-status">' + esc(stateSummary) + '</div>'
+      + '<div class="light-card-status">' + esc(commandSummary) + '</div></button>';
+  }).join('');
+
+  $('lights-detail').innerHTML = renderLightDetail(actuator);
+  document.querySelectorAll('#lights-list .js-select-light').forEach(function(el) {
+    el.addEventListener('click', function() {
+      selectLight(el.dataset.deviceRef);
+    });
+  });
+  var slider = $('active-light-brightness');
+  if (slider) updateActiveLightBrightnessLabel(slider.value);
+}
+
+function renderLightDetail(actuator) {
+  var currentState = actuator.current_state || {};
+  var command = displayedActuatorCommand(actuator);
+  var commandSummary = command && command.summary ? command.summary : 'No command running.';
+  var commandTone = actuatorCommandTone(command);
+  var brightness = currentState.brightness != null ? currentState.brightness : 50;
+  var lastResult = actuator.last_result && actuator.last_result.summary
+    ? actuator.last_result.summary + (actuator.last_result.at ? ' (' + stamp(actuator.last_result.at) + ')' : '')
+    : 'No recent command result yet.';
+  var staleText = currentState.updated_at
+    ? (currentState.stale ? 'Known state is stale.' : 'Known state is fresh.')
+    : 'No confirmed state recorded yet.';
+  var updatedText = currentState.updated_at ? stamp(currentState.updated_at) : 'Never';
+  var actions = Array.isArray(actuator.actions) ? actuator.actions : [];
+  var controls = [];
+  if (actions.includes('turn_on') || actions.includes('turn_off')) {
+    var powerButtons = '';
+    if (actions.includes('turn_on')) powerButtons += '<button class="ctl-chip" onclick="runActuatorCommand(\'turn_on\', {})">Turn On</button>';
+    if (actions.includes('turn_off')) powerButtons += '<button class="ctl-chip" onclick="runActuatorCommand(\'turn_off\', {})">Turn Off</button>';
+    controls.push('<div class="light-section"><div class="light-section-head"><div class="field-label">Power</div><div class="light-section-note">Saved-device control</div></div><div class="ctl-row">' + powerButtons + '</div></div>');
+  }
+  if (actions.includes('set_brightness')) {
+    controls.push('<div class="light-section"><div class="light-section-head"><div class="field-label">Brightness</div><div class="light-section-note">Apply an exact level</div></div>'
+      + '<div class="light-slider-row"><input class="light-slider" id="active-light-brightness" type="range" min="0" max="100" value="' + esc(String(brightness)) + '" oninput="updateActiveLightBrightnessLabel(this.value)" /><div class="light-slider-val" id="active-light-brightness-val">' + esc(String(brightness)) + '%</div><button class="ctl-chip" onclick="applyActiveLightBrightness()">Apply</button></div>'
+      + '<div class="light-presets"><button class="ctl-chip" onclick="runActuatorCommand(\'set_brightness\', {brightness: 10})">10%</button><button class="ctl-chip" onclick="runActuatorCommand(\'set_brightness\', {brightness: 20})">20%</button><button class="ctl-chip" onclick="runActuatorCommand(\'set_brightness\', {brightness: 50})">50%</button><button class="ctl-chip" onclick="runActuatorCommand(\'set_brightness\', {brightness: 80})">80%</button><button class="ctl-chip" onclick="runActuatorCommand(\'set_brightness\', {brightness: 100})">100%</button></div></div>');
+  }
+  if (actions.includes('set_color_temp')) {
+    controls.push('<div class="light-section"><div class="field-label">White Temperature</div><div class="ctl-row"><button class="ctl-chip" onclick="runActuatorCommand(\'set_color_temp\', {preset: \'warm_white\'})">Warm</button><button class="ctl-chip" onclick="runActuatorCommand(\'set_color_temp\', {preset: \'soft_white\'})">Soft</button><button class="ctl-chip" onclick="runActuatorCommand(\'set_color_temp\', {preset: \'neutral\'})">White</button><button class="ctl-chip" onclick="runActuatorCommand(\'set_color_temp\', {preset: \'cool_white\'})">Cool</button></div></div>');
+  }
+  if (actions.includes('set_color_rgb')) {
+    controls.push('<div class="light-section"><div class="field-label">Colors</div><div class="light-color-grid">'
+      + renderLightColorButton('red', '#f87171') + renderLightColorButton('blue', '#60a5fa')
+      + renderLightColorButton('green', '#4ade80') + renderLightColorButton('purple', '#c084fc')
+      + renderLightColorButton('pink', '#f9a8d4') + renderLightColorButton('yellow', '#facc15')
+      + renderLightColorButton('orange', '#fb923c') + '</div></div>');
+  }
+  if (['turn_on', 'set_brightness', 'set_color_temp'].every(function(action) { return actions.includes(action); })) {
+    controls.push('<div class="light-section"><div class="field-label">Quick Presets</div><div class="light-preset-grid"><button class="light-chip" onclick="runLightPreset(\'relax\')">Relax</button><button class="light-chip" onclick="runLightPreset(\'read\')">Read</button><button class="light-chip" onclick="runLightPreset(\'focus\')">Focus</button><button class="light-chip" onclick="runLightPreset(\'night\')">Night</button></div></div>');
+  }
+  if (!controls.length) controls.push('<div class="light-section"><div class="light-note">No control actions are advertised for this device.</div></div>');
+  return '<div class="light-head"><div><div class="light-title">' + esc(actuator.name) + '</div>'
+    + '<div class="light-sub">' + esc(actuator.platform + ' / ' + actuator.device_type + ' / ' + (actuator.ip || actuator.device_ref)) + '</div>'
+    + '<div class="light-sub">Saved ref: ' + esc(actuator.device_ref) + '</div>'
+    + '<div class="light-badges">'
+    + '<div class="light-badge ' + reachabilityTone(actuator) + '">' + esc(actuator.reachability || 'unknown') + '</div>'
+    + '<div class="light-badge ' + stateFreshTone(actuator) + '">' + esc(currentState.stale ? 'state stale' : 'state fresh') + '</div>'
+    + '<div class="light-badge ' + commandTone + '">' + esc(command && command.state ? command.state : 'idle') + '</div>'
+    + '</div></div></div>'
+    + '<div class="light-grid">'
+    + '<div class="light-stat"><div class="light-stat-key">Current Confirmed State</div><div class="light-stat-val">' + esc(currentState.summary || 'No confirmed device state yet.') + '</div></div>'
+    + '<div class="light-stat"><div class="light-stat-key">Last State Update</div><div class="light-stat-val">' + esc(updatedText) + '<br><span class="light-section-note">' + esc(staleText) + '</span></div></div>'
+    + '<div class="light-stat"><div class="light-stat-key">Latest Command</div><div class="light-stat-val light-command ' + commandTone + '">' + esc(commandSummary) + '</div></div>'
+    + '</div>'
+    + controls.join('')
+    + '<div class="light-section"><div class="field-label">Last Result</div><div class="light-note">' + esc(lastResult) + '</div></div>'
+    + '<div class="light-section"><div class="field-label">Command Status</div><div class="light-note light-command ' + commandTone + '">' + esc(commandSummary) + '</div></div>';
+}
+
+function renderLightColorButton(colorName, swatch) {
+  return '<button class="light-chip color" onclick="runActuatorCommand(\'set_color_rgb\', {color_name: \'' + esc(colorName) + '\'})"><span class="light-swatch" style="background:' + esc(swatch) + '"></span>' + esc(colorName.charAt(0).toUpperCase() + colorName.slice(1)) + '</button>';
+}
+
+function updateActiveLightBrightnessLabel(value) {
+  if ($('active-light-brightness-val')) $('active-light-brightness-val').textContent = String(value || '0') + '%';
+}
+
+function applyActiveLightBrightness() {
+  var slider = $('active-light-brightness');
+  if (!slider) return;
+  runActuatorCommand('set_brightness', {brightness: Number(slider.value || 0)});
+}
+
+function runLightPreset(name) {
+  var presets = {
+    relax: [
+      {action: 'turn_on', params: {}},
+      {action: 'set_color_temp', params: {preset: 'soft_white'}},
+      {action: 'set_brightness', params: {brightness: 35}}
+    ],
+    read: [
+      {action: 'turn_on', params: {}},
+      {action: 'set_color_temp', params: {preset: 'neutral'}},
+      {action: 'set_brightness', params: {brightness: 80}}
+    ],
+    focus: [
+      {action: 'turn_on', params: {}},
+      {action: 'set_color_temp', params: {preset: 'cool_white'}},
+      {action: 'set_brightness', params: {brightness: 100}}
+    ],
+    night: [
+      {action: 'turn_on', params: {}},
+      {action: 'set_color_temp', params: {preset: 'warm_white'}},
+      {action: 'set_brightness', params: {brightness: 10}}
+    ]
+  };
+  runActuatorCommands(presets[name] || []);
+}
+
+function executionStateToLightState(execution) {
+  if (!execution) return 'executing';
+  if (!execution.final) return 'executing';
+  if (execution.state === 'confirmed') return 'succeeded';
+  if (execution.state === 'accepted') return 'accepted';
+  if (execution.state === 'partial') return 'partial';
+  return 'failed';
+}
+
+function resetInstanceScopedUi() {
+  chatHistory = [];
+  clearPendingPlan();
+  activeActuatorRef = null;
+  lightCommandState = {};
+  var feed = $('chat-feed');
+  if (feed) feed.replaceChildren();
+}
+
+async function loadServerChatHistory() {
+  var data = await get('/api/chat/history');
+  if (!data || data.instance_id !== activeInstanceId || data.schema_version !== activeStateSchemaVersion) {
+    resetInstanceScopedUi();
+    return false;
+  }
+  var messages = Array.isArray(data.messages) ? data.messages : [];
+  chatHistory = messages
+    .filter(function(item) {
+      return item && (item.role === 'user' || item.role === 'assistant') && typeof item.content === 'string';
+    })
+    .map(function(item) { return {role: item.role, content: item.content}; });
+  var feed = $('chat-feed');
+  if (feed) feed.replaceChildren();
+  chatHistory.forEach(function(item) {
+    addMsg(item.role === 'user' ? 'user' : 'gismo', item.content);
+  });
+  return true;
+}
+
+async function runActuatorCommands(commands) {
+  var actuator = findActuator(activeActuatorRef);
+  if (!actuator) return;
+  if (!Array.isArray(commands) || !commands.length) return;
+  setLightCommandState(actuator.device_ref, 'pending', 'Pending: ' + actuator.name);
+  var data = await post('/api/actuators/control', {
+    device_ref: actuator.device_ref,
+    commands: commands
+  });
+  if (!data || !data.execution || !Array.isArray(data.execution.queue_item_ids)) {
+    setLightCommandState(actuator.device_ref, 'failed', 'Could not start that control right now.');
+    return;
+  }
+  setLightCommandState(actuator.device_ref, 'pending', data.reply || ('Working on ' + actuator.name + ' now.'));
+  var finalState = 'executing';
+  var finalReply = await waitForExecution(
+    data.execution.queue_item_ids,
+    null,
+    function(text, execution) {
+      finalState = executionStateToLightState(execution);
+      setLightCommandState(actuator.device_ref, finalState, text || 'Working on that now.');
+    }
+  );
+  setLightCommandState(actuator.device_ref, finalState, finalReply);
+  await refreshDevices();
+  clearLightCommandState(actuator.device_ref);
+  renderLightsView();
+}
+
+async function runActuatorCommand(action, params) {
+  await runActuatorCommands([{action: action, params: params || {}}]);
 }
 
 // ── 5. Activity feed ──────────────────────────────────────────────────────────
@@ -1592,12 +2047,13 @@ function sleep(ms) {
   return new Promise(function(resolve) { setTimeout(resolve, ms); });
 }
 
-async function waitForExecution(enqueuedIds, workingMsg) {
+async function waitForExecution(enqueuedIds, workingMsg, onUpdate) {
   var deadline = Date.now() + 120000;
   while (Date.now() < deadline) {
     var execution = await post('/api/execution/status', {queue_item_ids: enqueuedIds});
     if (execution && execution.message) {
-      setMsgText(workingMsg, execution.message);
+      if (typeof onUpdate === 'function') onUpdate(execution.message, execution);
+      else setMsgText(workingMsg, execution.message);
     }
     if (execution && execution.final) {
       await refreshStatus();
@@ -1612,7 +2068,8 @@ async function waitForExecution(enqueuedIds, workingMsg) {
   }
 
   var unknownText = 'I could not verify that completed.';
-  setMsgText(workingMsg, unknownText);
+  if (typeof onUpdate === 'function') onUpdate(unknownText);
+  else setMsgText(workingMsg, unknownText);
   return unknownText;
 }
 
@@ -1705,7 +2162,12 @@ async function sendChat() {
     var res = await fetch('/api/chat', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({message: msg, history: historyToSend})
+      body: JSON.stringify({
+        message: msg,
+        history: historyToSend,
+        instance_id: activeInstanceId,
+        schema_version: activeStateSchemaVersion
+      })
     });
     var data = await res.json();
     removeTyping();
@@ -2082,10 +2544,17 @@ async function get(path) {
 }
 
 async function post(path, body) {
+  var csrfCookie = document.cookie.split('; ').find(function(value) {
+    return value.indexOf('gismo_control_csrf=') === 0;
+  });
+  var csrfToken = csrfCookie ? decodeURIComponent(csrfCookie.split('=').slice(1).join('=')) : '';
   try {
     var r = await fetch(path, {
       method:  'POST',
-      headers: {'Content-Type': 'application/json'},
+      headers: {
+        'Content-Type': 'application/json',
+        'X-GISMO-CSRF-Token': csrfToken
+      },
       body:    JSON.stringify(body)
     });
     if (!r.ok) return null;

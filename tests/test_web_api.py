@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import ipaddress
+import json
 import shutil
 import tempfile
 import time
@@ -32,6 +33,12 @@ def _make_db(tmp: str) -> str:
         store.update_task(task)
         store.enqueue_command("echo world")
     return db_path
+
+
+def _write_devices_config(root: Path, devices: list[dict]) -> None:
+    config_dir = root / ".gismo"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "devices.json").write_text(json.dumps({"devices": devices}), encoding="utf-8")
 
 
 class TestGetStatus(unittest.TestCase):
@@ -303,6 +310,10 @@ class TestChatMessage(unittest.TestCase):
                 web_api,
                 "_append_chat_record",
                 return_value=None,
+            ), mock.patch.object(
+                web_api,
+                "_calendar_now_local",
+                return_value=datetime(2026, 3, 18, 12, 0, tzinfo=web_api._local_tz()),
             ):
                 data = web_api.chat_message(db, "what do I have today", [])
         finally:
@@ -330,6 +341,10 @@ class TestChatMessage(unittest.TestCase):
                 web_api,
                 "_append_chat_record",
                 return_value=None,
+            ), mock.patch.object(
+                web_api,
+                "_calendar_now_local",
+                return_value=datetime(2026, 3, 18, 12, 0, tzinfo=web_api._local_tz()),
             ):
                 data = web_api.chat_message(db, "what do I have in March", [])
         finally:
@@ -385,6 +400,48 @@ class TestChatMessage(unittest.TestCase):
         self.assertIn("Kitchen Lamp", data["reply"])
         chat_mock.assert_not_called()
 
+    def test_deterministic_device_query_includes_saved_controls(self) -> None:
+        tmp = Path("tmp") / f"web-api-{uuid4().hex}"
+        tmp.mkdir(parents=True, exist_ok=False)
+        try:
+            db = _make_db(str(tmp))
+            _write_devices_config(
+                tmp,
+                [
+                    {
+                        "gismo_device_id": "dads-room-light",
+                        "name": "Dad's Room Light",
+                        "device_id": "tuya-bulb-1",
+                        "local_key": "SECRET-LOCAL-KEY",
+                        "ip": "192.168.1.188",
+                        "version": "3.3",
+                        "platform": "tuya",
+                        "device_type": "light",
+                    }
+                ],
+            )
+            with mock.patch("gismo.llm.ollama.ollama_freeform_chat") as chat_mock, mock.patch.object(
+                web_api,
+                "_append_chat_record",
+                return_value=None,
+            ), mock.patch.object(
+                web_api,
+                "execute_device_runtime_action",
+                return_value={
+                    "devices": [{"id": "dads-room-light", "status": "online"}],
+                    "execution": {"mode": "sandboxed", "zone": "device_adapter"},
+                },
+            ):
+                data = web_api.chat_message(db, "what devices are connected", [])
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
+        self.assertEqual(data["classification"], "deterministic_query")
+        self.assertIn("Saved controls", data["reply"])
+        self.assertIn("Dad's Room Light", data["reply"])
+        chat_mock.assert_not_called()
+
     def test_deterministic_model_query_bypasses_llm(self) -> None:
         tmp = Path("tmp") / f"web-api-{uuid4().hex}"
         tmp.mkdir(parents=True, exist_ok=False)
@@ -404,6 +461,120 @@ class TestChatMessage(unittest.TestCase):
         self.assertEqual(data["classification"], "deterministic_query")
         self.assertIn("gismo:latest", data["reply"])
         chat_mock.assert_not_called()
+
+    def test_light_power_request_routes_through_device_enqueue(self) -> None:
+        tmp = Path("tmp") / f"web-api-{uuid4().hex}"
+        tmp.mkdir(parents=True, exist_ok=False)
+        try:
+            db = _make_db(str(tmp))
+            with mock.patch.object(web_api, "_append_chat_record", return_value=None), mock.patch.object(
+                web_api,
+                "_request_chat_plan",
+            ) as planner_mock:
+                data = web_api.chat_message(db, "turn Dad's light on", [])
+            with StateStore(db) as store:
+                commands = [item.command_text for item in store.list_queue_items(limit=20)]
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+        self.assertEqual(data["mode"], "execution")
+        self.assertEqual(data["classification"], "operational_request")
+        self.assertIn("device: turn Dad's light on", commands)
+        planner_mock.assert_not_called()
+
+    def test_light_combined_white_request_routes_through_device_enqueue(self) -> None:
+        tmp = Path("tmp") / f"web-api-{uuid4().hex}"
+        tmp.mkdir(parents=True, exist_ok=False)
+        try:
+            db = _make_db(str(tmp))
+            with mock.patch.object(web_api, "_append_chat_record", return_value=None), mock.patch.object(
+                web_api,
+                "_request_chat_plan",
+            ) as planner_mock:
+                data = web_api.chat_message(db, "turn Dad's light on cool white", [])
+            with StateStore(db) as store:
+                commands = [item.command_text for item in store.list_queue_items(limit=20)]
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+        self.assertEqual(data["mode"], "execution")
+        self.assertIn("device: turn Dad's light on cool white", commands)
+        planner_mock.assert_not_called()
+
+    def test_light_brightness_request_routes_through_device_enqueue(self) -> None:
+        tmp = Path("tmp") / f"web-api-{uuid4().hex}"
+        tmp.mkdir(parents=True, exist_ok=False)
+        try:
+            db = _make_db(str(tmp))
+            with mock.patch.object(web_api, "_append_chat_record", return_value=None), mock.patch.object(
+                web_api,
+                "_request_chat_plan",
+            ) as planner_mock:
+                data = web_api.chat_message(db, "dim Dad's light to 20 percent", [])
+            with StateStore(db) as store:
+                commands = [item.command_text for item in store.list_queue_items(limit=20)]
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+        self.assertEqual(data["mode"], "execution")
+        self.assertIn("device: dim Dad's light to 20 percent", commands)
+        planner_mock.assert_not_called()
+
+    def test_light_color_request_routes_through_device_enqueue(self) -> None:
+        tmp = Path("tmp") / f"web-api-{uuid4().hex}"
+        tmp.mkdir(parents=True, exist_ok=False)
+        try:
+            db = _make_db(str(tmp))
+            with mock.patch.object(web_api, "_append_chat_record", return_value=None), mock.patch.object(
+                web_api,
+                "_request_chat_plan",
+            ) as planner_mock:
+                data = web_api.chat_message(db, "make Dad's light blue", [])
+            with StateStore(db) as store:
+                commands = [item.command_text for item in store.list_queue_items(limit=20)]
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+        self.assertEqual(data["mode"], "execution")
+        self.assertIn("device: make Dad's light blue", commands)
+        planner_mock.assert_not_called()
+
+    def test_light_color_and_brightness_request_routes_through_device_enqueue(self) -> None:
+        tmp = Path("tmp") / f"web-api-{uuid4().hex}"
+        tmp.mkdir(parents=True, exist_ok=False)
+        try:
+            db = _make_db(str(tmp))
+            with mock.patch.object(web_api, "_append_chat_record", return_value=None), mock.patch.object(
+                web_api,
+                "_request_chat_plan",
+            ) as planner_mock:
+                data = web_api.chat_message(db, "set Dad's light to blue at 50 percent", [])
+            with StateStore(db) as store:
+                commands = [item.command_text for item in store.list_queue_items(limit=20)]
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+        self.assertEqual(data["mode"], "execution")
+        self.assertIn("device: set Dad's light to blue at 50 percent", commands)
+        planner_mock.assert_not_called()
+
+    def test_ambiguous_light_request_asks_for_clarification_without_planner(self) -> None:
+        tmp = Path("tmp") / f"web-api-{uuid4().hex}"
+        tmp.mkdir(parents=True, exist_ok=False)
+        try:
+            db = _make_db(str(tmp))
+            with mock.patch.object(web_api, "_append_chat_record", return_value=None), mock.patch.object(
+                web_api,
+                "_request_chat_plan",
+            ) as planner_mock:
+                data = web_api.chat_message(db, "make Dad's light nice", [])
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+        self.assertEqual(data["mode"], "clarify")
+        self.assertEqual(data["classification"], "ambiguous_request")
+        self.assertIn("could not understand", data["reply"].lower())
+        planner_mock.assert_not_called()
 
     def test_conversational_request_replies_directly(self) -> None:
         tmp = Path("tmp") / f"web-api-{uuid4().hex}"
@@ -774,6 +945,203 @@ class TestDevicesAndSettings(unittest.TestCase):
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 
+    def test_saved_actuators_list_exposes_sanitized_configured_controls(self) -> None:
+        tmp = Path("tmp") / f"web-api-{uuid4().hex}"
+        tmp.mkdir(parents=True, exist_ok=False)
+        try:
+            db = _make_db(str(tmp))
+            _write_devices_config(
+                tmp,
+                [
+                    {
+                        "gismo_device_id": "dads-room-light",
+                        "name": "Dad's Room Light",
+                        "device_id": "tuya-bulb-1",
+                        "local_key": "SECRET-LOCAL-KEY",
+                        "ip": "192.168.1.188",
+                        "version": "3.3",
+                        "platform": "tuya",
+                        "device_type": "light",
+                    }
+                ],
+            )
+            with StateStore(db) as store:
+                store.record_event(
+                    actor="worker",
+                    event_type="device_light_command",
+                    message="I set Dad's Room Light to cool white.",
+                    json_payload={
+                        "target": "dads-room-light",
+                        "command": "set_color_temp",
+                        "params": {"preset": "cool_white"},
+                        "changed": 1,
+                        "failed": 0,
+                        "confirmed": 1,
+                        "verified_states": {
+                            "dads-room-light": {"color_temp_preset": "cool_white"},
+                        },
+                    },
+                )
+            with mock.patch(
+                "gismo.web.api.execute_device_runtime_action",
+                return_value={
+                    "devices": [{"id": "dads-room-light", "status": "online"}],
+                    "execution": {"mode": "sandboxed", "zone": "device_adapter"},
+                },
+            ):
+                listed = web_api.list_saved_actuators(db)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+        self.assertEqual(len(listed), 1)
+        item = listed[0]
+        self.assertEqual(item["device_ref"], "dads-room-light")
+        self.assertEqual(item["name"], "Dad's Room Light")
+        self.assertEqual(item["platform"], "tuya")
+        self.assertEqual(item["status"], "online")
+        self.assertEqual(item["reachability"], "reachable")
+        self.assertIn("brightness", item["capabilities"])
+        self.assertNotIn("local_key", item)
+        self.assertEqual(item["last_result"]["summary"], "I set Dad's Room Light to cool white.")
+        self.assertEqual(item["current_state"]["white_mode"], "cool_white")
+        self.assertIn("cool white", item["current_state"]["summary"].lower())
+
+    def test_dashboard_control_enqueues_saved_actuator_command_without_connected_device(self) -> None:
+        tmp = Path("tmp") / f"web-api-{uuid4().hex}"
+        tmp.mkdir(parents=True, exist_ok=False)
+        try:
+            db = _make_db(str(tmp))
+            _write_devices_config(
+                tmp,
+                [
+                    {
+                        "gismo_device_id": "dads-room-light",
+                        "name": "Dad's Room Light",
+                        "device_id": "tuya-bulb-1",
+                        "local_key": "SECRET-LOCAL-KEY",
+                        "ip": "192.168.1.188",
+                        "version": "3.3",
+                        "platform": "tuya",
+                        "device_type": "light",
+                    }
+                ],
+            )
+            data = web_api.control_actuator(
+                db,
+                {"device_ref": "dads-room-light", "action": "turn_off", "params": {}},
+            )
+            with StateStore(db) as store:
+                items = [
+                    item
+                    for item in store.list_queue_items(limit=20)
+                    if item.metadata_json.get("device_ref") == "dads-room-light"
+                ]
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+        self.assertEqual(data["mode"], "execution")
+        self.assertEqual(data["device_ref"], "dads-room-light")
+        self.assertTrue(data["structured"])
+        self.assertTrue(data["command_text"].startswith("control: "))
+        self.assertEqual(len(items), 1)
+        self.assertTrue(items[0].command_text.startswith("control: "))
+        self.assertEqual(items[0].metadata_json["device_ref"], "dads-room-light")
+        self.assertEqual(
+            items[0].metadata_json["operator_plan"]["steps"][0]["input_json"]["target"],
+            "dads-room-light",
+        )
+        self.assertEqual(
+            items[0].metadata_json["structured_command"]["actions"][0]["action"],
+            "turn_off",
+        )
+
+    def test_saved_actuators_list_reports_pending_structured_command(self) -> None:
+        tmp = Path("tmp") / f"web-api-{uuid4().hex}"
+        tmp.mkdir(parents=True, exist_ok=False)
+        try:
+            db = _make_db(str(tmp))
+            _write_devices_config(
+                tmp,
+                [
+                    {
+                        "gismo_device_id": "dads-room-light",
+                        "name": "Dad's Room Light",
+                        "device_id": "tuya-bulb-1",
+                        "local_key": "SECRET-LOCAL-KEY",
+                        "ip": "192.168.1.188",
+                        "version": "3.3",
+                        "platform": "tuya",
+                        "device_type": "light",
+                    }
+                ],
+            )
+            with StateStore(db) as store:
+                store.enqueue_command(
+                    "lights: Dad's Room Light / turn_off",
+                    metadata={
+                        "device_ref": "dads-room-light",
+                        "structured_command": {
+                            "device_ref": "dads-room-light",
+                            "label": "lights: Dad's Room Light / turn_off",
+                            "actions": [{"action": "turn_off", "target": "dads-room-light", "params": {}}],
+                        },
+                    },
+                )
+            with mock.patch(
+                "gismo.web.api.execute_device_runtime_action",
+                return_value={
+                    "devices": [{"id": "dads-room-light", "status": "online"}],
+                    "execution": {"mode": "sandboxed", "zone": "device_adapter"},
+                },
+            ):
+                listed = web_api.list_saved_actuators(db)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+        self.assertEqual(listed[0]["current_command"]["state"], "pending")
+        self.assertIn("turn_off", listed[0]["current_command"]["summary"])
+
+    def test_chat_light_request_uses_saved_light_ref_in_structured_metadata(self) -> None:
+        tmp = Path("tmp") / f"web-api-{uuid4().hex}"
+        tmp.mkdir(parents=True, exist_ok=False)
+        try:
+            db = _make_db(str(tmp))
+            _write_devices_config(
+                tmp,
+                [
+                    {
+                        "gismo_device_id": "dads-room-light",
+                        "name": "Dad's Room Light",
+                        "alias": "Dad's light",
+                        "device_id": "tuya-bulb-1",
+                        "local_key": "SECRET-LOCAL-KEY",
+                        "ip": "192.168.1.188",
+                        "version": "3.3",
+                        "platform": "tuya",
+                        "device_type": "light",
+                    }
+                ],
+            )
+            with mock.patch.object(web_api, "_append_chat_record", return_value=None):
+                data = web_api.chat_message(db, "turn Dad's light off", [])
+            with StateStore(db) as store:
+                items = [
+                    item
+                    for item in store.list_queue_items(limit=20)
+                    if item.metadata_json.get("device_ref") == "dads-room-light"
+                ]
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+        self.assertEqual(data["mode"], "execution")
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0].metadata_json["device_ref"], "dads-room-light")
+        self.assertEqual(
+            items[0].metadata_json["operator_plan"]["steps"][0]["input_json"]["target"],
+            "dads-room-light",
+        )
+        self.assertEqual(items[0].command_text, "device: turn Dad's light off")
+
     def test_activity_feed_includes_device_events(self) -> None:
         tmp = Path("tmp") / f"web-api-{uuid4().hex}"
         tmp.mkdir(parents=True, exist_ok=False)
@@ -889,6 +1257,116 @@ class TestCalendar(unittest.TestCase):
         self.assertEqual(data["mode"], "reply")
         self.assertEqual(data["classification"], "deterministic_query")
         self.assertIn("Check in", data["reply"])
+
+
+class TestSavedActuatorIdentityAndCapabilities(unittest.TestCase):
+    def _workspace(self) -> tuple[Path, str]:
+        tmp = Path("tmp") / f"web-api-identity-{uuid4().hex}"
+        tmp.mkdir(parents=True, exist_ok=False)
+        return tmp, _make_db(str(tmp))
+
+    def test_exact_device_ref_survives_stale_ip(self) -> None:
+        tmp, db = self._workspace()
+        try:
+            _write_devices_config(tmp, [{
+                "gismo_device_id": "desk-light",
+                "name": "Desk Light",
+                "alias": "office lamp",
+                "device_id": "vendor-123",
+                "ip": "192.168.1.250",
+                "platform": "tuya",
+                "device_type": "light",
+            }])
+            result = web_api.control_actuator(
+                db,
+                {"device_ref": "desk-light", "action": "turn_off", "params": {}},
+            )
+            self.assertEqual(result["device_ref"], "desk-light")
+            self.assertNotIn("192.168.1.250", result["command_text"])
+            self.assertNotIn("vendor-123", result["command_text"])
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_exact_unique_alias_resolves_to_canonical_ref(self) -> None:
+        tmp, db = self._workspace()
+        try:
+            _write_devices_config(tmp, [{
+                "gismo_device_id": "desk-light",
+                "name": "Desk Light",
+                "alias": "office lamp",
+                "platform": "tuya",
+                "device_type": "light",
+            }])
+            result = web_api.control_actuator(
+                db,
+                {"device_ref": "office lamp", "action": "turn_on", "params": {}},
+            )
+            self.assertEqual(result["device_ref"], "desk-light")
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_ambiguous_alias_requires_explicit_device_ref(self) -> None:
+        tmp, db = self._workspace()
+        try:
+            _write_devices_config(tmp, [
+                {"gismo_device_id": "desk-left", "name": "Left", "alias": "desk lamp", "device_type": "light"},
+                {"gismo_device_id": "desk-right", "name": "Right", "alias": "desk lamp", "device_type": "light"},
+            ])
+            with self.assertRaisesRegex(ValueError, "ambiguous"):
+                web_api.control_actuator(
+                    db,
+                    {"device_ref": "desk lamp", "action": "turn_on", "params": {}},
+                )
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_similarly_named_and_nonexistent_targets_do_not_fuzzy_match(self) -> None:
+        tmp, db = self._workspace()
+        try:
+            _write_devices_config(tmp, [
+                {"gismo_device_id": "bed-left", "name": "Bed Light Left", "device_type": "light"},
+                {"gismo_device_id": "bed-right", "name": "Bed Light Right", "device_type": "light"},
+            ])
+            for target in ("bed light", "garage light"):
+                with self.subTest(target=target), self.assertRaisesRegex(ValueError, "not found"):
+                    web_api.control_actuator(
+                        db,
+                        {"device_ref": target, "action": "turn_on", "params": {}},
+                    )
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_capabilities_are_explicit_and_unsupported_action_is_rejected(self) -> None:
+        tmp, db = self._workspace()
+        try:
+            _write_devices_config(tmp, [
+                {
+                    "gismo_device_id": "coffee-plug",
+                    "name": "Coffee Plug",
+                    "device_type": "switch",
+                    "actions": ["turn_on", "turn_off"],
+                },
+                {
+                    "gismo_device_id": "status-sensor",
+                    "name": "Status Sensor",
+                    "device_type": "sensor",
+                    "actions": [],
+                },
+            ])
+            with mock.patch.object(web_api, "_probe_saved_actuator_statuses", return_value=(False, {})):
+                listed = {item["device_ref"]: item for item in web_api.list_saved_actuators(db)}
+            self.assertEqual(listed["coffee-plug"]["kind"], "switch")
+            self.assertEqual(listed["coffee-plug"]["actions"], ["turn_on", "turn_off"])
+            self.assertNotIn("brightness", listed["coffee-plug"]["capabilities"])
+            self.assertEqual(listed["status-sensor"]["actions"], [])
+            self.assertEqual(listed["status-sensor"]["current_state"]["power"], "unknown")
+            with self.assertRaisesRegex(ValueError, "Unsupported actuator action"):
+                web_api.control_actuator(
+                    db,
+                    {"device_ref": "coffee-plug", "action": "set_brightness", "params": {"brightness": 50}},
+                )
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
 
 
 if __name__ == "__main__":

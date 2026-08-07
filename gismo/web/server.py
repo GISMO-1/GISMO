@@ -11,7 +11,10 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import Any
 
 from gismo.core.background_worker import ensure_background_worker_status
+from gismo.core.paths import normalize_database_path
+from gismo.core.state import StateStore
 from gismo.web import api as web_api
+from gismo.web import control_security
 from gismo.web.templates import HTML
 
 LOGGER = logging.getLogger(__name__)
@@ -30,6 +33,7 @@ _SECURITY_EXECUTION_ID_RE = re.compile(r"^/api/security/execution/([^/]+)$")
 def _json_response(handler: BaseHTTPRequestHandler, data: Any, status: int = 200) -> None:
     body = json.dumps(data, default=str).encode()
     handler.send_response(status)
+    _send_extra_headers(handler)
     handler.send_header("Content-Type", "application/json")
     handler.send_header("Content-Length", str(len(body)))
     handler.end_headers()
@@ -48,16 +52,31 @@ def _bytes_response(
     status: int = 200,
 ) -> None:
     handler.send_response(status)
+    _send_extra_headers(handler)
     handler.send_header("Content-Type", content_type)
     handler.send_header("Content-Length", str(len(body)))
     handler.end_headers()
     handler.wfile.write(body)
 
 
-def _read_json_body(handler: BaseHTTPRequestHandler) -> Any:
+def _read_request_body(handler: BaseHTTPRequestHandler, *, max_bytes: int | None = None) -> bytes:
     length = int(handler.headers.get("Content-Length", 0))
+    if max_bytes is not None and length > max_bytes:
+        return b"x" * (max_bytes + 1)
     raw = handler.rfile.read(length) if length else b"{}"
-    return json.loads(raw or b"{}")
+    return raw or b"{}"
+
+
+def _read_json_body(handler: BaseHTTPRequestHandler) -> Any:
+    return json.loads(_read_request_body(handler))
+
+
+def _send_extra_headers(handler: BaseHTTPRequestHandler) -> None:
+    extra_headers = getattr(handler, "_extra_response_headers", None)
+    if not callable(extra_headers):
+        return
+    for name, value in extra_headers():
+        handler.send_header(name, value)
 
 
 def _stream_mjpeg(handler: BaseHTTPRequestHandler, ffmpeg_args: list[str]) -> None:
@@ -116,10 +135,21 @@ def _stream_mjpeg(handler: BaseHTTPRequestHandler, ffmpeg_args: list[str]) -> No
             process.wait(timeout=2)
 
 
-def _make_handler(db_path: str) -> type[BaseHTTPRequestHandler]:
+def _make_handler(db_path: str, *, bind_host: str = "127.0.0.1") -> type[BaseHTTPRequestHandler]:
+    db_path = normalize_database_path(db_path)
+    with StateStore(db_path) as store:
+        store.get_runtime_identity()
+    control_context = control_security.build_context(db_path, bind_host=bind_host)
+
     class _Handler(BaseHTTPRequestHandler):
         def log_message(self, fmt: str, *args: Any) -> None:  # silence default logging
             pass
+
+        def _extra_response_headers(self) -> list[tuple[str, str]]:
+            return control_security.response_headers(
+                control_context,
+                client_ip=self.client_address[0],
+            )
 
         def do_GET(self) -> None:
             path = self.path.split("?")[0]
@@ -127,6 +157,7 @@ def _make_handler(db_path: str) -> type[BaseHTTPRequestHandler]:
                 if path == "/" or path == "/index.html":
                     body = HTML.encode()
                     self.send_response(200)
+                    _send_extra_headers(self)
                     self.send_header("Content-Type", "text/html; charset=utf-8")
                     self.send_header("Content-Length", str(len(body)))
                     self.end_headers()
@@ -165,10 +196,16 @@ def _make_handler(db_path: str) -> type[BaseHTTPRequestHandler]:
                     _json_response(self, web_api.list_devices(db_path))
                 elif path == "/api/devices/list":
                     _json_response(self, web_api.list_devices(db_path))
+                elif path == "/api/actuators":
+                    _json_response(self, web_api.list_saved_actuators(db_path))
+                elif path == "/api/actuators/list":
+                    _json_response(self, web_api.list_saved_actuators(db_path))
                 elif path == "/api/devices/scan":
                     _json_response(self, web_api.scan_devices(db_path))
                 elif path == "/api/activity":
                     _json_response(self, web_api.get_activity_feed(db_path))
+                elif path == "/api/chat/history":
+                    _json_response(self, web_api.get_chat_history(db_path))
                 elif path == "/api/execution/status":
                     _error(self, "Use POST for execution status.", 405)
                 elif path == "/api/security/events":
@@ -326,6 +363,28 @@ def _make_handler(db_path: str) -> type[BaseHTTPRequestHandler]:
                         _error(self, "id is required", 400)
                         return
                     _json_response(self, web_api.remove_device(db_path, device_id))
+                elif path == "/api/actuators/control":
+                    request_bytes = _read_request_body(
+                        self,
+                        max_bytes=control_security.MAX_CONTROL_BODY_BYTES,
+                    )
+                    authorization = control_security.authorize_control_request(
+                        context=control_context,
+                        method="POST",
+                        path=path,
+                        client_ip=self.client_address[0],
+                        headers=self.headers,
+                        body_bytes=request_bytes,
+                    )
+                    if isinstance(authorization, control_security.ControlRequestRejection):
+                        control_security.record_rejection(control_context, authorization)
+                        _error(self, authorization.message, authorization.status)
+                        return
+                    control_security.record_accepted_request(control_context, authorization)
+                    try:
+                        _json_response(self, web_api.control_actuator(db_path, authorization.body))
+                    except ValueError as exc:
+                        _error(self, str(exc), 400)
                 elif path == "/api/queue/purge-failed":
                     _json_response(self, web_api.purge_failed(db_path))
                 elif path == "/api/calendar":
@@ -435,10 +494,18 @@ def _make_handler(db_path: str) -> type[BaseHTTPRequestHandler]:
                     if not message:
                         _error(self, "message is required", 400)
                         return
+                    with StateStore(db_path) as store:
+                        runtime_identity = store.get_runtime_identity()
+                    if (
+                        body.get("instance_id") != runtime_identity["instance_id"]
+                        or body.get("schema_version") != runtime_identity["schema_version"]
+                    ):
+                        _error(self, "This page belongs to a different GISMO instance. Refresh and try again.", 409)
+                        return
                     try:
                         _json_response(self, web_api.chat_message(db_path, message, history))
                     except RuntimeError as exc:
-                        LOGGER.exception("chat_endpoint_failed", exc_info=(type(exc), exc, exc.__traceback__))
+                        LOGGER.error("chat_endpoint_failed error_type=%s", type(exc).__name__)
                         _error(self, "GISMO could not answer that right now. Please try again in a moment.", 503)
                 elif m := _QUARANTINE_ACTION_RE.match(path):
                     record_id, action = m.group(1), m.group(2)
@@ -454,7 +521,7 @@ def _make_handler(db_path: str) -> type[BaseHTTPRequestHandler]:
                 else:
                     _error(self, "Not found", 404)
             except Exception as exc:
-                LOGGER.exception("web_post_failed", exc_info=(type(exc), exc, exc.__traceback__))
+                LOGGER.error("web_post_failed error_type=%s", type(exc).__name__)
                 _error(self, "Request failed.", 500)
 
         def do_PATCH(self) -> None:
@@ -502,8 +569,9 @@ def _make_handler(db_path: str) -> type[BaseHTTPRequestHandler]:
 
 def run(db_path: str, host: str = "127.0.0.1", port: int = 7800, open_browser: bool = True) -> None:
     """Start the local web server and optionally open the browser."""
+    db_path = normalize_database_path(db_path)
     ensure_background_worker_status(db_path, source="web_server")
-    handler_cls = _make_handler(db_path)
+    handler_cls = _make_handler(db_path, bind_host=host)
     server = HTTPServer((host, port), handler_cls)
     url = f"http://{host}:{port}/"
     print(f"GISMO web dashboard: {url}")

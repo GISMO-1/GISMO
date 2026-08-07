@@ -12,8 +12,10 @@ from unittest import mock
 from uuid import uuid4
 
 from gismo.core.models import TaskStatus
+from gismo.core.paths import normalize_database_path
 from gismo.core.state import StateStore
 from gismo.web import api as web_api
+from gismo.web import control_security
 from gismo.web.server import _make_handler
 from http.server import HTTPServer
 
@@ -34,11 +36,19 @@ def _make_db(tmp: str) -> str:
     return db_path
 
 
+def _write_devices_config(root: Path, devices: list[dict]) -> None:
+    config_dir = root / ".gismo"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "devices.json").write_text(json.dumps({"devices": devices}), encoding="utf-8")
+
+
 class TestWebServerEndpoints(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = Path("tmp") / f"web-server-{uuid4().hex}"
         self.tmp.mkdir(parents=True, exist_ok=False)
         self.db = _make_db(str(self.tmp))
+        with StateStore(self.db) as store:
+            self.runtime_identity = store.get_runtime_identity()
         self.server = HTTPServer(("127.0.0.1", 0), _make_handler(self.db))
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
@@ -52,11 +62,15 @@ class TestWebServerEndpoints(unittest.TestCase):
         shutil.rmtree(self.tmp, ignore_errors=True)
 
     def _request_json(self, path: str, method: str = "GET", payload: dict | None = None) -> dict:
+        if path == "/api/chat" and payload is not None:
+            payload = {**payload, **self.runtime_identity}
         body = None
         headers = {}
         if payload is not None:
             body = json.dumps(payload).encode("utf-8")
             headers["Content-Type"] = "application/json"
+        if path == "/api/actuators/control":
+            headers["X-GISMO-Control-Token"] = control_security.build_context(self.db).token
         request = urllib.request.Request(
             f"{self.base_url}{path}",
             data=body,
@@ -65,6 +79,10 @@ class TestWebServerEndpoints(unittest.TestCase):
         )
         with urllib.request.urlopen(request, timeout=5) as response:
             return json.loads(response.read().decode("utf-8"))
+
+    def _request_text(self, path: str) -> str:
+        with urllib.request.urlopen(f"{self.base_url}{path}", timeout=5) as response:
+            return response.read().decode("utf-8")
 
     def test_queue_stats_endpoint(self) -> None:
         data = self._request_json("/api/queue/stats")
@@ -204,6 +222,72 @@ class TestWebServerEndpoints(unittest.TestCase):
             data = self._request_json("/api/devices/scan")
         self.assertEqual(data[0]["brand"], "Tapo")
 
+    def test_dashboard_html_exposes_lights_tab(self) -> None:
+        html = self._request_text("/")
+        self.assertIn("Controls", html)
+        self.assertIn("lights-view", html)
+
+    def test_saved_actuators_endpoint_hides_secrets(self) -> None:
+        _write_devices_config(
+            self.tmp,
+            [
+                {
+                    "gismo_device_id": "dads-room-light",
+                    "name": "Dad's Room Light",
+                    "device_id": "tuya-bulb-1",
+                    "local_key": "SECRET-LOCAL-KEY",
+                    "ip": "192.168.1.188",
+                    "version": "3.3",
+                    "platform": "tuya",
+                    "device_type": "light",
+                }
+            ],
+        )
+        with mock.patch.object(
+            web_api,
+            "execute_device_runtime_action",
+            return_value={
+                "devices": [{"id": "dads-room-light", "status": "online"}],
+                "execution": {"mode": "sandboxed", "zone": "device_adapter"},
+            },
+        ):
+            data = self._request_json("/api/actuators/list")
+        self.assertEqual(len(data), 1)
+        self.assertEqual(data[0]["device_ref"], "dads-room-light")
+        self.assertNotIn("local_key", data[0])
+
+    def test_saved_actuator_control_endpoint_enqueues_command(self) -> None:
+        _write_devices_config(
+            self.tmp,
+            [
+                {
+                    "gismo_device_id": "dads-room-light",
+                    "name": "Dad's Room Light",
+                    "device_id": "tuya-bulb-1",
+                    "local_key": "SECRET-LOCAL-KEY",
+                    "ip": "192.168.1.188",
+                    "version": "3.3",
+                    "platform": "tuya",
+                    "device_type": "light",
+                }
+            ],
+        )
+        data = self._request_json(
+            "/api/actuators/control",
+            method="POST",
+            payload={"device_ref": "dads-room-light", "action": "turn_off", "params": {}},
+        )
+        self.assertEqual(data["mode"], "execution")
+        with StateStore(self.db) as store:
+            items = [
+                item
+                for item in store.list_queue_items(limit=20)
+                if item.metadata_json.get("device_ref") == "dads-room-light"
+            ]
+        self.assertEqual(len(items), 1)
+        self.assertTrue(items[0].command_text.startswith("control: "))
+        self.assertEqual(items[0].metadata_json["device_ref"], "dads-room-light")
+
     def test_calendar_crud_endpoints(self) -> None:
         created = self._request_json(
             "/api/calendar",
@@ -243,7 +327,7 @@ class TestWebServerEndpoints(unittest.TestCase):
                 payload={"message": "hi", "history": [{"role": "user", "content": "earlier"}]},
             )
         chat_mock.assert_called_once_with(
-            self.db,
+            normalize_database_path(self.db),
             "hi",
             [{"role": "user", "content": "earlier"}],
         )
@@ -278,7 +362,7 @@ class TestWebServerEndpoints(unittest.TestCase):
         ):
             request = urllib.request.Request(
                 f"{self.base_url}/api/chat",
-                data=json.dumps({"message": "hi", "history": []}).encode("utf-8"),
+                data=json.dumps({"message": "hi", "history": [], **self.runtime_identity}).encode("utf-8"),
                 method="POST",
                 headers={"Content-Type": "application/json"},
             )
@@ -302,7 +386,7 @@ class TestWebServerEndpoints(unittest.TestCase):
             with urllib.request.urlopen(request, timeout=5) as response:
                 body = response.read()
                 content_type = response.headers.get("Content-Type")
-        preview_mock.assert_called_once_with(self.db, "af_bella")
+        preview_mock.assert_called_once_with(normalize_database_path(self.db), "af_bella")
         self.assertEqual(body, b"wav")
         self.assertEqual(content_type, "audio/wav")
 

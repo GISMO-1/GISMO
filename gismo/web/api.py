@@ -7,6 +7,7 @@ state errors.
 from __future__ import annotations
 
 import ipaddress
+import hashlib
 import json
 import logging
 import re
@@ -25,6 +26,7 @@ from gismo.core.device_runtime import execute_device_runtime_action, serialize_d
 from gismo.core.execution import select_execution_events, summarize_execution_events
 from gismo.core.models import CalendarEvent, ConnectedDevice, QueueStatus
 from gismo.core.outbound import check_outbound_scope, check_outbound_target
+from gismo.core.paths import normalize_database_path
 from gismo.core.readiness import build_readiness_payload, build_runtime_status
 from gismo.core.state import StateStore
 from gismo.core.trust import (
@@ -91,6 +93,37 @@ def _coerce_optional_str(value: Any) -> str | None:
         return None
     text = str(value).strip()
     return text or None
+
+
+def _normalize_inventory_text(value: Any) -> str:
+    return " ".join(str(value or "").strip().lower().split())
+
+
+_INVENTORY_GENERIC_TOKENS = {
+    "device",
+    "devices",
+    "light",
+    "lights",
+    "lamp",
+    "lamps",
+    "bulb",
+    "bulbs",
+    "room",
+    "the",
+    "my",
+}
+
+
+def _inventory_tokens(value: Any) -> set[str]:
+    text = _normalize_inventory_text(value)
+    text = re.sub(r"[-_]+", " ", text)
+    text = re.sub(r"[^a-z0-9.\s]", " ", text)
+    return {token for token in text.split() if token and token not in _INVENTORY_GENERIC_TOKENS}
+
+
+def _text_matches_inventory_refs(value: Any, refs: set[str]) -> bool:
+    normalized = _normalize_inventory_text(value)
+    return bool(normalized and normalized in refs)
 
 
 def _serialize_security_event(
@@ -229,7 +262,12 @@ def _calendar_event_day_bounds(day_value: str) -> tuple[datetime, datetime]:
 
 def get_status(db_path: str) -> dict[str, Any]:
     """Return command-center status grounded in current runtime state."""
-    return build_runtime_status(db_path)
+    scoped_db_path = normalize_database_path(db_path)
+    data = build_runtime_status(scoped_db_path)
+    with StateStore(scoped_db_path) as store:
+        identity = store.get_runtime_identity()
+    data.update(identity)
+    return data
 
 
 def get_readiness(db_path: str) -> dict[str, Any]:
@@ -587,6 +625,13 @@ def _execution_plain_result(
         )
     terminal_statuses = {"SUCCEEDED", "FAILED", "CANCELLED"}
     if any(item["status"] not in terminal_statuses for item in queue_items):
+        if all(item["status"] == "QUEUED" for item in queue_items):
+            return (
+                "queued",
+                None,
+                "That command is queued.",
+                False,
+            )
         return (
             "running",
             None,
@@ -604,6 +649,22 @@ def _execution_plain_result(
             "I could not verify that completed.",
             True,
         )
+    device_results = _device_command_results(runs)
+    if device_results:
+        summaries = _device_command_summaries(runs)
+        summary = summaries[0] if summaries else ""
+        statuses = {str(result.get("status") or "").strip().lower() for result in device_results}
+        if "failed" in statuses:
+            return "failed", "device command failed", summary or "I could not complete that device command.", True
+        if "partial" in statuses:
+            message = summary or "Some devices changed, but the whole command did not complete."
+            return "partial", "device command partially completed", message, True
+        if statuses == {"confirmed"}:
+            message = summary or "The device confirmed that change."
+            return "confirmed", None, message, True
+        message = summary or "The device accepted that command, but its resulting state was not confirmed."
+        return "accepted", "device state not confirmed", message, True
+
     summaries = []
     for run in runs:
         for task in run.get("tasks") or []:
@@ -631,6 +692,12 @@ def _failed_execution_result(
     queue_items: list[dict[str, Any]],
     runs: list[dict[str, Any]],
 ) -> tuple[str, str | None, str]:
+    device_results = _device_command_results(runs)
+    if device_results:
+        summaries = _device_command_summaries(runs)
+        detail = summaries[0] if summaries else "I could not complete that device command."
+        return "failed", "device command failed", detail
+
     policy_blocked = False
     unverified_source = False
     timeout_failure = False
@@ -690,6 +757,32 @@ def _failed_execution_result(
     if detail:
         message = f"{message} {detail}"
     return "failed", detail or None, message
+
+
+def _device_command_results(runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    results: list[dict[str, Any]] = []
+    for run in runs:
+        for task in run.get("tasks") or []:
+            output = task.get("output")
+            if not isinstance(output, dict):
+                continue
+            result = output.get("device_command_result")
+            if isinstance(result, dict):
+                results.append(result)
+    return results
+
+
+def _device_command_summaries(runs: list[dict[str, Any]]) -> list[str]:
+    summaries: list[str] = []
+    for run in runs:
+        for task in run.get("tasks") or []:
+            output = task.get("output")
+            if not isinstance(output, dict) or not isinstance(output.get("device_command_result"), dict):
+                continue
+            summary = str(output.get("summary") or "").strip()
+            if summary and summary not in summaries:
+                summaries.append(summary)
+    return summaries
 
 
 # ── memory ─────────────────────────────────────────────────────────────────
@@ -1113,24 +1206,93 @@ def patch_plan(
 
 # ── Chat ───────────────────────────────────────────────────────────────────
 
-_CHAT_HISTORY_FILE = Path(".gismo") / "chat_history.jsonl"
+_LEGACY_CHAT_HISTORY_FILE = Path(".gismo") / "chat_history.jsonl"
 
 
-def _append_chat_record(message: str, reply: str) -> None:
-    """Append a single user/assistant exchange to the JSONL history file."""
-    import json
+def _path_fingerprint(path: str | Path) -> str:
+    normalized = str(Path(path).resolve(strict=False)).casefold()
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:16]
 
-    record = {
-        "timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        "user": message,
-        "assistant": reply,
-    }
+
+def _audit_legacy_chat_fallback_blocked(db_path: str) -> None:
+    """Record once that repo-global chat history was ignored for this database."""
+    legacy_path = _LEGACY_CHAT_HISTORY_FILE.resolve(strict=False)
+    if not legacy_path.exists():
+        return
+    fallback_fingerprint = _path_fingerprint(legacy_path)
+    with StateStore(db_path) as store:
+        prior = store.list_events_by_type("database_scope_fallback_blocked")
+        if any(
+            (event.json_payload or {}).get("fallback_fingerprint") == fallback_fingerprint
+            and (event.json_payload or {}).get("source") == "web.activity.chat_history"
+            for event in prior
+        ):
+            return
+        store.record_event(
+            actor="web-api",
+            event_type="database_scope_fallback_blocked",
+            message="Blocked chat history outside the selected database.",
+            json_payload={
+                "source": "web.activity.chat_history",
+                "database_fingerprint": _path_fingerprint(store.db_path),
+                "fallback_fingerprint": fallback_fingerprint,
+            },
+        )
+    LOGGER.warning(
+        "database_scope_fallback_blocked source=web.activity.chat_history database=%s fallback=%s",
+        _path_fingerprint(db_path),
+        fallback_fingerprint,
+    )
+
+
+def _append_chat_record(db_path: str, message: str, reply: str) -> None:
+    """Persist one exchange in the explicitly selected SQLite database."""
+    scoped_db_path = normalize_database_path(db_path)
     try:
-        _CHAT_HISTORY_FILE.parent.mkdir(parents=True, exist_ok=True)
-        with _CHAT_HISTORY_FILE.open("a", encoding="utf-8") as fh:
-            fh.write(json.dumps(record, ensure_ascii=False) + "\n")
-    except OSError:
-        pass  # never let logging failures break the chat
+        with StateStore(scoped_db_path) as store:
+            store.append_chat_exchange(message, reply)
+    except (OSError, RuntimeError):
+        LOGGER.warning(
+            "chat_history_write_failed database=%s",
+            _path_fingerprint(scoped_db_path),
+        )
+
+
+def get_chat_history(db_path: str, limit: int = 50) -> dict[str, Any]:
+    scoped_db_path = normalize_database_path(db_path)
+    with StateStore(scoped_db_path) as store:
+        identity = store.get_runtime_identity()
+        exchanges = list(reversed(store.list_chat_exchanges(limit=limit)))
+    messages: list[dict[str, Any]] = []
+    for exchange in exchanges:
+        timestamp = _dt(exchange.created_at)
+        messages.extend(
+            [
+                {
+                    "exchange_id": exchange.id,
+                    "role": "user",
+                    "content": exchange.user_text,
+                    "timestamp": timestamp,
+                },
+                {
+                    "exchange_id": exchange.id,
+                    "role": "assistant",
+                    "content": exchange.assistant_text,
+                    "timestamp": timestamp,
+                },
+            ]
+        )
+    return {**identity, "messages": messages}
+
+
+def _server_chat_context(db_path: str, message_limit: int) -> list[dict[str, str]]:
+    with StateStore(db_path) as store:
+        exchanges = list(reversed(store.list_chat_exchanges(limit=max(1, message_limit))))
+    messages: list[dict[str, str]] = []
+    for exchange in exchanges:
+        messages.append({"role": "user", "content": exchange.user_text})
+        messages.append({"role": "assistant", "content": exchange.assistant_text})
+    return messages[-message_limit:]
 
 
 def _clean_reply(text: str) -> str:
@@ -1160,7 +1322,8 @@ _CHAT_AMBIGUOUS_RE = re.compile(
 )
 _CHAT_OPERATIONAL_RE = re.compile(
     r"\b(turn on|turn off|check|scan|lock|unlock|open|close|start|stop|run|queue|save|write|remember|"
-    r"set up|set|pause|resume|look for|find|show me|monitor|connect|remove|add|delete|remind me|schedule)\b"
+    r"set up|set|pause|resume|look for|find|show me|monitor|connect|remove|add|delete|remind me|schedule|"
+    r"dim|brighten|lower brightness|raise brightness)\b"
 )
 _CHAT_CONVERSATIONAL_RE = re.compile(
     r"^(who|what|when|where|why|how)\b|"
@@ -1389,7 +1552,7 @@ def _log_chat_failure(
     model: str | None = None,
     user_message: str | None = None,
 ) -> None:
-    LOGGER.exception("chat_%s_failed model=%s", stage, model, exc_info=(type(exc), exc, exc.__traceback__))
+    LOGGER.error("chat_%s_failed model=%s error_type=%s", stage, model, type(exc).__name__)
     try:
         with StateStore(db_path) as store:
             store.record_event(
@@ -1400,8 +1563,7 @@ def _log_chat_failure(
                     "stage": stage,
                     "model": model,
                     "error_type": type(exc).__name__,
-                    "error": str(exc),
-                    "message": (user_message or "")[:500],
+                    "message_sha256": sha256_text(user_message or ""),
                 },
             )
     except Exception:
@@ -1537,7 +1699,7 @@ def _calendar_reply_for_upcoming(db_path: str) -> str:
 
 
 def _month_bounds_for_query(month_name: str) -> tuple[datetime, datetime, str]:
-    now_local = datetime.now(_local_tz())
+    now_local = _calendar_now_local()
     month_num = _MONTH_NAME_TO_NUM[month_name.lower()]
     year = now_local.year
     if month_num < now_local.month:
@@ -1548,6 +1710,10 @@ def _month_bounds_for_query(month_name: str) -> tuple[datetime, datetime, str]:
     else:
         end = datetime(year, month_num + 1, 1, tzinfo=_local_tz()) - timedelta(microseconds=1)
     return start, end, start.strftime("%B")
+
+
+def _calendar_now_local() -> datetime:
+    return datetime.now(_local_tz())
 
 
 def _resolve_relative_day(token: str) -> datetime:
@@ -1703,68 +1869,137 @@ def _build_calendar_enqueue_plan(message: str) -> tuple[dict[str, Any], dict[str
     )
 
 
-def _build_device_enqueue_plan(message: str) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]] | None:
+def _copy_operator_plan(plan: dict[str, Any]) -> dict[str, Any]:
+    steps: list[dict[str, Any]] = []
+    for step in plan.get("steps", []) or []:
+        if not isinstance(step, dict):
+            continue
+        input_json = step.get("input_json")
+        steps.append(
+            {
+                "tool_name": str(step.get("tool_name") or "").strip(),
+                "input_json": dict(input_json) if isinstance(input_json, dict) else {},
+                "title": str(step.get("title") or "").strip(),
+            }
+        )
+    return {
+        "mode": "graph" if plan.get("mode") == "graph" else "single",
+        "steps": steps,
+    }
+
+
+def _canonicalize_device_operator_plan(
+    db_path: str,
+    plan: dict[str, Any],
+) -> tuple[dict[str, Any], list[str]]:
+    copied = _copy_operator_plan(plan)
+    matched_refs: list[str] = []
+    for step in copied.get("steps", []):
+        if step.get("tool_name") != "device_control":
+            continue
+        input_json = step.get("input_json")
+        if not isinstance(input_json, dict):
+            continue
+        target = str(input_json.get("target") or "").strip()
+        if not target:
+            continue
+        record = _find_saved_actuator(db_path, target)
+        if record is None:
+            continue
+        input_json["target"] = str(record.get("device_ref") or target)
+        matched_refs.append(str(record.get("device_ref") or target))
+    return copied, list(dict.fromkeys(ref for ref in matched_refs if ref))
+
+
+def _build_device_enqueue_action(
+    *,
+    command_text: str,
+    why: str,
+    operator_plan: dict[str, Any],
+    device_refs: list[str] | None = None,
+    structured_command: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    metadata: dict[str, Any] = {
+        "operator_plan": operator_plan,
+        "normalized_command": command_text,
+    }
+    refs = [str(device_ref).strip() for device_ref in (device_refs or []) if str(device_ref).strip()]
+    if len(refs) == 1:
+        metadata["device_ref"] = refs[0]
+    elif refs:
+        metadata["device_refs"] = refs
+    if structured_command:
+        metadata["structured_command"] = dict(structured_command)
+    if refs:
+        metadata["inventory_kind"] = "saved_actuator"
+    return {
+        "type": "enqueue",
+        "command": command_text,
+        "timeout_seconds": 30,
+        "retries": 0,
+        "why": why,
+        "risk": "low",
+        "metadata": metadata,
+    }
+
+
+def _build_device_enqueue_plan(
+    db_path: str,
+    message: str,
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]] | None:
+    from gismo.cli.operator import looks_like_device_request, parse_command
     from gismo.core.risk import classify_plan_risk
 
     normalized = " ".join((message or "").strip().split())
-    lowered = normalized.lower()
-    command: str | None = None
-    why = ""
-    intent = ""
-    summary = ""
-    if re.search(r"\b(scan|find|discover)\b", lowered) and re.search(r"\b(?:device|devices|camera|cameras|network)\b", lowered):
-        command = "device: scan"
-        why = "scan your network for devices"
-        intent = "device_scan"
-        summary = "device_scan"
-    elif re.search(r"\b(list|show)\b", lowered) and re.search(r"\b(?:device|devices)\b", lowered):
-        command = "device: list"
-        why = "check your saved devices"
-        intent = "device_list"
-        summary = "device_list"
-    else:
-        power_match = re.match(r"(?i)^(?:turn|switch|power)\s+(on|off)\s+(.+)$", normalized)
-        if power_match:
-            state = power_match.group(1).lower()
-            target = " ".join(power_match.group(2).split())
-            command = f"device: turn {state} {target}"
-            why = f"turn {state} {target}"
-            intent = "device_power"
-            summary = "device_power"
-        else:
-            check_match = re.match(
-                r"(?i)^(?:check|show|status(?:\s+of)?|what(?:'s| is)\s+the\s+status\s+of)\s+(.+)$",
-                normalized,
-            )
-            if check_match:
-                target = " ".join(check_match.group(1).split())
-                command = f"device: check {target}"
-                why = f"check {target}"
-                intent = "device_check"
-                summary = "device_check"
-    if command is None:
+    if not normalized:
         return None
+    command = f"device: {normalized}"
+    try:
+        parsed = parse_command(command)
+    except ValueError as exc:
+        if not looks_like_device_request(normalized):
+            return None
+        return (
+            {
+                "intent": "device_clarify",
+                "assumptions": ["Operator appears to be asking for a saved-device action."],
+                "actions": [],
+                "notes": [str(exc)],
+                "memory_suggestions": [],
+            },
+            classify_plan_risk([]).to_dict(),
+            {"summary": "device_clarify"},
+        )
+
+    operator_plan, matched_refs = _canonicalize_device_operator_plan(db_path, parsed)
+    steps = [step for step in operator_plan.get("steps", []) if step.get("tool_name") == "device_control"]
+    if not steps:
+        return None
+    why = _join_human(
+        [
+            str(step.get("title") or "control a device").removeprefix("Devices: ").lower()
+            for step in steps
+        ]
+    )
     actions = [
-        {
-            "type": "enqueue",
-            "command": command,
-            "timeout_seconds": 30,
-            "retries": 0,
-            "why": why,
-            "risk": "low",
-        }
+        _build_device_enqueue_action(
+            command_text=command,
+            why=why,
+            operator_plan=operator_plan,
+            device_refs=matched_refs,
+        )
     ]
     risk = classify_plan_risk(actions).to_dict()
     return (
         {
-            "intent": intent,
+            "intent": "device_control",
             "assumptions": ["Operator asked GISMO to use saved device controls."],
             "actions": actions,
             "notes": [],
             "memory_suggestions": [],
         },
         risk,
-        {"summary": summary},
+        {"summary": "device_control"},
     )
 
 
@@ -1781,12 +2016,21 @@ def _activity_summary_reply(db_path: str) -> str:
 
 
 def _device_summary_reply(db_path: str) -> str:
-    devices = list_devices(db_path)
-    if not devices:
-        return "You do not have any connected devices yet."
-    names = [str(device.get("name") or device.get("hostname") or device.get("ip")) for device in devices[:6]]
-    extra = f" There are {len(devices) - 6} more." if len(devices) > 6 else ""
-    return f"Connected devices: {_join_human(names)}.{extra}"
+    systems = list_devices(db_path)
+    actuators = list_saved_actuators(db_path)
+    if not systems and not actuators:
+        return "You do not have any connected systems or saved controls yet."
+
+    parts: list[str] = []
+    if actuators:
+        names = [str(device.get("name") or device.get("device_ref") or "saved control") for device in actuators[:6]]
+        extra = f" There are {len(actuators) - 6} more." if len(actuators) > 6 else ""
+        parts.append(f"Saved controls: {_join_human(names)}.{extra}")
+    if systems:
+        names = [str(device.get("name") or device.get("hostname") or device.get("ip")) for device in systems[:6]]
+        extra = f" There are {len(systems) - 6} more." if len(systems) > 6 else ""
+        parts.append(f"Connected systems: {_join_human(names)}.{extra}")
+    return " ".join(parts)
 
 
 def _status_summary_reply(db_path: str) -> str:
@@ -1895,7 +2139,7 @@ def _handle_deterministic_query(db_path: str, message: str) -> dict[str, Any] | 
         reply = _activity_summary_reply(db_path)
     else:
         return None
-    _append_chat_record(message, reply)
+    _append_chat_record(db_path, message, reply)
     return {
         "reply": reply,
         "mode": "reply",
@@ -1958,6 +2202,7 @@ def chat_message(
     history: list[dict[str, str]],
 ) -> dict[str, Any]:
     """Route chat requests into direct reply, clarification, or approval-ready plans."""
+    db_path = normalize_database_path(db_path)
     classification = {"kind": "ambiguous_request", "confidence": 0.0, "reason": "Unclassified."}
     try:
         classification = classify_chat_request(message)
@@ -1967,7 +2212,7 @@ def chat_message(
             if deterministic_reply is not None:
                 return deterministic_reply
             reply = "I can help with your calendar. Try asking what you have today, what is coming up, or ask me to add an event."
-            _append_chat_record(message, reply)
+            _append_chat_record(db_path, message, reply)
             return {
                 "reply": reply,
                 "mode": "clarify",
@@ -1975,9 +2220,18 @@ def chat_message(
                 "classification_detail": classification,
             }
 
+        device_plan = _build_device_enqueue_plan(db_path, message)
+        calendar_plan = _build_calendar_enqueue_plan(message) if device_plan is None else None
+        if device_plan is not None or calendar_plan is not None:
+            classification = {
+                **classification,
+                "kind": "operational_request",
+                "reason": "The request maps to a supported operator command.",
+            }
+
         if classification["kind"] == "ambiguous_request":
             reply = "I can help. Tell me exactly what you'd like me to do, or ask a direct question."
-            _append_chat_record(message, reply)
+            _append_chat_record(db_path, message, reply)
             return {
                 "reply": reply,
                 "mode": "clarify",
@@ -1988,13 +2242,13 @@ def chat_message(
         if classification["kind"] == "conversational_request":
             route = resolve_model_route(db_path, purpose="assistant_reply")
             history_limit = route.capability.history_messages if not route.degraded else 6
-            messages = list(history)[-history_limit:] + [{"role": "user", "content": message}]
+            messages = _server_chat_context(db_path, history_limit) + [{"role": "user", "content": message}]
             reply = _run_freeform_chat_with_fallback(
                 db_path,
                 messages=messages,
                 system=_build_chat_system(db_path),
             )
-            _append_chat_record(message, reply)
+            _append_chat_record(db_path, message, reply)
             return {
                 "reply": reply,
                 "mode": "reply",
@@ -2002,8 +2256,6 @@ def chat_message(
                 "classification_detail": classification,
             }
 
-        device_plan = _build_device_enqueue_plan(message)
-        calendar_plan = _build_calendar_enqueue_plan(message) if device_plan is None else None
         if device_plan is not None:
             plan, risk, explain_json = device_plan
         elif calendar_plan is not None:
@@ -2019,7 +2271,7 @@ def chat_message(
         if not actions:
             notes = _coerce_text_list(plan.get("notes"))
             reply = notes[0] if notes else "I need a little more detail before I act. What would you like me to do?"
-            _append_chat_record(message, reply)
+            _append_chat_record(db_path, message, reply)
             return {
                 "reply": reply,
                 "mode": "clarify",
@@ -2037,7 +2289,7 @@ def chat_message(
                 explain_json=explain_json,
             )
             reply = "Working on that now."
-            _append_chat_record(message, reply)
+            _append_chat_record(db_path, message, reply)
             return {
                 "reply": reply,
                 "mode": "execution",
@@ -2065,7 +2317,7 @@ def chat_message(
             )
 
         reply, steps = _format_plan_reply(plan, risk)
-        _append_chat_record(message, reply)
+        _append_chat_record(db_path, message, reply)
         return {
             "reply": reply,
             "mode": "plan",
@@ -2087,7 +2339,7 @@ def chat_message(
                 user_message=message,
             )
         reply = _CHAT_PLAN_ERROR_REPLY if classification.get("kind") == "operational_request" else _CHAT_MODEL_ERROR_REPLY
-        _append_chat_record(message, reply)
+        _append_chat_record(db_path, message, reply)
         return {
             "reply": reply,
             "mode": "reply",
@@ -2382,6 +2634,694 @@ def _device_capabilities(device: ConnectedDevice, *, stream_url: str | None) -> 
     return capabilities
 
 
+def _configured_actuator_records(db_path: str) -> list[dict[str, Any]]:
+    from gismo.core.device_adapters.config import load_configured_devices, normalize_platform_name
+
+    try:
+        _, configured = load_configured_devices(db_path=db_path)
+    except RuntimeError:
+        return []
+
+    records: list[dict[str, Any]] = []
+    for entry in configured:
+        if not isinstance(entry, dict):
+            continue
+        device_ref = _configured_actuator_ref(entry)
+        ip = str(entry.get("ip") or "").strip()
+        if not device_ref:
+            continue
+        platform = _configured_actuator_platform(entry, normalize_platform_name(entry))
+        device_type = str(entry.get("device_type") or "").strip() or "smart device"
+        name = _configured_actuator_name(entry, fallback=device_ref or ip or "Saved control")
+        actions = _configured_actuator_actions(entry, platform, device_type)
+        record = {
+            "name": name,
+            "device_ref": device_ref or ip,
+            "gismo_device_id": str(entry.get("gismo_device_id") or "").strip() or None,
+            "platform": platform or "configured",
+            "device_type": device_type,
+            "kind": _configured_actuator_kind(device_type),
+            "brand": _configured_actuator_brand(entry, platform),
+            "ip": ip,
+            "capabilities": _configured_actuator_capabilities(actions),
+            "actions": actions,
+            "target_name": _configured_actuator_target_name(name, device_ref or ip),
+            "_entry": dict(entry),
+        }
+        records.append(record)
+    return records
+
+
+def _configured_actuator_ref(entry: dict[str, Any]) -> str:
+    for field in ("gismo_device_id", "id"):
+        value = str(entry.get(field) or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def _configured_actuator_name(entry: dict[str, Any], *, fallback: str) -> str:
+    for field in ("name", "label", "alias", "gismo_device_id", "device_id", "ip"):
+        value = str(entry.get(field) or "").strip()
+        if value:
+            return value
+    return fallback
+
+
+def _configured_actuator_platform(entry: dict[str, Any], normalized_platform: str) -> str:
+    platform = normalized_platform or ""
+    if platform:
+        return platform
+    if str(entry.get("device_id") or "").strip() and str(entry.get("local_key") or "").strip():
+        return "tuya"
+    text = " ".join(
+        _normalize_inventory_text(entry.get(field))
+        for field in ("brand", "manufacturer", "device_type", "name", "label")
+        if entry.get(field)
+    )
+    if any(token in text for token in ("tuya", "feit")):
+        return "tuya"
+    return ""
+
+
+def _configured_actuator_brand(entry: dict[str, Any], platform: str) -> str:
+    brand = str(entry.get("brand") or entry.get("manufacturer") or "").strip()
+    if brand:
+        return brand
+    if "feit" in platform:
+        return "FEIT"
+    if platform == "tuya":
+        return "Tuya"
+    if platform:
+        return platform.title()
+    return "Configured"
+
+
+def _configured_actuator_kind(device_type: str) -> str:
+    normalized = _normalize_inventory_text(device_type)
+    if any(token in normalized for token in ("light", "lamp", "bulb")):
+        return "light"
+    if any(token in normalized for token in ("plug", "switch", "outlet")):
+        return "switch"
+    return "device"
+
+
+_ACTUATOR_ACTIONS = {"turn_on", "turn_off", "set_brightness", "set_color_temp", "set_color_rgb"}
+
+
+def _configured_actuator_actions(entry: dict[str, Any], platform: str, device_type: str) -> list[str]:
+    configured = entry.get("actions")
+    if isinstance(configured, list):
+        return list(dict.fromkeys(
+            action
+            for action in (str(value or "").strip().lower() for value in configured)
+            if action in _ACTUATOR_ACTIONS
+        ))
+    kind = _configured_actuator_kind(device_type)
+    if kind == "switch":
+        return ["turn_on", "turn_off"]
+    if kind != "light":
+        return []
+    actions = ["turn_on", "turn_off"]
+    if platform in {"tuya", "feit", "feit electric"}:
+        actions.extend(["set_brightness", "set_color_temp", "set_color_rgb"])
+    return actions
+
+
+def _configured_actuator_capabilities(actions: list[str]) -> list[str]:
+    labels = {
+        "turn_on": "power",
+        "turn_off": "power",
+        "set_brightness": "brightness",
+        "set_color_temp": "white temperature",
+        "set_color_rgb": "color",
+    }
+    return list(dict.fromkeys(labels[action] for action in actions if action in labels))
+
+
+def _configured_actuator_target_name(name: str, device_ref: str) -> str:
+    for candidate in (name, device_ref):
+        tokens = _inventory_tokens(candidate)
+        if tokens and any(token in {"light", "lights", "lamp", "lamps", "bulb", "bulbs"} for token in re.sub(r"[-_]+", " ", _normalize_inventory_text(candidate)).split()):
+            return candidate
+    return name or device_ref
+
+
+def _configured_actuator_device(record: dict[str, Any]) -> ConnectedDevice:
+    entry = dict(record.get("_entry") or {})
+    metadata: dict[str, Any] = {
+        "label": record.get("name"),
+        "gismo_device_id": record.get("gismo_device_id"),
+        "device_id": str(entry.get("device_id") or "").strip() or None,
+        "platform": record.get("platform"),
+        "adapter": "tuya" if record.get("platform") in {"tuya", "feit", "feit electric"} else record.get("platform"),
+        "controller": "tuya" if record.get("platform") in {"tuya", "feit", "feit electric"} else record.get("platform"),
+        "open_ports": [6668] if record.get("platform") in {"tuya", "feit", "feit electric"} else [],
+        "inventory_kind": "configured_actuator",
+    }
+    metadata = {key: value for key, value in metadata.items() if value not in (None, "", [])}
+    return ConnectedDevice(
+        id=str(record.get("device_ref") or ""),
+        ip=str(record.get("ip") or ""),
+        hostname=str(record.get("name") or "") or None,
+        device_type=str(record.get("device_type") or "smart device"),
+        brand=str(record.get("brand") or "Configured"),
+        metadata_json=metadata,
+    )
+
+
+def _probe_saved_actuator_statuses(db_path: str, records: list[dict[str, Any]]) -> tuple[bool, dict[str, str]]:
+    if not records:
+        return True, {}
+    try:
+        check_outbound_scope(
+            component="web_device_discovery",
+            scope="private",
+            actor="web",
+            action="device_status",
+            db_path=db_path,
+        )
+    except PermissionError:
+        return False, {}
+
+    devices = [_configured_actuator_device(record) for record in records if str(record.get("ip") or "").strip()]
+    if not devices:
+        return True, {}
+    execution = execute_device_runtime_action(
+        component="web_device_discovery",
+        action="device_status",
+        actor="web",
+        db_path=db_path,
+        payload={"devices": [serialize_device(device) for device in devices]},
+        timeout_s=5.0,
+    )
+    statuses = {
+        str(item.get("id") or ""): str(item.get("status") or "offline")
+        for item in list(execution.get("devices") or [])
+        if isinstance(item, dict)
+    }
+    return True, statuses
+
+
+_ACTUATOR_STATE_STALE_SECONDS = 15 * 60
+
+
+def _actuator_refs(record: dict[str, Any]) -> set[str]:
+    refs = {
+        _normalize_inventory_text(record.get("device_ref")),
+        _normalize_inventory_text(record.get("name")),
+        _normalize_inventory_text(record.get("gismo_device_id")),
+        _normalize_inventory_text((record.get("_entry") or {}).get("alias")),
+        _normalize_inventory_text((record.get("_entry") or {}).get("label")),
+    }
+    refs.discard("")
+    return refs
+
+
+def _safe_int(value: Any) -> int | None:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _actuator_last_result(
+    record: dict[str, Any],
+    *,
+    events: list[Any],
+) -> dict[str, Any] | None:
+    refs = _actuator_refs(record)
+    if not refs:
+        return None
+
+    for event in events:
+        if not str(event.event_type or "").startswith("device_"):
+            continue
+        if not _event_matches_actuator(event, refs):
+            continue
+        payload = event.json_payload if isinstance(getattr(event, "json_payload", None), dict) else {}
+        changed_count = _safe_int(payload.get("changed")) or 0
+        confirmed_count = _safe_int(payload.get("confirmed")) or 0
+        failed_count = _safe_int(payload.get("failed")) or 0
+        skipped_count = (_safe_int(payload.get("needs_setup")) or 0) + (_safe_int(payload.get("unsupported")) or 0)
+        if changed_count <= 0 or str(event.event_type or "").endswith("failed"):
+            status = "error"
+        elif failed_count > 0 or skipped_count > 0:
+            status = "partial"
+        elif confirmed_count >= changed_count:
+            status = "confirmed"
+        else:
+            status = "accepted"
+        return {
+            "summary": event.message,
+            "status": status,
+            "at": _dt(event.ts),
+        }
+    return None
+
+
+def _event_matches_actuator(event: Any, refs: set[str]) -> bool:
+    payload = event.json_payload if isinstance(getattr(event, "json_payload", None), dict) else {}
+    values: list[Any] = [
+        payload.get("target"),
+        payload.get("device_ref"),
+        payload.get("device_id"),
+        payload.get("adapter"),
+        getattr(event, "message", ""),
+    ]
+    for key in ("changed", "needs_setup", "failed"):
+        if isinstance(payload.get(key), list):
+            values.extend(payload.get(key) or [])
+    return any(_text_matches_inventory_refs(value, refs) for value in values)
+
+
+def _summarize_actuator_state(
+    *,
+    power: str,
+    brightness: int | None,
+    white_mode: str | None,
+    color_name: str | None,
+) -> str:
+    parts: list[str] = []
+    if power == "on":
+        parts.append("Power on")
+    elif power == "off":
+        parts.append("Power off")
+    if brightness is not None:
+        parts.append(f"Brightness {brightness}%")
+    if white_mode:
+        parts.append(f"White {white_mode.replace('_', ' ')}")
+    if color_name:
+        parts.append(f"Color {color_name}")
+    if not parts:
+        return "No confirmed light state yet."
+    return ". ".join(parts) + "."
+
+
+def _actuator_current_state(
+    record: dict[str, Any],
+    *,
+    events: list[Any],
+) -> dict[str, Any]:
+    refs = _actuator_refs(record)
+    power = "unknown"
+    brightness: int | None = None
+    white_mode: str | None = None
+    color_name: str | None = None
+    updated_at = None
+
+    for event in events:
+        event_type = str(event.event_type or "")
+        if event_type not in {"device_power", "device_light_command"}:
+            continue
+        if not _event_matches_actuator(event, refs):
+            continue
+        payload = event.json_payload if isinstance(getattr(event, "json_payload", None), dict) else {}
+        if updated_at is None:
+            updated_at = getattr(event, "ts", None)
+        verified_states = payload.get("verified_states")
+        if not isinstance(verified_states, dict):
+            continue
+        matching_states = [
+            state
+            for device_ref, state in verified_states.items()
+            if _normalize_inventory_text(device_ref) in refs and isinstance(state, dict)
+        ]
+        if not matching_states:
+            continue
+        state = matching_states[0]
+        if power == "unknown" and isinstance(state.get("is_on"), bool):
+            power = "on" if state["is_on"] else "off"
+        if brightness is None:
+            brightness = _safe_int(state.get("brightness"))
+        if white_mode is None:
+            preset = str(state.get("color_temp_preset") or "").strip().lower()
+            white_mode = preset or None
+        if color_name is None and isinstance(state.get("color_rgb"), dict):
+            color_name = "rgb"
+
+    stale = True
+    if updated_at is not None:
+        stale = (datetime.now(timezone.utc) - updated_at).total_seconds() > _ACTUATOR_STATE_STALE_SECONDS
+    return {
+        "power": power,
+        "brightness": brightness,
+        "white_mode": white_mode,
+        "color_name": color_name,
+        "summary": _summarize_actuator_state(
+            power=power,
+            brightness=brightness,
+            white_mode=white_mode,
+            color_name=color_name,
+        ),
+        "updated_at": _dt(updated_at),
+        "stale": stale,
+    }
+
+
+def _queue_item_matches_actuator(item: Any, refs: set[str]) -> bool:
+    metadata = item.metadata_json if isinstance(getattr(item, "metadata_json", None), dict) else {}
+    values: list[Any] = [
+        getattr(item, "command_text", ""),
+        metadata.get("device_ref"),
+        metadata.get("normalized_command"),
+    ]
+    if isinstance(metadata.get("device_refs"), list):
+        values.extend(metadata.get("device_refs") or [])
+    structured = metadata.get("structured_command")
+    if isinstance(structured, dict):
+        values.extend(
+            [
+                structured.get("device_ref"),
+                structured.get("name"),
+                structured.get("label"),
+            ]
+        )
+        for action in structured.get("actions") or []:
+            if isinstance(action, dict):
+                values.extend([action.get("action"), action.get("target")])
+    return any(_text_matches_inventory_refs(value, refs) for value in values if value)
+
+
+def _queue_status_summary(item: Any, state: str) -> str:
+    label = str(getattr(item, "command_text", "") or "Saved control command").strip()
+    if state == "pending":
+        return f"Pending: {label}"
+    if state == "executing":
+        return f"Executing: {label}"
+    if state == "accepted":
+        return f"Accepted: {label}. Waiting for confirmed device state."
+    error = str(getattr(item, "last_error", "") or "").strip()
+    if state == "failed" and error:
+        return error
+    return f"Failed: {label}"
+
+
+def _actuator_command_status(
+    record: dict[str, Any],
+    *,
+    queue_items: list[Any],
+) -> dict[str, Any] | None:
+    refs = _actuator_refs(record)
+    if not refs:
+        return None
+
+    state_map = {
+        "QUEUED": "pending",
+        "IN_PROGRESS": "executing",
+        "SUCCEEDED": "accepted",
+        "FAILED": "failed",
+        "CANCELLED": "failed",
+    }
+    for item in queue_items:
+        if not _queue_item_matches_actuator(item, refs):
+            continue
+        status = str(_status_val(getattr(item, "status", ""))).upper()
+        state = state_map.get(status, "failed")
+        return {
+            "state": state,
+            "summary": _queue_status_summary(item, state),
+            "queue_item_id": getattr(item, "id", None),
+            "updated_at": _dt(getattr(item, "updated_at", None)),
+        }
+    return None
+
+
+def list_saved_actuators(db_path: str) -> list[dict[str, Any]]:
+    records = _configured_actuator_records(db_path)
+    can_probe, statuses = _probe_saved_actuator_statuses(db_path, records)
+    with StateStore(db_path) as store:
+        events = store.list_events(limit=120)
+        queue_items = store.list_queue_items(limit=120)
+    actuators: list[dict[str, Any]] = []
+    for record in records:
+        status = statuses.get(str(record.get("device_ref") or ""), "unknown" if not can_probe else "offline")
+        reachability = "reachable" if status == "online" else "unknown" if status == "unknown" else "unreachable"
+        actuators.append(
+            {
+                "name": record["name"],
+                "device_ref": record["device_ref"],
+                "gismo_device_id": record["gismo_device_id"],
+                "platform": record["platform"],
+                "device_type": record["device_type"],
+                "kind": record["kind"],
+                "brand": record["brand"],
+                "ip": record["ip"],
+                "status": status,
+                "reachability": reachability,
+                "capabilities": list(record["capabilities"]),
+                "actions": list(record["actions"]),
+                "last_result": _actuator_last_result(record, events=events),
+                "current_state": _actuator_current_state(record, events=events),
+                "current_command": _actuator_command_status(record, queue_items=queue_items),
+            }
+        )
+    return actuators
+
+
+def _find_saved_actuator(db_path: str, device_ref: str) -> dict[str, Any] | None:
+    wanted = _normalize_inventory_text(device_ref)
+    if not wanted:
+        return None
+    records = _configured_actuator_records(db_path)
+    canonical = [record for record in records if _normalize_inventory_text(record.get("device_ref")) == wanted]
+    if len(canonical) == 1:
+        return canonical[0]
+    if len(canonical) > 1:
+        raise ValueError("Saved control identity is duplicated; use a unique device_ref.")
+    aliases = [record for record in records if wanted in (_actuator_refs(record) - {_normalize_inventory_text(record.get("device_ref"))})]
+    if len(aliases) == 1:
+        return aliases[0]
+    if len(aliases) > 1:
+        raise ValueError("That saved-control name is ambiguous; use the exact device_ref.")
+    return None
+
+
+def _render_color_temp_preset(preset: str) -> str:
+    labels = {
+        "cool_white": "cool white",
+        "warm_white": "warm white",
+        "soft_white": "soft white",
+        "neutral": "white",
+    }
+    return labels.get(preset, preset.replace("_", " "))
+
+
+_LIGHT_COLOR_RGB = {
+    "red": {"r": 255, "g": 0, "b": 0},
+    "blue": {"r": 0, "g": 0, "b": 255},
+    "green": {"r": 0, "g": 255, "b": 0},
+    "purple": {"r": 128, "g": 0, "b": 128},
+    "pink": {"r": 255, "g": 105, "b": 180},
+    "yellow": {"r": 255, "g": 255, "b": 0},
+    "orange": {"r": 255, "g": 165, "b": 0},
+}
+
+_LIGHT_COLOR_TEMP_ALIASES = {
+    "warm": "warm_white",
+    "warm white": "warm_white",
+    "soft": "soft_white",
+    "soft white": "soft_white",
+    "white": "neutral",
+    "neutral": "neutral",
+    "cool": "cool_white",
+    "cool white": "cool_white",
+    "daylight": "daylight",
+}
+
+
+def _normalize_color_temp_preset(value: Any) -> str:
+    preset = str(value or "").strip().lower().replace("-", " ").replace("_", " ")
+    preset = " ".join(preset.split())
+    normalized = _LIGHT_COLOR_TEMP_ALIASES.get(preset)
+    if not normalized:
+        raise ValueError("preset is required for set_color_temp")
+    return normalized
+
+
+def _normalize_saved_light_command(
+    record: dict[str, Any],
+    *,
+    action: str,
+    params: dict[str, Any],
+) -> dict[str, Any]:
+    supported_actions = {str(item).strip().lower() for item in record.get("actions") or []}
+    if action not in supported_actions:
+        raise ValueError(f"Unsupported actuator action: {action}")
+
+    if action in {"turn_on", "turn_off"}:
+        return {"action": action, "params": {}}
+    if action == "set_brightness":
+        value = int(params.get("brightness"))
+        if not 0 <= value <= 100:
+            raise ValueError("brightness must be between 0 and 100")
+        return {"action": action, "params": {"brightness": value}}
+    if action == "set_color_temp":
+        preset = _normalize_color_temp_preset(params.get("preset"))
+        return {"action": action, "params": {"preset": preset}}
+    if action == "set_color_rgb":
+        color_name = str(params.get("color_name") or params.get("color") or "").strip().lower()
+        if color_name:
+            rgb = _LIGHT_COLOR_RGB.get(color_name)
+            if rgb is None:
+                raise ValueError(f"Unsupported light color: {color_name}")
+            return {"action": action, "params": {"color_name": color_name, **rgb}}
+        try:
+            red = int(params.get("r"))
+            green = int(params.get("g"))
+            blue = int(params.get("b"))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("color_name or r/g/b is required for set_color_rgb") from exc
+        for channel in (red, green, blue):
+            if not 0 <= channel <= 255:
+                raise ValueError("r, g, and b must be between 0 and 255")
+        return {"action": action, "params": {"r": red, "g": green, "b": blue}}
+    raise ValueError(f"Unsupported actuator action: {action}")
+
+
+def _saved_light_command_title(record: dict[str, Any], action: str, params: dict[str, Any]) -> str:
+    name = str(record.get("name") or record.get("device_ref") or "Saved control").strip()
+    if action == "turn_on":
+        return f"Devices: Turn on {name}"
+    if action == "turn_off":
+        return f"Devices: Turn off {name}"
+    if action == "set_brightness":
+        return f"Devices: Set {name} brightness to {params['brightness']}%"
+    if action == "set_color_temp":
+        return f"Devices: Set {name} to {_render_color_temp_preset(str(params['preset']))}"
+    if action == "set_color_rgb":
+        color_name = str(params.get("color_name") or "custom color").strip()
+        return f"Devices: Set {name} to {color_name}"
+    return f"Devices: Control {name}"
+
+
+def _saved_light_command_label(record: dict[str, Any], commands: list[dict[str, Any]]) -> str:
+    name = str(record.get("name") or record.get("device_ref") or "Saved control").strip()
+    if len(commands) == 1:
+        action = str(commands[0].get("action") or "control").strip().lower()
+        return f"control: {name} / {action}"
+    return f"control: {name} / preset ({len(commands)} actions)"
+
+
+def _build_saved_light_operator_plan(
+    record: dict[str, Any],
+    commands: list[dict[str, Any]],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    if not commands:
+        raise ValueError("At least one actuator command is required")
+
+    steps: list[dict[str, Any]] = []
+    normalized_commands: list[dict[str, Any]] = []
+    for command in commands:
+        action = str(command.get("action") or "").strip().lower()
+        params = command.get("params") if isinstance(command.get("params"), dict) else {}
+        normalized = _normalize_saved_light_command(record, action=action, params=params)
+        normalized_commands.append(
+            {
+                "action": normalized["action"],
+                "params": dict(normalized["params"]),
+                "target": record["device_ref"],
+            }
+        )
+        tool_input: dict[str, Any] = {
+            "action": normalized["action"],
+            "target": record["device_ref"],
+            "request": str(record.get("name") or record.get("device_ref") or "").strip(),
+        }
+        if normalized["params"]:
+            tool_input["params"] = dict(normalized["params"])
+        steps.append(
+            {
+                "tool_name": "device_control",
+                "input_json": tool_input,
+                "title": _saved_light_command_title(record, normalized["action"], normalized["params"]),
+            }
+        )
+
+    label = _saved_light_command_label(record, normalized_commands)
+    return (
+        {
+            "mode": "single" if len(steps) == 1 else "graph",
+            "steps": steps,
+        },
+        {
+            "device_ref": record["device_ref"],
+            "name": record["name"],
+            "label": label,
+            "actions": normalized_commands,
+        },
+    )
+
+
+def control_actuator(db_path: str, payload: dict[str, Any]) -> dict[str, Any]:
+    body = dict(payload) if isinstance(payload, dict) else {}
+    device_ref = str(body.get("device_ref") or body.get("id") or "").strip()
+    if not device_ref:
+        raise ValueError("device_ref is required")
+
+    record = _find_saved_actuator(db_path, device_ref)
+    if record is None:
+        raise ValueError(f"Saved control not found: {device_ref}")
+
+    commands = body.get("commands")
+    if isinstance(commands, list) and commands:
+        normalized_commands = [
+            dict(command)
+            for command in commands
+            if isinstance(command, dict)
+        ]
+    else:
+        action = str(body.get("action") or "").strip().lower()
+        params = body.get("params") if isinstance(body.get("params"), dict) else {}
+        if not action:
+            raise ValueError("action is required")
+        normalized_commands = [{"action": action, "params": params}]
+
+    operator_plan, structured_command = _build_saved_light_operator_plan(record, normalized_commands)
+    why = _join_human(
+        [
+            str(step.get("title") or "control a saved device").removeprefix("Devices: ").lower()
+            for step in operator_plan.get("steps", [])
+        ]
+    )
+    command_text = str(structured_command.get("label") or record["name"]).strip()
+    plan = {
+        "intent": "device_control",
+        "assumptions": ["Dashboard requested a saved-device action."],
+        "actions": [
+            _build_device_enqueue_action(
+                command_text=command_text,
+                why=why,
+                operator_plan=operator_plan,
+                device_refs=[record["device_ref"]],
+                structured_command=structured_command,
+            )
+        ],
+        "notes": [],
+        "memory_suggestions": [],
+    }
+    execution = _enqueue_chat_execution(
+        db_path,
+        message=command_text,
+        plan=plan,
+        classification={
+            "kind": "operational_request",
+            "confidence": 1.0,
+            "reason": "Dashboard saved-light request.",
+        },
+        explain_json={"summary": "device_control"},
+    )
+    return {
+        "reply": f"Working on {record['name']} now.",
+        "mode": "execution",
+        "command_text": command_text,
+        "device_ref": record["device_ref"],
+        "structured": True,
+        "structured_command": structured_command,
+        "execution": execution,
+    }
+
+
 def _device_is_online(device: ConnectedDevice) -> bool:
     ports = device.metadata_json.get("open_ports")
     if not isinstance(ports, list) or not ports:
@@ -2640,7 +3580,7 @@ def list_devices(db_path: str) -> list[dict[str, Any]]:
 
 
 def get_devices(db_path: str) -> list[dict[str, Any]]:
-    """Backward-compatible alias for saved devices."""
+    """Backward-compatible alias for connected systems."""
     return list_devices(db_path)
 
 
@@ -3007,7 +3947,8 @@ def delete_calendar_event(db_path: str, event_id: str) -> dict[str, Any]:
 
 def get_activity_feed(db_path: str, limit: int = 40) -> list[dict[str, Any]]:
     """Merge recent queue items, runs, and chat history into a unified activity timeline."""
-    import json as _json
+    db_path = normalize_database_path(db_path)
+    _audit_legacy_chat_fallback_blocked(db_path)
 
     _Q_COLORS = {
         "QUEUED": "blue", "IN_PROGRESS": "teal",
@@ -3019,6 +3960,7 @@ def get_activity_feed(db_path: str, limit: int = 40) -> list[dict[str, Any]]:
 
     with StateStore(db_path) as store:
         recent_events = store.list_events(limit=20)
+        recent_chats = store.list_chat_exchanges(limit=20)
 
     for event in recent_events:
         event_type = str(event.event_type or "")
@@ -3053,23 +3995,15 @@ def get_activity_feed(db_path: str, limit: int = 40) -> list[dict[str, Any]]:
             "timestamp": run.get("created_at"),
         })
 
-    # Pull recent chat exchanges from history file
-    try:
-        hist_path = _CHAT_HISTORY_FILE
-        if hist_path.exists():
-            lines = hist_path.read_text(encoding="utf-8").splitlines()
-            for line in reversed(lines[-20:]):
-                rec = _json.loads(line)
-                snippet = (rec.get("user") or "")[:50]
-                events.append({
-                    "type": "chat",
-                    "label": snippet or "(empty)",
-                    "status": "CHAT",
-                    "color": "teal",
-                    "timestamp": rec.get("timestamp"),
-                })
-    except Exception:
-        pass
+    for exchange in recent_chats:
+        events.append({
+            "id": exchange.id,
+            "type": "chat",
+            "label": exchange.user_text[:50] or "(empty)",
+            "status": "CHAT",
+            "color": "teal",
+            "timestamp": _dt(exchange.created_at),
+        })
 
     events.sort(key=lambda e: e.get("timestamp") or "", reverse=True)
     return events[:limit]

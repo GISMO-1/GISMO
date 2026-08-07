@@ -60,9 +60,11 @@ def find_configured_device(
     if not wanted:
         return None
 
-    for device in devices:
-        if wanted & _device_identifiers(device):
-            return dict(device)
+    matches = [dict(device) for device in devices if wanted & _device_identifiers(device)]
+    if len(matches) == 1:
+        return matches[0]
+    if len(matches) > 1:
+        raise RuntimeError("Configured device identity is ambiguous; use a unique gismo_device_id.")
     return None
 
 

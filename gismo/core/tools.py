@@ -5,7 +5,23 @@ import inspect
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
+from gismo.core.models import FailureType
 from gismo.core.state import StateStore
+
+
+class ToolExecutionError(Exception):
+    """A truthful tool failure with a safe structured result for receipts and UI."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        result: Dict[str, Any],
+        failure_type: FailureType = FailureType.SYSTEM_ERROR,
+    ) -> None:
+        super().__init__(message)
+        self.result = dict(result)
+        self.failure_type = failure_type
 
 
 @dataclass

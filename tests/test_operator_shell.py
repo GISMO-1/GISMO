@@ -56,6 +56,80 @@ class OperatorShellTest(unittest.TestCase):
         self.assertEqual(plan["steps"][0]["input_json"]["action"], "turn_on")
         self.assertEqual(plan["steps"][0]["input_json"]["target"], "kitchen lights")
 
+    def test_light_power_command_parsing(self) -> None:
+        plan = parse_command("device: turn Dad's light on")
+        self.assertEqual(plan["mode"], "single")
+        self.assertEqual(plan["steps"][0]["input_json"]["action"], "turn_on")
+        self.assertEqual(plan["steps"][0]["input_json"]["target"], "Dad's light")
+
+    def test_light_power_off_command_parsing(self) -> None:
+        plan = parse_command("device: turn Dad's light off")
+        self.assertEqual(plan["mode"], "single")
+        self.assertEqual(plan["steps"][0]["input_json"]["action"], "turn_off")
+        self.assertEqual(plan["steps"][0]["input_json"]["target"], "Dad's light")
+
+    def test_light_cool_white_command_parsing(self) -> None:
+        plan = parse_command("device: set Dad's light to cool white")
+        self.assertEqual(plan["mode"], "graph")
+        self.assertEqual([step["input_json"]["action"] for step in plan["steps"]], ["turn_on", "set_color_temp"])
+        self.assertEqual(plan["steps"][1]["input_json"]["params"]["preset"], "cool_white")
+
+    def test_light_warm_command_parsing(self) -> None:
+        plan = parse_command("device: make Dad's light warm")
+        self.assertEqual(plan["mode"], "graph")
+        self.assertEqual(plan["steps"][1]["input_json"]["action"], "set_color_temp")
+        self.assertEqual(plan["steps"][1]["input_json"]["params"]["preset"], "warm")
+
+    def test_light_blue_command_parsing(self) -> None:
+        plan = parse_command("device: make Dad's light blue")
+        self.assertEqual(plan["mode"], "graph")
+        self.assertEqual(plan["steps"][1]["input_json"]["action"], "set_color_rgb")
+        self.assertEqual(plan["steps"][1]["input_json"]["params"]["color_name"], "blue")
+
+    def test_light_red_command_parsing(self) -> None:
+        plan = parse_command("device: set Dad's light to red")
+        self.assertEqual(plan["mode"], "graph")
+        self.assertEqual(plan["steps"][1]["input_json"]["action"], "set_color_rgb")
+        self.assertEqual(plan["steps"][1]["input_json"]["params"]["color_name"], "red")
+
+    def test_light_brightness_command_parsing(self) -> None:
+        plan = parse_command("device: dim Dad's light to 20 percent")
+        self.assertEqual(plan["mode"], "graph")
+        self.assertEqual([step["input_json"]["action"] for step in plan["steps"]], ["turn_on", "set_brightness"])
+        self.assertEqual(plan["steps"][1]["input_json"]["params"]["brightness"], 20)
+
+    def test_light_brighten_command_parsing(self) -> None:
+        plan = parse_command("device: brighten Dad's light to 80")
+        self.assertEqual(plan["mode"], "graph")
+        self.assertEqual([step["input_json"]["action"] for step in plan["steps"]], ["turn_on", "set_brightness"])
+        self.assertEqual(plan["steps"][1]["input_json"]["params"]["brightness"], 80)
+
+    def test_light_raise_brightness_command_parsing(self) -> None:
+        plan = parse_command("device: raise brightness on Dad's light to 80 percent")
+        self.assertEqual(plan["mode"], "graph")
+        self.assertEqual([step["input_json"]["action"] for step in plan["steps"]], ["turn_on", "set_brightness"])
+        self.assertEqual(plan["steps"][1]["input_json"]["params"]["brightness"], 80)
+
+    def test_light_combined_power_and_white_command_parsing(self) -> None:
+        plan = parse_command("device: turn Dad's room light on cool white")
+        self.assertEqual(plan["mode"], "graph")
+        self.assertEqual([step["input_json"]["action"] for step in plan["steps"]], ["turn_on", "set_color_temp"])
+        self.assertEqual(plan["steps"][1]["input_json"]["params"]["preset"], "cool_white")
+
+    def test_light_combined_color_and_brightness_parsing(self) -> None:
+        plan = parse_command("device: set Dad's light to blue at 50 percent")
+        self.assertEqual(plan["mode"], "graph")
+        self.assertEqual(
+            [step["input_json"]["action"] for step in plan["steps"]],
+            ["turn_on", "set_color_rgb", "set_brightness"],
+        )
+        self.assertEqual(plan["steps"][1]["input_json"]["params"]["color_name"], "blue")
+        self.assertEqual(plan["steps"][2]["input_json"]["params"]["brightness"], 50)
+
+    def test_ambiguous_light_command_requires_clarification(self) -> None:
+        with self.assertRaisesRegex(ValueError, "could not understand|need a light setting"):
+            parse_command("device: make Dad's light nice")
+
     def test_calendar_command_parsing(self) -> None:
         plan = parse_command(
             'calendar: add {"title":"Dinner","start_at":"2026-03-20T18:00:00","end_at":"2026-03-20T19:00:00"}'

@@ -162,16 +162,23 @@ class KasaAdapterTest(unittest.TestCase):
         fake_kasa.Discover.discover = AsyncMock(return_value={"192.168.1.50": mock_device})
 
         adapter = KasaAdapter()
+        run_results = iter([
+            {"192.168.1.50": mock_device},
+            None,
+            {},
+        ])
+
+        def run_without_leaking(coro: object) -> object:
+            if hasattr(coro, "close"):
+                coro.close()
+            return next(run_results)
+
         with patch.dict("sys.modules", {"kasa": fake_kasa}):
             with patch("gismo.core.device_adapters.kasa_adapter._run_async") as run_async:
                 # Calls in order: Discover.discover(), device.update(),
                 # and potentially device.get_emeter_realtime() if MagicMock
                 # reports hasattr as True — provide a safe fallback value.
-                run_async.side_effect = [
-                    {"192.168.1.50": mock_device},  # Discover.discover()
-                    None,                            # device.update()
-                    {},                              # get_emeter_realtime() fallback
-                ]
+                run_async.side_effect = run_without_leaking
                 devices = adapter.discover(timeout_seconds=3.0)
 
         self.assertEqual(len(devices), 1)
@@ -1117,6 +1124,90 @@ class DeviceRuntimeIdentityTest(unittest.TestCase):
         self.assertEqual(result["status"], "changed")
         self.assertEqual(attempted_refs, ["saved-device-1", "192.168.1.188"])
 
+    def test_run_light_command_prefers_stable_device_ref_before_ip(self) -> None:
+        device = ConnectedDevice(
+            id="saved-device-1",
+            ip="192.168.1.188",
+            hostname="dad-room-light",
+            device_type="light",
+            brand="FEIT",
+            metadata_json={
+                "label": "Dad's Room Light",
+                "adapter": "tuya",
+                "device_id": "tuya-bulb-1",
+                "gismo_device_id": "dads-room-light",
+            },
+        )
+        attempted_refs: list[str] = []
+
+        def _runtime_device_command(*, device_ref: str, **kwargs: object) -> dict[str, object]:
+            attempted_refs.append(device_ref)
+            return {
+                "result": {
+                    "ok": True,
+                    "device_id": "tuya-bulb-1",
+                    "command": kwargs.get("command"),
+                    "error": None,
+                    "error_type": None,
+                }
+            }
+
+        with patch("gismo.core.device_runtime.runtime_device_command", side_effect=_runtime_device_command):
+            result = device_runtime._run_light_command(
+                device,
+                command="set_color_temp",
+                params={"preset": "cool_white"},
+            )
+
+        self.assertEqual(result["status"], "changed")
+        self.assertEqual(attempted_refs, ["tuya-bulb-1"])
+
+    def test_run_light_command_falls_back_to_ip_for_bootstrap(self) -> None:
+        device = ConnectedDevice(
+            id="saved-device-1",
+            ip="192.168.1.188",
+            hostname="dad-room-light",
+            device_type="light",
+            brand="FEIT",
+            metadata_json={
+                "label": "Dad's Room Light",
+                "adapter": "tuya",
+            },
+        )
+        attempted_refs: list[str] = []
+
+        def _runtime_device_command(*, device_ref: str, **kwargs: object) -> dict[str, object]:
+            attempted_refs.append(device_ref)
+            if device_ref == "saved-device-1":
+                return {
+                    "result": {
+                        "ok": False,
+                        "device_id": device_ref,
+                        "command": kwargs.get("command"),
+                        "error": "No configured Tuya device matches 'saved-device-1' in tmp",
+                        "error_type": "DeviceConfigurationError",
+                    }
+                }
+            return {
+                "result": {
+                    "ok": True,
+                    "device_id": "tuya-bulb-1",
+                    "command": kwargs.get("command"),
+                    "error": None,
+                    "error_type": None,
+                }
+            }
+
+        with patch("gismo.core.device_runtime.runtime_device_command", side_effect=_runtime_device_command):
+            result = device_runtime._run_light_command(
+                device,
+                command="set_color_rgb",
+                params={"r": 0, "g": 0, "b": 255},
+            )
+
+        self.assertEqual(result["status"], "changed")
+        self.assertEqual(attempted_refs, ["saved-device-1", "192.168.1.188"])
+
     def test_run_device_worker_accepts_legacy_device_id_payload(self) -> None:
         with patch(
             "gismo.core.device_runtime.runtime_device_command",
@@ -1133,6 +1224,42 @@ class DeviceRuntimeIdentityTest(unittest.TestCase):
             )
 
         self.assertEqual(runtime.call_args.kwargs["device_ref"], "legacy-device-ref")
+
+    def test_run_device_worker_routes_targeted_light_command(self) -> None:
+        device = ConnectedDevice(
+            id="dads-room-light",
+            ip="192.168.1.188",
+            hostname="dad-room-light",
+            device_type="light",
+            brand="FEIT",
+            metadata_json={"label": "Dad's Room Light", "adapter": "tuya"},
+        )
+
+        with patch(
+            "gismo.core.device_runtime.runtime_device_command",
+            return_value={
+                "ok": True,
+                "result": {
+                    "ok": True,
+                    "device_id": "tuya-bulb-1",
+                    "command": "set_brightness",
+                    "error": None,
+                    "error_type": None,
+                },
+            },
+        ) as runtime:
+            result = device_runtime.run_device_worker(
+                {
+                    "action": "device_target_command",
+                    "devices": [device_runtime.serialize_device(device)],
+                    "command": "set_brightness",
+                    "params": {"brightness": 20},
+                }
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["changed"], ["Dad's Room Light"])
+        self.assertEqual(runtime.call_args.kwargs["command"], "set_brightness")
 
 
 if __name__ == "__main__":

@@ -36,6 +36,7 @@ from gismo.core.tool_receipts import (
     sha256_payload,
     tool_kind_for_name,
 )
+from gismo.core.tools import ToolExecutionError
 from gismo.core.trust import tool_output_trust_metadata
 
 
@@ -171,7 +172,11 @@ class Orchestrator:
                     },
                 )
             except Exception as exc:  # noqa: BLE001 - fail fast with explicit exception
-                failure_type, can_retry = _classify_exception(exc, retryable)
+                structured_result = dict(exc.result) if isinstance(exc, ToolExecutionError) else None
+                if isinstance(exc, ToolExecutionError):
+                    failure_type, can_retry = exc.failure_type, False
+                else:
+                    failure_type, can_retry = _classify_exception(exc, retryable)
                 error_message = _safe_error_message(exc)
                 capability_snapshot = (
                     capability_summary(capability_claims, valid=True)
@@ -189,19 +194,29 @@ class Orchestrator:
                     allowed=not isinstance(exc, PermissionError),
                     capability=capability_snapshot,
                     network=network_decision,
-                    execution=_extract_execution_snapshot(exc),
+                    execution=_extract_execution_snapshot(structured_result or exc),
                     output_trust=tool_output_trust_metadata(tool_name).to_dict(),
                     reason=error_message,
                 )
                 tool_call.mark_failed(error_message, failure_type)
+                if structured_result is not None:
+                    tool_call.output_json = structured_result
                 receipt = _build_tool_receipt(
                     tool_call=tool_call,
                     run_context=run_context,
                     tool_input=tool_input,
-                    response_payload={
-                        "error": error_message,
-                        "error_type": exc.__class__.__name__,
-                    },
+                    response_payload=(
+                        {
+                            **structured_result,
+                            "error": error_message,
+                            "error_type": exc.__class__.__name__,
+                        }
+                        if structured_result is not None
+                        else {
+                            "error": error_message,
+                            "error_type": exc.__class__.__name__,
+                        }
+                    ),
                     status=ToolReceiptStatus.ERROR,
                     policy_snapshot=policy_snapshot,
                     error_type=exc.__class__.__name__,
@@ -213,6 +228,8 @@ class Orchestrator:
                     self.state_store.update_tool_call(tool_call, connection=connection)
                     self.state_store.record_tool_receipt(receipt, connection=connection)
                     task.error = error_message
+                    if structured_result is not None:
+                        task.output_json = structured_result
                     task.failure_type = failure_type
                     task.updated_at = _utc_now()
                     self.state_store.update_task(task, connection=connection)

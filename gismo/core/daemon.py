@@ -14,6 +14,7 @@ from typing import Callable, Optional
 from gismo.cli.operator import make_idempotency_key, normalize_command, parse_command, required_tools
 from gismo.core.agent import SimpleAgent
 from gismo.core.models import FailureType, QueueItem, Task, TaskStatus
+from gismo.core.operator_plan import OperatorPlanValidationError, verify_operator_plan_binding
 from gismo.core.orchestrator import Orchestrator
 from gismo.core.permissions import PermissionPolicy, load_policy
 from gismo.core.state import StateStore
@@ -139,7 +140,28 @@ def _run_queue_item_plan(
     *,
     registry_factory: Optional[RegistryFactory],
 ) -> None:
-    policy, plan, normalized = _load_policy_and_plan(policy_path, repo_root, item.command_text)
+    metadata = item.metadata_json if isinstance(item.metadata_json, dict) else {}
+    operator_plan = metadata.get("operator_plan") if isinstance(metadata.get("operator_plan"), dict) else None
+    binding = metadata.get("operator_plan_binding")
+    normalized_command = str(metadata.get("normalized_command") or item.command_text).strip() or item.command_text
+    if operator_plan is not None:
+        try:
+            operator_plan, binding = verify_operator_plan_binding(
+                visible_command=item.command_text,
+                operator_plan=operator_plan,
+                binding=binding,
+            )
+        except OperatorPlanValidationError as exc:
+            _record_operator_plan_failure(state, item, reason=str(exc), command_text=item.command_text)
+            raise ValueError(f"Rejected operator plan binding: {exc}") from exc
+        normalized_command = str(binding.get("visible_command") or normalized_command).strip() or normalized_command
+    policy, plan, normalized = _load_policy_and_plan(
+        policy_path,
+        repo_root,
+        item.command_text,
+        operator_plan=operator_plan,
+        normalized_command=normalized_command,
+    )
     registry = (registry_factory or build_registry)(state, policy)
     agent = SimpleAgent(registry=registry)
     orchestrator = Orchestrator(
@@ -210,9 +232,12 @@ def _load_policy_and_plan(
     policy_path: str | None,
     repo_root: Path,
     command_text: str,
+    *,
+    operator_plan: dict | None = None,
+    normalized_command: str | None = None,
 ) -> tuple[PermissionPolicy, dict, str]:
-    plan = parse_command(command_text)
-    normalized = normalize_command(command_text)
+    plan = operator_plan if isinstance(operator_plan, dict) else parse_command(command_text)
+    normalized = normalize_command(normalized_command or command_text)
     default_tools = required_tools(plan) if policy_path is None else set()
     default_tools.discard("run_shell")
     resolved_policy_path, warn = _resolve_default_policy_path(policy_path, repo_root)
@@ -224,6 +249,29 @@ def _load_policy_and_plan(
         default_allowed_tools=default_tools,
     )
     return policy, plan, normalized
+
+
+def _record_operator_plan_failure(
+    state: StateStore,
+    item: QueueItem,
+    *,
+    reason: str,
+    command_text: str,
+) -> None:
+    metadata = item.metadata_json if isinstance(item.metadata_json, dict) else {}
+    state.record_security_event(
+        event_type="operator_plan_binding_rejected",
+        actor="daemon",
+        action="verify",
+        resource="queue_item",
+        payload={
+            "queue_item_id": item.id,
+            "reason": reason,
+            "command_text": str(command_text).strip(),
+        },
+        related_run_id=item.run_id,
+        related_approval_id=str(metadata.get("approval_id") or "").strip() or None,
+    )
 
 
 def _raise_on_failed_tasks(tasks: list[Task]) -> None:

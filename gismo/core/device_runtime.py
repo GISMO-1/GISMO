@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import ipaddress
+import os
 import socket
 import subprocess
 import sys
@@ -121,6 +122,19 @@ def run_device_worker(payload: dict[str, Any]) -> dict[str, Any]:
             "ok": True,
             **runtime_set_power(devices, turn_on=turn_on),
         }
+    if action == "device_target_command":
+        devices = _load_devices(payload.get("devices"))
+        params = payload.get("params") or {}
+        if not isinstance(params, dict):
+            params = {}
+        return {
+            "ok": True,
+            **runtime_set_light_command(
+                devices,
+                command=str(payload.get("command") or ""),
+                params=params,
+            ),
+        }
     if action in {"device_command", "kasa_command"}:
         return runtime_device_command(
             adapter_name=str(payload.get("adapter") or ("kasa" if action == "kasa_command" else "")).strip(),
@@ -196,6 +210,50 @@ def runtime_set_power(
             continue
         outcome = _set_light_power(device, turn_on=turn_on)
         snapshot["control"] = outcome["status"]
+        snapshot["confirmed"] = bool(outcome.get("confirmed"))
+        if isinstance(outcome.get("verified_state"), dict):
+            snapshot["verified_state"] = dict(outcome["verified_state"])
+        if outcome["status"] == "changed":
+            changed.append(snapshot["name"])
+        elif outcome["status"] == "needs_setup":
+            needs_setup.append(snapshot["name"])
+        else:
+            failed.append(outcome["message"] or snapshot["name"])
+        details.append(snapshot)
+
+    return {
+        "devices": details,
+        "changed": changed,
+        "needs_setup": needs_setup,
+        "failed": failed,
+        "unsupported": unsupported,
+    }
+
+
+def runtime_set_light_command(
+    devices: list[ConnectedDevice],
+    *,
+    command: str,
+    params: dict[str, Any],
+) -> dict[str, Any]:
+    changed: list[str] = []
+    needs_setup: list[str] = []
+    unsupported: list[str] = []
+    failed: list[str] = []
+    details: list[dict[str, Any]] = []
+
+    for device in devices:
+        snapshot = _device_snapshot(device)
+        if not _looks_like_light(device):
+            unsupported.append(snapshot["name"])
+            snapshot["control"] = "unsupported"
+            details.append(snapshot)
+            continue
+        outcome = _run_light_command(device, command=command, params=params)
+        snapshot["control"] = outcome["status"]
+        snapshot["confirmed"] = bool(outcome.get("confirmed"))
+        if isinstance(outcome.get("verified_state"), dict):
+            snapshot["verified_state"] = dict(outcome["verified_state"])
         if outcome["status"] == "changed":
             changed.append(snapshot["name"])
         elif outcome["status"] == "needs_setup":
@@ -328,7 +386,20 @@ def _looks_like_light(device: ConnectedDevice) -> bool:
     return any(token in text for token in ("light", "lamp", "bulb", "tuya", "feit"))
 
 
-def _set_light_power(device: ConnectedDevice, *, turn_on: bool) -> dict[str, str]:
+def _set_light_power(device: ConnectedDevice, *, turn_on: bool) -> dict[str, Any]:
+    return _run_light_command(
+        device,
+        command="turn_on" if turn_on else "turn_off",
+        params={},
+    )
+
+
+def _run_light_command(
+    device: ConnectedDevice,
+    *,
+    command: str,
+    params: dict[str, Any],
+) -> dict[str, Any]:
     adapter_name = _resolve_adapter_name(device)
     if not adapter_name:
         return {
@@ -342,8 +413,8 @@ def _set_light_power(device: ConnectedDevice, *, turn_on: bool) -> dict[str, str
             result = runtime_device_command(
                 adapter_name=adapter_name,
                 device_ref=device_ref,
-                command="turn_on" if turn_on else "turn_off",
-                params={},
+                command=command,
+                params=params,
             ).get("result") or {}
         except Exception as exc:  # noqa: BLE001
             return {
@@ -351,7 +422,17 @@ def _set_light_power(device: ConnectedDevice, *, turn_on: bool) -> dict[str, str
                 "message": f"{_device_name(device)}: {exc}",
             }
         if bool(result.get("ok")):
-            return {"status": "changed", "message": _device_name(device)}
+            verified_state = _verified_light_state(
+                command=command,
+                params=params,
+                state_after=result.get("state_after"),
+            )
+            return {
+                "status": "changed",
+                "message": _device_name(device),
+                "confirmed": verified_state is not None,
+                "verified_state": verified_state,
+            }
 
         error = str(result.get("error") or "").strip()
         if _is_setup_error(result):
@@ -368,6 +449,42 @@ def _set_light_power(device: ConnectedDevice, *, turn_on: bool) -> dict[str, str
         "status": "needs_setup",
         "message": setup_error,
     }
+
+
+def _verified_light_state(
+    *,
+    command: str,
+    params: dict[str, Any],
+    state_after: Any,
+) -> dict[str, Any] | None:
+    if not isinstance(state_after, dict) or not state_after:
+        return None
+    if command == "turn_on" and state_after.get("is_on") is True:
+        return dict(state_after)
+    if command == "turn_off" and state_after.get("is_on") is False:
+        return dict(state_after)
+    if command == "set_brightness":
+        try:
+            if int(state_after.get("brightness")) == int(params.get("brightness")):
+                return dict(state_after)
+        except (TypeError, ValueError):
+            return None
+    if command == "set_color_temp":
+        expected = str(params.get("preset") or "").strip().lower()
+        actual = str(state_after.get("color_temp_preset") or "").strip().lower()
+        if expected and actual == expected:
+            return dict(state_after)
+    if command == "set_color_rgb":
+        actual = state_after.get("color_rgb")
+        if isinstance(actual, dict):
+            try:
+                expected_rgb = tuple(int(params.get(channel)) for channel in ("r", "g", "b"))
+                actual_rgb = tuple(int(actual.get(channel)) for channel in ("r", "g", "b"))
+            except (TypeError, ValueError):
+                return None
+            if actual_rgb == expected_rgb:
+                return dict(state_after)
+    return None
 
 
 def _device_name(device: ConnectedDevice) -> str:
@@ -410,21 +527,30 @@ def _device_ref_candidates(device: ConnectedDevice) -> list[str]:
 def _resolve_adapter_name(device: ConnectedDevice) -> str | None:
     metadata = device.metadata_json if isinstance(device.metadata_json, dict) else {}
     configured_device = _resolve_configured_device(device)
+    tuya_ready = False
     if configured_device is not None:
         platform = normalize_platform_name(configured_device)
-        if platform in {"tuya", "feit", "feit electric"}:
+        tuya_ready = bool(
+            str(configured_device.get("device_id") or "").strip()
+            and str(configured_device.get("local_key") or "").strip()
+        )
+        if platform in {"tuya", "feit", "feit electric"} and tuya_ready:
             return "tuya"
         if platform == "kasa":
             return "kasa"
-        if str(configured_device.get("device_id") or "").strip() and str(configured_device.get("local_key") or "").strip():
+        if tuya_ready:
             return "tuya"
 
     adapter_name = _normalize_text(metadata.get("adapter"))
     if adapter_name:
+        if adapter_name in {"tuya", "feit", "feit electric"} and not tuya_ready:
+            return None
         return adapter_name
 
     controller = _normalize_text(metadata.get("controller"))
     if controller in {"tuya", "kasa"}:
+        if controller == "tuya" and not tuya_ready:
+            return None
         return controller
 
     platform_text = " ".join(
@@ -437,8 +563,6 @@ def _resolve_adapter_name(device: ConnectedDevice) -> str | None:
         )
         if value
     )
-    if any(token in platform_text for token in ("tuya", "feit")):
-        return "tuya"
     if "kasa" in platform_text:
         return "kasa"
     return None
@@ -446,8 +570,11 @@ def _resolve_adapter_name(device: ConnectedDevice) -> str | None:
 
 def _resolve_configured_device(device: ConnectedDevice) -> dict[str, Any] | None:
     metadata = device.metadata_json if isinstance(device.metadata_json, dict) else {}
+    explicit_config = str(os.environ.get("GISMO_DEVICES_CONFIG") or "").strip()
     try:
-        _, configured = load_configured_devices()
+        _, configured = load_configured_devices(
+            config_path=explicit_config or None,
+        )
     except RuntimeError:
         return None
     return find_configured_device(

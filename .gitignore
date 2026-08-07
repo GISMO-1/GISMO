@@ -14,6 +14,7 @@ ENV/
 .env.*
 .pytest_cache/
 .mypy_cache/
+.gismo/
 .coverage
 .coverage.*
 htmlcov/

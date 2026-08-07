@@ -1,6 +1,6 @@
 # GISMO Status (source of truth)
 
-Last updated: 2026-03-23
+Last updated: 2026-03-24
 
 ## Completed Phases
 
@@ -47,6 +47,13 @@ Last updated: 2026-03-23
 
 ### Concrete Milestone (2026-03-23)
 - First successful local physical device control via Tuya adapter: a real Feit Electric / Tuya smart bulb was controlled over the local LAN with live `get_state`, `turn_off`, and `turn_on` smoke tests.
+- Basic natural-language light control is now wired through the normal operator/chat path for configured lights, covering power, brightness percentages, white-temperature presets, basic named colors, and simple combinations.
+- The web dashboard now separates this system, saved lights from `.gismo/devices.json`, and discovered connected systems instead of treating everything as one discovery-only device list.
+
+### Concrete Milestone (2026-03-24)
+- Saved actuators are now a first-class dashboard surface under a dedicated capability-driven `Controls` tab instead of only a sidebar/modal path.
+- Dashboard light controls now enqueue structured saved-device actions with `device_ref`, action, and params through the normal queue/worker/device-control path instead of regenerating English command text.
+- Chat and GUI light control now converge on the same saved-device model: chat device plans carry a structured operator plan in queue metadata and canonicalize matched saved lights onto their configured `device_ref`.
 
 ## Current Focus: Phase 6 -- Operator Readiness Surfaces
 
@@ -60,8 +67,8 @@ Last updated: 2026-03-23
 - `get_status` API returns `offline` when no daemon is running (was incorrectly `ready`)
 
 ### Open
-- `starting` state can persist indefinitely if daemon crashed after initial heartbeat (readiness.py line 276-278)
-- Model status defaults to `unknown` which allows `ready` state even when model is unreachable
+- Required model failures block surface readiness; optional model failures degrade status without blocking the surface.
+- Cached model discovery can temporarily report `unknown` while availability is being checked.
 
 ## Test Status (2026-03-22, full suite: 451 passed, 1 skipped, 0 failed)
 
@@ -79,27 +86,48 @@ Test fixes applied:
 Proven live:
 
 - Direct Tuya adapter/runtime control of a real Feit Electric / Tuya bulb
-- Live smoke verified for `get_state`, `turn_off`, and `turn_on`
+- Live smoke verified for `get_state`, `turn_off`, and `turn_on` on one real bulb
 
 Proven in targeted tests and mocked integration:
 
 - Tuya discovery merge behavior
 - Brightness, color temperature, and RGB command handling
 - Shared `device_control` / runtime / registry routing
+- Normal operator/chat light routing for configured lights: power, brightness percentages, white temperature, basic colors, and simple combinations
+- Dashboard saved-light inventory and control enqueueing for configured lights, even when the bulb is not present in the older connected-systems table
+- Dashboard `Controls` tab and structured saved-control queue enqueueing
+- Saved-light current known state summaries and pending/executing/succeeded/failed command status in the dashboard API model
 - Policy gating, security events, receipts, and `device_adapter` trust-zone execution
 - Legacy `device_id` ingress compatibility with internal `device_ref` normalization
 
 Not yet re-verified live in this milestone:
 
-- Brightness, color temperature, and RGB on the physical bulb
-- Full saved-device orchestration smoke on the physical bulb beyond the direct adapter/runtime validation
+- Brightness, color temperature, and RGB on the physical bulb, including through the direct adapter/runtime path
+- Full saved-device operator/chat orchestration smoke on the physical bulb
 - Full chat/web "say it and it acts" device smoke on the physical bulb
+- Full live verification of the `Controls` light actions on the physical bulb
+- Multi-device scenes, groups, and broader home-automation behavior
 
 Targeted validation rerun for this pass:
 
-- `tests.test_device_adapters`: 39 passed, 0 failed
-- `tests.test_device_tool` + `tests.test_network_policy` + device-specific `tests.test_web_api` coverage: 11 passed, 0 failed
-- Targeted total: 50 passed, 0 failed
+- `tests.test_operator_shell` + `tests.test_device_tool` + `tests.test_device_adapters`: 61 passed, 0 failed
+- `tests.test_web_api.TestChatMessage`: 19 passed, 0 failed
+- Targeted total: 80 passed, 0 failed
+
+Targeted dashboard/device validation for this pass:
+
+- `tests.test_device_tool.DeviceToolTest`: 6 passed, 0 failed
+- `tests.test_web_api.TestChatMessage` + `tests.test_web_api.TestDevicesAndSettings`: 27 passed, 0 failed
+- Three targeted `tests.test_web_server.TestWebServerEndpoints` dashboard/device endpoint checks: 3 passed, 0 failed
+- Targeted total for this dashboard pass: 36 passed, 0 failed
+
+Targeted routing/dashboard unification validation for this pass:
+
+- `tests.test_device_tool.DeviceToolTest`: 6 passed, 0 failed
+- Targeted light-routing `tests.test_web_api.TestChatMessage`: 7 passed, 0 failed
+- Targeted saved-light API `tests.test_web_api.TestDevicesAndSettings`: 4 passed, 0 failed
+- Targeted dashboard surface and actuator endpoint checks in `tests.test_web_server.TestWebServerEndpoints`: 3 passed, 0 failed
+- Targeted total for this pass: 20 passed, 0 failed
 
 Known note:
 
@@ -108,6 +136,7 @@ Known note:
 ## Next Highest-Value Work
 
 - Re-run the real bulb through the normal saved-device orchestration path, not just the direct adapter/runtime smoke.
-- Live-test brightness, color temperature, and RGB on the real bulb.
+- Live-test brightness, color temperature, and RGB through the direct adapter/runtime path on the real bulb.
+- Then live-test operator/chat/web and the `Controls` light actions end to end on the physical bulb, including queue-state feedback, current-state refresh, and latency.
 - Add a first-party way to create or edit `.gismo/devices.json` without manual file edits.
-- Tighten the normal operator/chat device UX so the real adapter capability is easier to use safely.
+- Extend the light-routing layer from single configured bulbs to richer multi-device and scene commands without bypassing the existing execution model.

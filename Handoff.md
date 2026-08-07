@@ -195,11 +195,20 @@ What just became real:
 - The known-good path for that bulb is `.gismo/devices.json` -> `TuyaAdapter` / device runtime -> tinytuya local LAN control.
 - Shared routing now uses `device_ref` as the lookup token; resolved vendor `device_id` remains the protocol identity and IP stays a locator/fallback.
 - Kasa remains in the repo as a secondary compatibility path, not the primary live device story.
+- Basic natural-language light control now maps through the normal operator/chat path for configured lights without bypassing `device_control`, the sandboxed device runtime, policy gates, security events, or receipts.
+- The dashboard/device model now separates:
+  - this system / host presence
+  - saved lights loaded from `.gismo/devices.json`
+  - discovered connected systems saved from the older network-discovery path
+- Saved-light buttons in the dashboard do not talk to the adapter directly; they enqueue structured `device_control` plans with canonical `device_ref` targeting and still execute through the same queue, worker, policy, runtime, receipts, and adapter path.
+- `DeviceControlTool` now resolves configured saved lights even when the target bulb is not present in the older connected-systems table.
+- Chat device requests now carry a structured operator plan in queue metadata and rewrite matched saved-light targets onto the configured `device_ref` before the daemon executes them.
 
 What is wired versus what is live-verified:
-- Wired now: `device_control`, sandboxed device runtime, adapter registry, Tuya adapter, Kasa compatibility, web chat/device parsing for scan/list/check/simple on-off requests.
+- Wired now: `device_control`, sandboxed device runtime, adapter registry, Tuya adapter, Kasa compatibility, and deterministic operator/chat parsing for configured-light power, brightness percentages, white temperature presets, basic named colors, and simple combined commands.
+- Wired now on the dashboard: saved-control inventory endpoint, dedicated `Controls` tab, relabeled connected-systems inventory, capability-driven device controls, and separate Web UI / API / worker / local-system status labels.
 - Live-verified now: direct Tuya adapter/runtime smoke for `get_state`, `turn_off`, and `turn_on` on one real Feit/Tuya bulb.
-- Not yet broadly live-verified: brightness, color temperature, and RGB on the physical bulb through the broader orchestration path; polished end-to-end chat/device UX on the physical bulb.
+- Not yet live-verified: brightness, color temperature, or RGB on the physical bulb; the normal operator/chat/web path on the physical bulb; the `Controls` light controls on the physical bulb; richer multi-light, scene, and home-automation flows.
 
 Phase 6 -- Operator Readiness Surfaces (in progress):
 - readiness.py: unified runtime status builder with state machine
@@ -223,12 +232,13 @@ Phase 4 highlights (completed earlier):
 - Model policy with fallback chains
 - Onboarding system, plugin runtime
 
-Device-path validation (2026-03-23): 50 targeted tests passed, 0 failed
+Device-path validation (2026-03-24): targeted light-control dashboard/routing pass verified with 20 focused tests passed, 0 failed
 
 Immediate next device work:
 - Re-run the real bulb through the normal saved-device orchestration path, not just the direct adapter/runtime smoke.
-- Live-test brightness, color temperature, and RGB on the physical bulb.
-- Tighten the operator/chat path so the real adapter capability is easier to use without manual setup steps.
+- Live-test brightness, color temperature, and RGB through the direct adapter/runtime path on the physical bulb.
+- Then live-test the normal operator/chat/web and `Controls` light paths on the physical bulb, including queue-state feedback, current-state summaries, and receipts.
+- Extend the operator/chat path from one configured light to richer multi-light and scene commands without bypassing the existing execution model.
 - Add a first-party way to create or edit `.gismo/devices.json`.
 
 -------------------------------------------------------------------------------
@@ -285,7 +295,8 @@ Phase 6 completion:
 
 After Phase 6:
 - Add a first-party way to edit `.gismo/devices.json` from GISMO instead of manual file edits.
-- Teach planner/device routing to express brightness, color temperature, and RGB actions in natural language.
+- Add an explicit live-refresh path for saved-control state when the operator opens or refreshes the Controls tab; until then only verified execution state is shown as known.
+- Reconcile planner/device routing with the new deterministic light-command path so planner output stays aligned with the operator/chat surface.
 - Improve known-device reconciliation if Tuya IPs change and only the cloud-derived vendor device ID is stable.
 - Harden Windows handle hygiene at higher concurrency (agent loops + web server + daemon).
 - Consider notification hooks (e.g. desktop toast on plan ready for approval).

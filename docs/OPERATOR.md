@@ -24,8 +24,10 @@ CURRENT OPERATOR REALITY
 - Memory, plan approval, receipts, status surfaces, and exports are operational now.
 - Device adapters are part of the real system now, not just a placeholder interface.
 - The first live physical device milestone is a Feit Electric / Tuya smart bulb controlled locally over LAN.
-- The live bulb smoke verified so far is `get_state`, `turn_off`, and `turn_on` through the Tuya adapter/runtime path.
-- Broader device UX is still being tightened. Do not assume every natural-language light command has been live-verified end to end yet.
+- The live bulb smoke verified so far through the Tuya adapter/runtime path is `get_state`, `turn_off`, and `turn_on`.
+- Basic natural-language light control is now wired through the normal operator/chat path for configured lights.
+- The web dashboard now has a dedicated `Controls` tab for saved actuators. `Connected Systems` is separate and is not the source of truth for saved control identity.
+- The operator/chat path and the `Controls` tab now target the same saved-device `device_ref` model, but neither path has been physically verified end to end on the real bulb. Brightness, color temperature, and RGB also remain unverified on physical hardware.
 
 -------------------------------------------------------------------------------
 
@@ -112,13 +114,18 @@ Operator-facing device actions today:
   gismo run "device: list"
   gismo run "device: check front door camera"
   gismo run "device: turn off dad's room light"
+  gismo run "device: set dad's room light to cool white"
+  gismo run "device: set dad's room light to blue at 50 percent"
 
 What is live today:
 - A real Feit Electric / Tuya bulb has been controlled locally with GISMO's Tuya adapter.
 - The verified live smoke so far is `get_state`, `turn_off`, and `turn_on`.
 
 What is wired and tested:
-- Saved-device power routing goes through the generic `device_control` tool, sandboxed device runtime, and adapter registry.
+- Saved-device light routing goes through the generic `device_control` tool, sandboxed device runtime, and adapter registry.
+- Deterministic operator/chat routing now handles configured-light power, white temperature, basic named colors, brightness percentages, and simple combinations.
+- The `Controls` tab exposes only the actions each saved actuator advertises; light-capable devices can include on/off, brightness, white temperature, color controls, quick presets, and command-state feedback.
+- Dashboard button clicks enqueue structured saved-light actions through the normal queue/worker path. They do not bypass policy, receipts, or the device adapter boundary.
 
 What local Tuya control requires:
 - A local `.gismo/devices.json` file with device credentials
@@ -133,7 +140,10 @@ Practical setup boundary:
 Current adapter status:
 - Tuya / Feit is the primary real device path.
 - Kasa is still present as a secondary compatibility path.
-- Richer Tuya commands such as brightness, color temperature, and RGB exist in the adapter, but they are not yet broadly proven through the normal operator/chat flow.
+- Brightness, color temperature, and RGB are implemented in the adapter and now mapped onto basic configured-light operator/chat commands.
+- Those richer commands, the operator/chat/web path, and the `Controls` light controls have not yet been physically verified on the real bulb.
+- Saved lights and discovered connected systems are separate concepts in the UI. A saved light does not need to appear in `Connected Systems` to be controllable.
+- Multi-light scenes, groups, and broader home-automation flows are still not finished.
 
 -------------------------------------------------------------------------------
 
@@ -538,10 +548,26 @@ LOCAL WEB DASHBOARD
 - Daemon sidebar: live status, pause/resume controls
 - No external HTTP libraries; stdlib only
 
+Physical-control security boundary:
+- Read-only dashboard/status endpoints remain available locally without actuator authority.
+- `POST /api/actuators/control` requires the random local control token stored beside the active database under `.gismo/`; the token is not stored in tracked source.
+- Browser requests use an HttpOnly authentication cookie plus a separate same-origin CSRF proof. Non-browser callers may supply the control token explicitly in `X-GISMO-Control-Token`.
+- The control endpoint accepts JSON only, enforces bounded request shape and size, and rejects unsupported actions before enqueueing work.
+- A non-loopback client or non-loopback server binding is denied unless the local `gismo:settings/web.remote_control_enabled` preference is explicitly set to `true`.
+- Remote clients are never issued the browser control cookies; remote mode requires the explicitly provisioned `X-GISMO-Control-Token` header.
+- Enabling that preference does not add TLS, user accounts, or protection from a compromised local account or LAN observer. Remote exposure therefore requires a separately secured transport and host boundary; loopback remains the recommended mode.
+- Authentication authorizes enqueueing only. Queue, policy, exact capability binding, execution-boundary, receipt, and audit checks still apply before physical execution.
+
 Command Center behavior:
 - GISMO auto-starts the background daemon when the desktop app or web server launches, if it is not already healthy.
 - Duplicate launches are avoided; startup results are logged to the event stream.
 - If auto-start fails, GISMO does not pretend to be ready. The surface stays in a truthful degraded or offline state.
+- The left-side device column is split into:
+  - This computer
+  - Saved controls from `.gismo/devices.json`
+  - Connected systems saved from network discovery
+- Saved controls are first-class targets now. A configured light does not need to appear in the discovered connected-systems list before GISMO can try to control it.
+- Saved-control cards render only the actions advertised for each device; light-only brightness, white-temperature, and RGB controls are omitted for other device types.
 - Boot readiness is staged:
   - State
   - Worker
@@ -570,6 +596,13 @@ Readiness is based on real backend state:
 - onboarding completion
 - model availability
 - recent startup failures
+
+The dashboard now labels these states separately:
+- Web UI
+- API
+- Worker
+- Local system
+- Saved-control reachability on each configured device card
 
 -------------------------------------------------------------------------------
 
@@ -629,8 +662,10 @@ Chat result language:
 - `unverified source`: the request depended on content that is not trusted yet.
 
 Device actions in chat:
-- Device requests such as scan, status checks, and simple power actions can be turned into queued device work through the same execution path as other operational requests.
-- The live physical proof for the first Tuya bulb milestone was adapter/runtime control, not a polished full chat smoke.
+- Device requests such as scan, status checks, power, white temperature, basic colors, brightness percentages, and simple combined light commands can be turned into queued device work through the same execution path as other operational requests.
+- The web dashboard saved-light buttons use that same queued execution path. They bypass natural-language parsing, not policy checks, receipts, or the sandboxed device runtime.
+- Saved controls come from `.gismo/devices.json`; connected systems come from network discovery. Those are different inventories now.
+- Live physical proof for the first Tuya bulb milestone is limited to direct adapter/runtime `get_state`, `turn_off`, and `turn_on`. Brightness, color temperature, RGB, operator/chat/web, and `Controls` light paths are wired or tested but not yet physically verified end to end.
 - Device cards show only capabilities GISMO can actually resolve from current metadata, such as `status`, `on/off`, `stream`, and `snapshot`.
 - If capability detection is partial, the card reflects only what is currently known.
 

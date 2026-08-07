@@ -52,12 +52,13 @@ Covered in tests and mocked integration:
 - Tuya discovery merge behavior
 - Brightness, color temperature, and RGB command handling
 - Saved-device power routing through the shared runtime/tool path
+- Basic operator/chat light routing for configured lights: power, brightness percentages, white temperature, basic colors, and simple combinations
 - Policy gating, security-event emission, and `device_adapter` trust-zone execution
 
 Not yet broadly re-verified live in this milestone:
 
-- Brightness, color temperature, and RGB on the physical bulb through the broader operator flow
-- A polished end-to-end chat/UI smoke for the real bulb
+- Brightness, color temperature, and RGB on the physical bulb, including through the direct adapter/runtime path
+- The operator/chat/web and `Controls` light paths on the physical bulb
 
 ## Device Config
 
@@ -135,9 +136,9 @@ For GISMO, copy the needed values into `.gismo/devices.json` using the format ab
 
 ## Command Routing
 
-There are now two important device-control paths:
+There are now three important device-control paths:
 
-### 1. Saved-device power control path
+### 1. Saved-device control path
 
 Example: "turn off Dad's room light"
 
@@ -147,7 +148,7 @@ Example: "turn off Dad's room light"
 4. Private-network policy checks run before any LAN access
 5. `execute_device_runtime_action()` starts the sandboxed `device` worker in the `device_adapter` trust zone
 6. `runtime_set_power()` resolves the adapter from saved device metadata and `.gismo/devices.json`
-7. For a saved device, GISMO tries a stable `device_ref` first: configured `device_id`, then `gismo_device_id`, then the saved GISMO row ID, then IP only as a last-resort locator
+7. Conversational and dashboard targeting resolves an exact stable GISMO `device_ref` first, or an exact unique alias. Vendor `device_id` and IP are not conversational identities; after canonical resolution they remain protocol identity and network locator candidates inside the adapter/runtime layer.
 8. `runtime_device_command()` calls the selected adapter through `AdapterRegistry`
 9. The adapter talks to the device and returns a `CommandResult`
 10. GISMO records security events and issues the normal tool receipt
@@ -168,6 +169,18 @@ Example payload:
 
 `kasa_command` is still accepted as a compatibility alias, but the shared path is now `device_command`. Legacy ingress payloads that still send `device_id` are normalized to `device_ref` internally for compatibility.
 
+### 3. Operator/chat light routing
+
+Configured-light requests such as:
+
+- `turn Dad's light on`
+- `set Dad's light to cool white`
+- `make Dad's light blue`
+- `dim Dad's light to 20 percent`
+- `set Dad's light to blue at 50 percent`
+
+are now parsed into deterministic `device_control` steps that still flow through the same saved-device runtime path above. Combined requests are expanded in safe order: `turn_on` first when needed, then white/color mode, then brightness.
+
 ## Policy and Trust Guarantees
 
 Device commands still keep the existing guardrails:
@@ -183,5 +196,5 @@ Device commands still keep the existing guardrails:
 
 - No first-party UI yet for editing `.gismo/devices.json`
 - Discovery remains best-effort and should not be treated as the source of truth for Tuya credentials
-- Natural-language color, brightness, and color-temperature planning is not yet mapped onto the richer Tuya commands
-- The live bulb milestone was adapter/runtime control first; broader operator UX still needs more physical validation
+- Physical verification remains limited to direct adapter/runtime state and power smoke. Brightness, color temperature, RGB, operator/chat/web, and `Controls` light paths still need physical verification.
+- Multi-device scenes, groups, and broader home-automation behavior are still out of scope for this slice

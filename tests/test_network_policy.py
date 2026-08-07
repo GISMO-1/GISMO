@@ -90,8 +90,13 @@ class NetworkPolicyTest(unittest.TestCase):
             )
 
             with mock.patch(
-                "gismo.web.api.scan_devices",
-                return_value=[{"ip": "192.168.1.9", "hostname": "desk-lamp", "device_type": "light"}],
+                "gismo.core.toolpacks.device_tool.execute_device_runtime_action",
+                return_value={
+                    "devices": [
+                        {"ip": "192.168.1.9", "hostname": "desk-lamp", "device_type": "light"},
+                    ],
+                    "execution": {"mode": "sandboxed", "zone": "device_adapter"},
+                },
             ):
                 result = orchestrator.run_tool(
                     run.id,
